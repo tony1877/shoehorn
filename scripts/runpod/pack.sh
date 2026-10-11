@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # RunPod job: build shoehorn on Linux, pack Qwen3.8-27B-Uncensored with an iq4_xs base and each residual in $RESIDUALS
 # (default q3_K as orca27b-r3, like E:/shoehorn/orca27b-r3, and q4_K as orca27b-r4; imatrix-orca27b), and upload the
-# packs, the log and checksums to a Hugging Face repo. The base is the same for every residual: uploaded once.
+# packs, the log and checksums to a Hugging Face repo. Each base carries its pack id (the residual must match it), so
+# every pack uploads its own base.
 #
 # Pod: image nvidia/cuda:12.8.1-devel-ubuntu24.04, >= 250 GB container disk, env HF_TOKEN (write access to $OUT_REPO).
-# Start command: bash -c "curl -fsSL https://raw.githubusercontent.com/tony1877/shoehorn/<branch>/scripts/runpod/pack.sh | bash"
+# Start command (the image has no curl): bash -c "apt-get update && apt-get install -y curl && curl -fsSL https://raw.githubusercontent.com/tony1877/shoehorn/<branch>/scripts/runpod/pack.sh | bash"
 # The container stays up when done (RunPod restarts a container that exits); the caller deletes the pod.
 set -uo pipefail
 
@@ -43,21 +44,14 @@ hf download "$SRC_REPO" --local-dir $W/src --quiet || fail "download $SRC_REPO"
 hf download "$TEMPLATE_REPO" "$TEMPLATE_FILE" --local-dir $W/tmpl --quiet || fail "download template"
 hf download "$OUT_REPO" imatrix-orca27b.gguf --local-dir $W/imat --quiet || fail "download imatrix"
 
-base_sha=""
 for res in $RESIDUALS; do
     NAME=orca27b-r${res:1:1}
     status "packing $NAME (residual $res)"
     "$BIN" pack --src $W/src --template "$W/tmpl/$TEMPLATE_FILE" --out "$W/out/$NAME" --base iq4_xs --res "$res"         --imatrix $W/imat/imatrix-orca27b.gguf --threads "$(nproc)" || fail "pack $NAME"
     (cd $W/out && sha256sum "$NAME".base.gguf "$NAME".res.gguf | tee "$NAME".linux.sha256)
-    sha=$(cut -d' ' -f1 < "$W/out/$NAME.linux.sha256" | head -1)
     status "uploading $NAME"
-    if [ "$sha" = "$base_sha" ]; then  # same base as the previous pack: upload only the residual
-        hf upload "$OUT_REPO" $W/out . --include "$NAME.res.gguf" "$NAME.linux.sha256" || fail "upload $NAME"
-    else
-        hf upload "$OUT_REPO" $W/out . --include "$NAME.*" || fail "upload $NAME"
-        base_sha=$sha
-    fi
-    rm -f "$W/out/$NAME".res.gguf  # disk: keep one base, drop uploaded residuals
+    hf upload "$OUT_REPO" $W/out . --include "$NAME.*" || fail "upload $NAME"
+    rm -f "$W/out/$NAME".base.gguf "$W/out/$NAME".res.gguf  # disk
 done
 status "done"
 echo "== done $(date -u)"

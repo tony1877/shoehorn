@@ -118,6 +118,16 @@ compiler, and the CI workflow's first run on GitHub. The MSVC build still compil
 Gate: KLD ≤ 1e-5 against Windows on the same GPU architecture; greedy `gen` output identical; ≤ 1e-3 across
 architectures (different kernels).
 
+Progress (2026-10-11): `pack` on Linux gives the Windows result. `scripts/runpod/pack.sh` built shoehorn on a RunPod
+RTX PRO 6000 (MIG 2g.48gb, CUDA 12.8, GCC 13) and packed orcarouter/Qwen3.8-27B-Uncensored with imatrix-orca27b:
+all 866 tensors of the r3 base are byte-identical to E:/shoehorn/orca27b-r3.base.gguf (`tools/gguf_diff.py`); only
+`shoehorn.pack.id` (random) and `shoehorn.pack.source` (folder name) differ. The q3_K (r3) and q4_K (r4, base+residual
+rel. RMSE 0.0051 vs 0.0105) packs are in the private HF repo Tony1877/Qwen3.8-27B-Uncensored-shoehorn, ready for the
+`gen` / `ppl` checks. Note: `pack` copies the template's metadata, so a template that is itself an older pack brings
+stale `eightfer.pack.*` keys (the Windows r3 says `residual_type: q4_K` there); stripping them in `pack` is pending.
+RunPod notes: the plain `nvidia/cuda` image has no curl (start with `apt-get install curl`); the REST API does not
+accept MIG GPU types, GraphQL `podFindAndDeployOnDemand` does.
+
 ### Phase 2: server and dashboard (4-6 days)
 
 1. `sysinfo.cpp` POSIX implementations:
