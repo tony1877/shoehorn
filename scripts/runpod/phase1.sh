@@ -34,6 +34,14 @@ fail() {  # upload whatever results exist, so the failure can be read without SS
 
 echo "== $(date -u) $(nproc) cpus, $(free -g | awk '/Mem/{print $2}') GB RAM"; nvidia-smi -L 2>/dev/null || rocm-smi --showproductname 2>/dev/null | head -8 || true
 export DEBIAN_FRONTEND=noninteractive
+# nvidia/cuda images switch on CUDA's forward-compatibility libraries when the host driver is older than the image's
+# CUDA; GeForce cards reject them ("failed to initialize CUDA: unknown error"). CUDA 12.x runs on older 12.x drivers
+# without them for prebuilt kernels (minor version compatibility), so take them out.
+if [ -d /usr/local/cuda/compat ]; then
+    rm -f /etc/ld.so.conf.d/*cuda-compat* 2>/dev/null; ldconfig 2>/dev/null
+    export LD_LIBRARY_PATH=$(echo "${LD_LIBRARY_PATH:-}" | tr ':' '
+' | grep -v compat | paste -sd:)
+fi
 apt-get update -qq && apt-get install -y -qq git cmake ninja-build g++ python3-venv curl >/dev/null || fail apt
 [ "$BACKEND" = hip ] && { apt-get install -y -qq hipblas-dev rocblas-dev >/dev/null || fail "apt rocm libs"; }
 python3 -m venv /opt/hf && /opt/hf/bin/pip install -q "huggingface_hub[hf_xet]" || fail pip
