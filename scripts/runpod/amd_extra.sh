@@ -15,8 +15,12 @@ up() { echo "$*" > $W/out/STATUS; hf upload "$REPO" $W/out/STATUS linuxtest/STAT
 up "extra: building"
 cd $W/shoehorn && git pull -q --ff-only && bash scripts/build.sh --backend hip > /dev/null 2>&1 || { up "failed: build"; sleep infinity; }
 BIN=$W/shoehorn/build/bin/shoehorn
-echo "== sysfs"; ls /sys/class/drm/ 2>&1 | head; for c in /sys/class/drm/card*/device; do echo "$c $(cat $c/vendor 2>/dev/null) $(cat $c/mem_info_vram_total 2>/dev/null)"; done
+echo "== render nodes this container can open"; ls -la /dev/dri/ 2>&1
+for r in /dev/dri/renderD*; do n=$(basename $r); echo "$n -> $(readlink -f /sys/class/drm/$n/device)"; done
+echo "== AMD cards in sysfs"; for c in /sys/class/drm/card*/device; do [ "$(cat $c/vendor 2>/dev/null)" = 0x1002 ] && echo "$(readlink -f $c) used $(cat $c/mem_info_vram_used)"; done
 up "extra: bench"
+echo "== bench gpu (sensors line = the card shoehorn picked)"; "$BIN" bench --only gpu 2>&1 | grep -E "device 0|gpu-sensors"
+exit_after_sensors=${SENSORS_ONLY:-0}; [ "$exit_after_sensors" = 1 ] && { up "extra: done"; sleep infinity; }
 echo "== bench gpu + pcie"; "$BIN" bench --only gpu,pcie 2>&1 | grep -vE "^\s*$" | head -40
 up "extra: gen q8 KV"
 echo "== gen, q8_0 KV"
