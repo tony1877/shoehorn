@@ -43,7 +43,7 @@ if [ -d $W/shoehorn/.git ]; then  # a restarted container keeps its disk: update
 else
     git clone -q --depth 1 -b "$BRANCH" --recurse-submodules --shallow-submodules https://github.com/tony1877/shoehorn $W/shoehorn || fail clone
 fi
-cd $W/shoehorn && bash scripts/build.sh --backend cuda --arch native || fail build
+cd $W/shoehorn && bash scripts/build.sh --clean --backend cuda --arch native || fail build
 BIN=$W/shoehorn/build/bin/shoehorn
 
 status "downloading"
@@ -59,7 +59,7 @@ cat "ppl.$TAG.txt"; [ $rc = 0 ] || fail "ppl (exit $rc)"
 status "gen"
 "$BIN" gen $W/m/$PACK.base.gguf --res $W/m/$PACK.res.gguf --tokens $W/m/linuxtest/prompt.ids -n 128 --temp 0 --compare \
     > "gen.$TAG.txt" 2>&1; rc=$?
-cat "gen.$TAG.txt"; [ $rc = 0 ] || fail "gen (exit $rc)"
+cat "gen.$TAG.txt"; [ $rc = 0 ] || [ $rc = 3 ] || fail "gen (exit $rc)"  # 3: --compare found spec != plain (as on Windows)
 
 status "uploading"
 hf upload "$REPO" $W/out linuxtest --include "*.$TAG.*" || fail upload

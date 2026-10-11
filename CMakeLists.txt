@@ -23,6 +23,12 @@ endif()
 # ggml (tensor library, CPU + CUDA kernels), libllama (tokenizer, vocab only) and llama-common (Jinja chat templates,
 # reasoning / tool-call parsing for the server) from the pinned llama.cpp submodule. Static; none of llama.cpp's
 # tools, tests or examples; only targets we link get built.
+# GCC and Clang fuse a*b+c into one FMA by default, MSVC does not: results then differ from the Windows build in the
+# last bits, which compound over 64 layers. Off by default so Linux matches Windows (docs/LINUX-PLAN.md, Phase 1).
+option(SHOEHORN_FP_CONTRACT "let GCC/Clang fuse multiply-adds (faster CPU paths, results differ from Windows)" OFF)
+if (NOT MSVC AND NOT SHOEHORN_FP_CONTRACT)
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-ffp-contract=off>)
+endif()
 set(BUILD_SHARED_LIBS OFF)
 set(GGML_CUDA ${SHOEHORN_CUDA} CACHE BOOL "" FORCE)
 set(GGML_HIP ${SHOEHORN_HIP} CACHE BOOL "" FORCE)
