@@ -6,6 +6,10 @@ on:
   push:
   pull_request:
 
+concurrency:  # a newer push cancels the run of the previous one
+  group: linux-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   cpu:
     strategy:
