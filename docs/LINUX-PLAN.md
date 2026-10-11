@@ -136,7 +136,9 @@ The ≤ 1e-5 gate is not met, and is not reachable without matching compilers: p
 (embeddings, output, residual parts), and ggml selects its CPU kernels by compile-time macros that MSVC and GCC set
 differently. Thread count is not the cause (Windows at 8 vs 16 threads: KLD 0, 100% same top-1), nor FMA contraction
 (`-ffp-contract=off` left Linux's PPL unchanged). The cross-OS gate becomes the cross-architecture one, KLD ≤ 1e-3.
-RunPod notes: the plain `nvidia/cuda` image has no curl (start with `apt-get install curl`); the REST API does not
+RunPod notes: request `allowedCudaVersions` >= 12.8 for `nvidia/cuda:12.8` images: on hosts with an older driver the
+image loads its forward-compatibility libraries, which GeForce cards reject ("failed to initialize CUDA: unknown
+error", two RTX 4090 hosts). The plain `nvidia/cuda` image has no curl (start with `apt-get install curl`); the REST API does not
 accept MIG GPU types, GraphQL `podFindAndDeployOnDemand` does.
 
 ### Phase 2: server and dashboard (4-6 days)
@@ -218,7 +220,11 @@ A4500 / 4000 Ada): libraries resolve, it starts, `selftest --kernel` and `bench 
 | almalinux:10 | 2.39 | pass |
 | archlinux | 2.44 | pass |
 
-Open: the ROCm tarball, container images, `.deb` / `.rpm`.
+`scripts/package-distro.sh` turns the tarball into `shoehorn-cuda_0.1.0_amd64.deb` and `shoehorn-cuda-0.1.0-1.x86_64.rpm`
+(/opt/shoehorn, /usr/bin/shoehorn, systemd user units in /usr/lib/systemd/user); both install on ubuntu:24.04,
+debian:12, fedora:43 and almalinux:9. Without an NVIDIA driver the binary does not start at all (it links
+`libcuda.so.1` for ggml's VMM pool); `GGML_CUDA_NO_VMM` would let it start and fall back to the CPU, at some cost to
+the pool, so it is left as is for now. Open: the ROCm tarball, container images, the AUR.
 
 ### Phase 6: running it as a service, and docs (2-3 days)
 
