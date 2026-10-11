@@ -2083,6 +2083,8 @@ int serve(const std::vector<std::string> & args_in) {
             if (S->q35) {
                 mem["residual"]   = S->q35->residual_bytes();
                 mem["residual_gpu"] = S->q35->residual_gpu_bytes();
+                mem["base_type"]    = S->q35->pack_base_type();
+                mem["residual_type"] = S->q35->pack_residual_type();
                 mem["kv_ram"]     = S->q35->kv_committed_bytes();
                 mem["side_parked"] = S->q35->has_side() ? S->q35->side_n_past() : 0;
             }

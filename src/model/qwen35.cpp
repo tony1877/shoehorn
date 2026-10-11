@@ -2116,6 +2116,14 @@ bool Qwen35::hidden_rows(int n, float * out, std::string & err) const {
     return true;
 }
 
+std::string Qwen35::pack_type(bool residual) const {
+    std::map<int, size_t> count;
+    for (const auto & [b, r] : res_) count[(int) (residual ? r->type : b->type)]++;
+    if (count.empty()) return "";
+    const auto best = std::max_element(count.begin(), count.end(), [](const auto & x, const auto & y) { return x.second < y.second; });
+    return ggml_type_name((ggml_type) best->first);
+}
+
 bool Qwen35::feature_rows(int j, int n, float * out, std::string & err) const {
     if (j < 0 || j >= (int) feat_hid_.size()) {
         err = "feature_rows: no such feature layer (LoadOptions::feature_layers, needs mtp)";

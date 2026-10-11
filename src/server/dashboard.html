@@ -351,9 +351,9 @@ function renderMem() {
       <div class="legend">${segs.filter(x => x.b > 0).map(x => `<div><span><i class="b-${x.c}"></i>${x.l}</span><span class="mono">${gb(x.b)}</span></div>`).join("")}</div>${note ? `<div class="legend">${note}</div>` : ""}`;
   };
   const gpu = cell("Graphics card", m.vram_total, loaded
-    ? [{ c: "w", b: wG, l: "4-bit base weights" }, { c: "k", b: vOther, l: "context window, buffers" }]
+    ? [{ c: "w", b: wG, l: m.base_type ? `base weights (${m.base_type.toUpperCase()})` : "4-bit base weights" }, { c: "k", b: vOther, l: "context window, buffers" }]
     : [{ c: "o", b: vUsed, l: "desktop, other apps" }]);
-  const ram = cell("System memory", m.ram_total, [{ c: "w", b: wC, l: "residual weights" }, { c: "k", b: kv, l: "conversation memory" }, { c: "o", b: rOther, l: "other programs" }]);
+  const ram = cell("System memory", m.ram_total, [{ c: "w", b: wC, l: m.residual_type ? `residual weights (${m.residual_type.toUpperCase()})` : "residual weights" }, { c: "k", b: kv, l: "conversation memory" }, { c: "o", b: rOther, l: "other programs" }]);
   if ($("gpu").dataset.h !== gpu) { $("gpu").innerHTML = gpu; $("gpu").dataset.h = gpu; }
   if ($("ram").dataset.h !== ram) { $("ram").innerHTML = ram; $("ram").dataset.h = ram; }
   // PCIe: the residual crosses the link once per check, so traffic = residual size / check time

@@ -186,6 +186,10 @@ public:
     bool has_residual() const { return !res_.empty(); }
     uint64_t residual_bytes() const { return res_bytes_; }
     uint64_t residual_gpu_bytes() const { return res_gpu_bytes_; }  // part of residual_bytes() held in VRAM
+    // ggml type names of the big matrices that have a residual (the base side) and of their residuals, the most
+    // common one of each; "" when no residual is loaded
+    std::string pack_base_type() const { return pack_type(false); }
+    std::string pack_residual_type() const { return pack_type(true); }
 
     // Sequence slots: each slot is a sequence of its own (RAM KV region, a part of the VRAM ring and of the MTP ring,
     // recurrent state, page summaries, prompt-reuse checkpoint, KV bookkeeping), so several conversations keep their
@@ -392,6 +396,7 @@ private:
 
     // residual: base weight -> residual tensor (pinned host memory)
     std::unordered_map<const ggml_tensor *, ggml_tensor *> res_;
+    std::string pack_type(bool residual) const;
     std::unordered_map<const ggml_tensor *, std::vector<ggml_tensor *>> res_chunks_;  // big residuals in row pieces
     ggml_context *        rctx_ = nullptr;
     ggml_backend_buffer_t rbuf_ = nullptr;
