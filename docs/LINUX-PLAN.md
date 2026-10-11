@@ -136,6 +136,11 @@ The ≤ 1e-5 gate is not met, and is not reachable without matching compilers: p
 (embeddings, output, residual parts), and ggml selects its CPU kernels by compile-time macros that MSVC and GCC set
 differently. Thread count is not the cause (Windows at 8 vs 16 threads: KLD 0, 100% same top-1), nor FMA contraction
 (`-ffp-contract=off` left Linux's PPL unchanged). The cross-OS gate becomes the cross-architecture one, KLD ≤ 1e-3.
+RunPod's GeForce hosts (2026-10-11): a minimal CUDA program (`scripts/runpod/cuda_probe.sh`) gets `cuInit` = 999
+(unknown error) on an RTX 5080 and an RTX 4090 host (driver 580, open kernel module), with or without the compat
+libraries, while the device nodes (including nvidia-uvm) and a matching libcuda are present. The nodes are owned by
+nobody:nogroup and NVIDIA_VISIBLE_DEVICES=void: a user-namespaced container with the GPU passed in by hand, which is
+RunPod's setup, not shoehorn's. Use pro / data-center cards there (A4000, L4, PRO 6000, MI300X all worked).
 RunPod notes: request `allowedCudaVersions` >= 12.8 for `nvidia/cuda:12.8` images: on hosts with an older driver the
 image loads its forward-compatibility libraries, which GeForce cards reject ("failed to initialize CUDA: unknown
 error", two RTX 4090 hosts). The plain `nvidia/cuda` image has no curl (start with `apt-get install curl`); the REST API does not
@@ -251,9 +256,11 @@ A4500 / 4000 Ada): libraries resolve, it starts, `selftest --kernel` and `bench 
 
 `scripts/package-distro.sh` turns the tarball into `shoehorn-cuda_0.1.0_amd64.deb` and `shoehorn-cuda-0.1.0-1.x86_64.rpm`
 (/opt/shoehorn, /usr/bin/shoehorn, systemd user units in /usr/lib/systemd/user); both install on ubuntu:24.04,
-debian:12, fedora:43 and almalinux:9. Without an NVIDIA driver the binary does not start at all (it links
-`libcuda.so.1` for ggml's VMM pool); `GGML_CUDA_NO_VMM` would let it start and fall back to the CPU, at some cost to
-the pool, so it is left as is for now. Open: the ROCm tarball, container images, the AUR.
+debian:12, fedora:43 and almalinux:9. The CUDA binary links `libcuda.so.1` (ggml's VMM pool), so it cannot
+start without the NVIDIA driver; `GGML_CUDA_NO_VMM` removes that link but cost ~4% decode on the RTX 5080 (greedy
+19.80 -> 19.05, sampled 18.35 -> 17.65 tok/s). Instead the tarball carries a CPU build too: `bin/shoehorn` is a
+launcher that runs `libexec/shoehorn-cuda` when it loads and `libexec/shoehorn-cpu` (with a note) when the driver is
+missing; checked in a plain ubuntu container (CPU) and on the RTX 5080 (CUDA, full speed). Open: the ROCm tarball, container images, the AUR.
 
 ### Phase 6: running it as a service, and docs (2-3 days)
 
