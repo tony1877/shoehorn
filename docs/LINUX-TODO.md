@@ -16,7 +16,7 @@ estimates at today's prices (community cloud where it has stock). Full plan: [LI
 | 8 | Phase 3, AMD: HIP build + `ppl` / `gen` on an MI300X (gfx942), gate KLD ≤ 1e-3 vs NVIDIA; check flash attention with q8_0/q4_0 KV, graph capture, `hipHostMalloc`, PCIe rate | MI300X community pod, ~1.5 h | ~$0.75 (secure: ~$3.60) |
 | 9 | Phase 3: AMD sensors through `libamd_smi` (code), checked on the same MI300X pod | PC + step 8 pod | (in 8) |
 | 10 ✅ | Phase 5 (655 MB, glibc 2.34, runtime + cuBLAS + OpenMP bundled): portable CUDA tarball built in an AlmaLinux 9 container; `shoehorn:cuda` runtime image | PC (Docker) | $0 |
-| 11 | Phase 5: distribution matrix: the tarball on pods running ubuntu 22.04/24.04, debian 12/13, fedora, almalinux 9/10, archlinux images, `selftest` + short `gen` on a small model | 8 short A4000 community pods | ~$0.50 |
+| 11 ✅ | Phase 5 (all 9 images pass): distribution matrix: the tarball on pods running ubuntu 22.04/24.04, debian 12/13, fedora, almalinux 9/10, archlinux images, `selftest` + short `gen` on a small model | 8 short A4000 community pods | ~$0.50 |
 | 12 | Phase 5: `.deb` and `.rpm` from the tarball (fpm or native tools), installed in the matrix images | PC (Docker) | $0 |
 | 13 | Phase 4: fit profiles: pick base/residual from free VRAM (code); pack a 3-bit base (`--base iq3_s`) and measure its KLD against q8 (`E:/shoehorn/q8.kld`) on the 5080 | PC (pack on CPU, KLD on the 5080 when idle) | $0 |
 | 14 | Phase 4: Models page shows which profile fits the GPU | PC | $0 |

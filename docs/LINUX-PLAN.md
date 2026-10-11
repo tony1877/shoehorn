@@ -201,6 +201,25 @@ Gate: each profile loads and runs `bench_prose.py` on a RunPod card of that size
 
 Gate: the tarball passes in every tier-1/2 image on NVIDIA and in the ROCm-supported images on AMD.
 
+Progress (2026-10-11): `scripts/package-tarball.sh` builds `shoehorn-0.1.0-linux-x86_64-cuda.tar.gz` (655 MB) in an
+EL9 container (CUDA 12.8; `libcudart`, `libcublas`, `libcublasLt`, `libgomp` bundled, RPATH `$ORIGIN/../lib`; needs
+glibc 2.34 and the driver's `libcuda`). `scripts/runpod/matrix.sh` ran it on one community pod per image (RTX A4000 /
+A4500 / 4000 Ada): libraries resolve, it starts, `selftest --kernel` and `bench --only gpu` pass on all nine:
+
+| Image | glibc | Result |
+|---|---|---|
+| ubuntu:22.04 | 2.35 | pass |
+| ubuntu:24.04 | 2.39 | pass |
+| ubuntu:26.04 | 2.43 | pass |
+| debian:12 | 2.36 | pass |
+| debian:13 | 2.41 | pass |
+| fedora:43 | 2.42 | pass |
+| almalinux:9 | 2.34 | pass |
+| almalinux:10 | 2.39 | pass |
+| archlinux | 2.44 | pass |
+
+Open: the ROCm tarball, container images, `.deb` / `.rpm`.
+
 ### Phase 6: running it as a service, and docs (2-3 days)
 
 1. systemd user units in `packaging/systemd/`: `shoehorn.service` (`Restart=on-failure` in place of the watchdog,
