@@ -346,7 +346,9 @@ int pack(const std::vector<std::string> & args) {
         gguf_set_kv(gb, tmpl.raw());
         for (int64_t k = gguf_get_n_kv(gb) - 1; k >= 0; k--) {
             const std::string key = gguf_get_key(gb, k);
-            if (key.rfind("quantize.", 0) == 0) gguf_remove_key(gb, key.c_str());
+            // a template that is itself a pack (or an eightfer-era one) must not pass its pack keys on
+            if (key.rfind("quantize.", 0) == 0 || key.rfind("shoehorn.pack.", 0) == 0 || key.rfind("eightfer.", 0) == 0)
+                gguf_remove_key(gb, key.c_str());
         }
         std::mt19937_64 rng(std::random_device{}());
         char            id[32];
