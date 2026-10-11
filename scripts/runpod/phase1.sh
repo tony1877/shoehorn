@@ -64,4 +64,5 @@ cat "gen.$TAG.txt"; [ $rc = 0 ] || [ $rc = 3 ] || fail "gen (exit $rc)"  # 3: --
 status "uploading"
 hf upload "$REPO" $W/out linuxtest --include "*.$TAG.*" || fail upload
 status "done"
+[ "${PHASE2:-0}" = 1 ] && bash $W/shoehorn/scripts/runpod/phase2.sh
 sleep infinity

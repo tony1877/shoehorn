@@ -2488,6 +2488,11 @@ int serve(const std::vector<std::string> & args_in) {
     });
     // Hugging Face download: each file with curl.exe (resumable), into DIR\<owner>__<repo>\; HF_TOKEN in the server's
     // environment opens gated repos
+#if defined(_WIN32)
+    static constexpr const char * kCurl = "curl.exe";  // Windows 10+ ships it in System32
+#else
+    static constexpr const char * kCurl = "curl";
+#endif
     http.Post("/models/pull", [&](const httplib::Request & req, httplib::Response & resp) {
         if (!may_change(req, resp)) return;
         const json        b    = body_of(req);
@@ -2516,7 +2521,7 @@ int serve(const std::vector<std::string> & args_in) {
                 const std::string out = (std::filesystem::path(dest) / std::filesystem::path(f.first)).string();
                 std::error_code   ec;
                 std::filesystem::create_directories(std::filesystem::path(out).parent_path(), ec);
-                std::vector<std::string> a = { "curl.exe", "-L", "--fail", "-sS", "-C", "-", "--retry", "3", "-o", out,
+                std::vector<std::string> a = { kCurl, "-L", "--fail", "-sS", "-C", "-", "--retry", "3", "-o", out,
                                                "https://huggingface.co/" + repo + "/resolve/main/" + f.first };
                 if (tok && *tok) a.insert(a.begin() + 1, { "-H", std::string("Authorization: Bearer ") + tok });
                 std::string err;
