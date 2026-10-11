@@ -14,7 +14,7 @@ LOG=$W/out/phase2.$TAG.log
 : > "$LOG"
 exec > >(tee -a "$LOG") 2>&1
 export PATH=/opt/hf/bin:$PATH
-status() { echo "$*" > $W/out/STATUS; hf upload "$REPO" $W/out/STATUS linuxtest/STATUS --quiet >/dev/null 2>&1 || true
+status() { echo "$*" > $W/out/STATUS; hf upload "$REPO" $W/out/STATUS linuxtest/STATUS.$TAG --quiet >/dev/null 2>&1 || true
            hf upload "$REPO" "$LOG" "linuxtest/$(basename "$LOG")" --quiet >/dev/null 2>&1 || true; }
 up() { for i in $(seq 600); do curl -s -o /dev/null "localhost:$P/health" && return 0; sleep 1; done; return 1; }
 api() { curl -s -m 30 -X POST "localhost:$P$1" -H 'Content-Type: application/json' -d "$2"; echo; }

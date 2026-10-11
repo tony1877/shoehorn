@@ -21,7 +21,7 @@ exec > >(tee -a "$LOG") 2>&1
 
 status() {
     echo "$*" > $W/out/STATUS
-    hf upload "$REPO" $W/out/STATUS linuxtest/STATUS --quiet >/dev/null 2>&1 || true
+    hf upload "$REPO" $W/out/STATUS linuxtest/STATUS.$TAG --quiet >/dev/null 2>&1 || true
     hf upload "$REPO" "$LOG" "linuxtest/$(basename "$LOG")" --quiet >/dev/null 2>&1 || true
 }
 fail() {  # upload whatever results exist, so the failure can be read without SSH
