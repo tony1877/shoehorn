@@ -1,0 +1,18 @@
+# The bundled agent's web UI (scripts/agent.sh) as a systemd user unit; see shoehorn.service for installing.
+# Set WorkingDirectory to the shoehorn checkout.
+[Unit]
+Description=shoehorn agent (dsh web UI)
+After=shoehorn.service
+Wants=shoehorn.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/shoehorn
+ExecStart=/usr/bin/env bash scripts/agent.sh -- --no-open
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

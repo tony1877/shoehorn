@@ -5,6 +5,7 @@
 #include "cli/commands.h"
 #include "model/causal_lm.h"
 #include "model/qwen35.h"
+#include "util/path.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -18,7 +19,7 @@
 namespace e8::cli {
 
 std::vector<int32_t> read_token_ids(const std::string & path) {
-    std::ifstream     f(std::filesystem::u8path(path), std::ios::binary);
+    std::ifstream     f(e8::u8path(path), std::ios::binary);
     std::stringstream ss;
     ss << f.rdbuf();
     const std::string    s = ss.str();
@@ -79,7 +80,7 @@ int logits(const std::vector<std::string> & args) {
             return 1;
         }
     }
-    std::ofstream f(std::filesystem::u8path(out_path), std::ios::binary);
+    std::ofstream f(e8::u8path(out_path), std::ios::binary);
     f.write((const char *) all.data(), (std::streamsize) (all.size() * sizeof(float)));
     printf("%zu tokens x %zu vocab -> %s\n", toks.size(), nv, out_path.c_str());
     return f ? 0 : 1;

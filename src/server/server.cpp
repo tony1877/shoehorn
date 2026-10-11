@@ -287,7 +287,11 @@ struct Server {
     // hardware sensors for the dashboard, sampled every 2 s by a background thread
     std::mutex                       hw_mu;
     json                             hw = json::object();
+#if defined(_WIN32)
     std::string                      hw_url = "http://127.0.0.1:8085";  // LibreHardwareMonitor's web server ("" = off)
+#else
+    std::string                      hw_url;  // off: Linux reads the hwmon drivers directly (sys::board_sensors)
+#endif
     // model management (the Models page): the list file, the jobs, and what an entry added later needs
     std::string                      models_file;                 // --models-file (default ~/.shoehorn/models.json)
     json                             models_cfg = json::object();  // {"dirs": {"download", "pack"}, "models": [...]}
@@ -1959,6 +1963,12 @@ int serve(const std::vector<std::string> & args_in) {
                     } catch (...) {}
                 }
             }
+            if (!h.contains("sensors")) {  // Linux: the hwmon drivers' sensors, under the same names
+                json sensors = json::array();
+                for (const auto & b : sys::board_sensors())
+                    sensors.push_back({ { "kind", b.kind }, { "hw", b.hw }, { "name", b.name }, { b.volt ? "v" : "c", b.value } });
+                if (!sensors.empty()) h["sensors"] = sensors;
+            }
             {
                 std::lock_guard<std::mutex> lk(sp->hw_mu);
                 sp->hw = std::move(h);
@@ -2178,7 +2188,11 @@ int serve(const std::vector<std::string> & args_in) {
             for (auto it = S->jobs.rbegin(); it != S->jobs.rend(); ++it) out["jobs"].push_back(job_json(**it));
             out["dirs"] = S->models_cfg.value("dirs", json::object());
         }
+#if defined(_WIN32)
         out["can_pick"]   = local(req);
+#else  // sys::pick_path needs a desktop session (headless servers and pods type the path)
+        out["can_pick"]   = local(req) && (std::getenv("DISPLAY") || std::getenv("WAYLAND_DISPLAY"));
+#endif
         out["can_change"] = local(req) || S->api_key.empty() || req.get_header_value("Authorization") == "Bearer " + S->api_key;
         out["key_needed"] = !local(req) && !S->api_key.empty();
         resp.set_header("Cache-Control", "no-store");
@@ -2271,6 +2285,13 @@ int serve(const std::vector<std::string> & args_in) {
     auto restart = [&]() {  // after the response has gone out: start the new process, then leave
         std::thread([sp = S.get()] {
             std::this_thread::sleep_for(std::chrono::milliseconds(400));
+            // under systemd (it sets INVOCATION_ID) the unit restarts the server: exit with the status that
+            // packaging/systemd/shoehorn.service restarts on (RestartForceExitStatus=75); the settings come from the file
+            if (std::getenv("INVOCATION_ID")) {
+                fprintf(stderr, "restarting with the new settings (systemd)\n");
+                fflush(stderr);
+                std::_Exit(75);
+            }
             std::vector<std::string> a = { sys::self_exe() };
             a.insert(a.end(), sp->cmdline.begin() + 1, sp->cmdline.end());  // [0] is the program name
             a.insert(a.end(), { "--wait-pid", std::to_string(sys::self_pid()), "--preload" });

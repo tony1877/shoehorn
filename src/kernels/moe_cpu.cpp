@@ -21,6 +21,9 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#else
+#include <sys/mman.h>
+#include <unistd.h>
 #endif
 
 namespace e8::kernels {
@@ -53,7 +56,7 @@ std::vector<Pair> active_pairs(const ggml_tensor * ids, const ggml_tensor * w) {
 }
 
 // Background prefetcher: compute threads only enqueue address ranges; one thread asks the OS to read them as large
-// concurrent I/Os (PrefetchVirtualMemory blocks its caller while it queues the reads).
+// concurrent I/Os (PrefetchVirtualMemory blocks its caller while it queues the reads; madvise(MADV_WILLNEED) on POSIX).
 struct Range {
     const void * p;
     size_t       n;
@@ -94,6 +97,13 @@ private:
             std::vector<WIN32_MEMORY_RANGE_ENTRY> w;
             for (const Range & x : r) w.push_back({ (void *) x.p, x.n });
             PrefetchVirtualMemory(GetCurrentProcess(), w.size(), w.data(), 0);
+#else
+            // madvise wants a page-aligned start; the kernel queues the reads and returns
+            static const uintptr_t page = (uintptr_t) sysconf(_SC_PAGESIZE);
+            for (const Range & x : r) {
+                const uintptr_t a = (uintptr_t) x.p & ~(page - 1);
+                madvise((void *) a, (uintptr_t) x.p + x.n - a, MADV_WILLNEED);
+            }
 #endif
         }
     }

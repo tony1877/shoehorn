@@ -6,6 +6,7 @@
 #include "cli/commands.h"
 #include "model/causal_lm.h"
 #include "model/qwen35.h"
+#include "util/path.h"
 
 #include <algorithm>
 #include <chrono>
@@ -25,7 +26,7 @@ namespace {
 
 // All integers in the file, in order: accepts llama-tokenize's `--ids` list ("[1, 2, 3]") or one id per line.
 bool read_tokens(const std::string & path, std::vector<int32_t> & out, std::string & err) {
-    std::ifstream f(std::filesystem::u8path(path), std::ios::binary);
+    std::ifstream f(e8::u8path(path), std::ios::binary);
     if (!f) {
         err = "cannot open " + path;
         return false;
@@ -58,7 +59,7 @@ struct KldBase {
     int                  nv = 0;
 
     bool open(const std::string & path, std::string & err) {
-        in.open(std::filesystem::u8path(path), std::ios::binary);
+        in.open(e8::u8path(path), std::ios::binary);
         char magic[8] = {};
         if (!in || !in.read(magic, 8) || std::string(magic, 8) != "_logits_" ||
             !in.read((char *) &n_ctx, 4) || !in.read((char *) &n_vocab, 4) || !in.read((char *) &n_chunk, 4)) {
@@ -157,7 +158,7 @@ int ppl(const std::vector<std::string> & args) {
     // --save-kld: this run's log-probs as a llama-perplexity --kl-divergence-base file (a reference for later runs)
     std::ofstream save;
     if (!save_path.empty()) {
-        save.open(std::filesystem::u8path(save_path), std::ios::binary);
+        save.open(e8::u8path(save_path), std::ios::binary);
         save.write("_logits_", 8);
         save.write((const char *) &n_ctx, 4);
         save.write((const char *) &n_chunks, 4);  // n_vocab, patched below once the model is loaded

@@ -1,4 +1,5 @@
 #include "model/gguf_file.h"
+#include "util/path.h"
 
 #include <cinttypes>
 #include <cstdio>
@@ -18,7 +19,7 @@ GgufFile::~GgufFile() {
 bool GgufFile::open(const std::string & path, std::string & err) {
     path_ = path;
     std::error_code ec;
-    file_size_ = (uint64_t) std::filesystem::file_size(std::filesystem::u8path(path), ec);
+    file_size_ = (uint64_t) std::filesystem::file_size(e8::u8path(path), ec);
     if (ec) {
         err = path + ": " + ec.message();
         return false;

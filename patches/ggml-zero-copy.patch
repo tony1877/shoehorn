@@ -50,13 +50,18 @@ index e337e5230..3fef728ef 100644
      cudaError_t err = ggml_cuda_device_malloc(&dev_ptr, size, buft_ctx->device);
      if (err != cudaSuccess) {
          // clear the error
-@@ -2556,12 +2579,44 @@ static void ggml_backend_cuda_free(ggml_backend_t backend) {
+@@ -2556,12 +2579,49 @@ static void ggml_backend_cuda_free(ggml_backend_t backend) {
      delete backend;
  }
  
 +// eightfer: E8_SM_STAGE=G: big async uploads from mapped pinned RAM (the staged residual) are copied by G blocks of 256
 +// threads reading over PCIe instead of the copy engine; a few blocks saturate PCIe and barely slow other kernels
 +// (experiments/zerocopy)
++#if defined(GGML_USE_HIP)
++#define E8_LDCS(p) (*(p))  // HIP has no __ldcs (streaming load): a plain load
++#else
++#define E8_LDCS(p) __ldcs(p)
++#endif
 +static __global__ void k_e8_sm_copy(const uint4 * __restrict__ src, uint4 * __restrict__ dst, size_t n16) {
 +    const size_t span = (n16 + gridDim.x - 1) / gridDim.x;
 +    const size_t b0 = (size_t) blockIdx.x * span, b1 = min(n16, b0 + span);
@@ -64,11 +69,11 @@ index e337e5230..3fef728ef 100644
 +    for (; i + 7 * blockDim.x < b1; i += 8 * blockDim.x) {
 +        uint4 v[8];
 +#pragma unroll
-+        for (int u = 0; u < 8; u++) v[u] = __ldcs(src + i + (size_t) u * blockDim.x);
++        for (int u = 0; u < 8; u++) v[u] = E8_LDCS(src + i + (size_t) u * blockDim.x);
 +#pragma unroll
 +        for (int u = 0; u < 8; u++) dst[i + (size_t) u * blockDim.x] = v[u];
 +    }
-+    for (; i < b1; i += blockDim.x) dst[i] = __ldcs(src + i);
++    for (; i < b1; i += blockDim.x) dst[i] = E8_LDCS(src + i);
 +}
 +
 +static bool ggml_cuda_e8_sm_upload(void * dst, const void * data, size_t size, cudaStream_t stream) {
@@ -95,7 +100,7 @@ index e337e5230..3fef728ef 100644
      CUDA_CHECK(cudaMemcpyAsync((char *) tensor->data + offset, data, size, cudaMemcpyHostToDevice, cuda_ctx->stream()));
  }
  
-@@ -5941,6 +5996,9 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t
+@@ -5941,6 +6001,9 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t
  
  static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, const char * name) {
      GGML_UNUSED(reg);

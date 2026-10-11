@@ -22,8 +22,8 @@ reads, `pack` and the benches already have POSIX branches. The work is around it
 | GPU sensors | NVML loaded the Windows way | NVML via `dlopen("libnvidia-ml.so.1")`; AMD through `libamd_smi` |
 | Board / CPU sensors (`tools/hwmon`) | .NET helper on LibreHardwareMonitor's Windows driver | Read `/sys/class/hwmon` in shoehorn; no helper, no root |
 | Build (`scripts/build.ps1`) | PowerShell + MSVC; CUDA arch `120a-real`; applies `patches/ggml-*.patch` | `scripts/build.sh` with the same steps, a backend switch (CUDA / HIP / CPU) and an arch list |
-| Direct CUDA calls outside ggml | `bench_pcie.cpp` (pinned copy test), `cudaMemGetInfo` in `server.cpp` / `sysinfo.h`, one proc-address hook into the patched ggml (`ggml_backend_cuda_e8_alloc_mapped`) | Route through a small `gpu::` shim with CUDA and HIP builds |
-| ggml patches (`ggml-weight-prefetch`, `ggml-zero-copy`) | CUDA only | Every CUDA call they use has a HIP mapping in ggml's `vendors/hip.h` (checked 2026-10-11), so they should compile under `GGML_HIP` unchanged |
+| Direct CUDA calls outside ggml | None (checked 2026-10-11): `bench_pcie` and the VRAM queries go through ggml's backend API, and the `ggml_backend_cuda_e8_alloc_mapped` hook is plain C in `ggml-cuda.cu`, which the HIP build compiles too | No `gpu::` shim needed |
+| ggml patches (`ggml-weight-prefetch`, `ggml-zero-copy`) | CUDA only | All but one CUDA call they use has a HIP mapping in ggml's `vendors/hip.h`; the exception, `__ldcs` in the zero-copy patch's SM copy kernel, is now a plain load under HIP (`E8_LDCS`). The HIP build also needs position-independent code (set by `SHOEHORN_HIP`) |
 | Service (`watchdog.ps1`, `start-detached.ps1`, scheduled task) | Windows only | systemd user units |
 | shoehorn's agent preset (`agent-home/.agent-presets/shoehorn`) | System prompt says "Windows. The shell is PowerShell" | Linux variant of the prompt; dsh itself already switches its shell stack by platform |
 
@@ -86,12 +86,25 @@ favoring driver reach over new toolkit features; the Windows build stays on CUDA
    `--backend cuda|hip|cpu`, `CMAKE_CUDA_ARCHITECTURES` (default `native`, release list `86-real;89-real;120a-real`)
    or `AMDGPU_TARGETS`, and `CMAKE_CUDA_HOST_COMPILER` when the default GCC is newer than nvcc accepts.
 2. Fix GCC/Clang build errors and warnings; replace MSVC-only flags with portable CMake.
-3. `gpu::` shim: `mem_get_info`, pinned host alloc/free, async copy; CUDA and HIP builds. Port `bench_pcie` and the
-   two `cudaMemGetInfo` callers to it.
+3. ~~`gpu::` shim~~: not needed, see the survey (ggml's backend API already is the shim).
 4. CI (GitHub Actions): CPU build and tests on `ubuntu-24.04` / `ubuntu-22.04`; compile-only CUDA and ROCm jobs in
    the `-dev` images.
 
 Gate: clean CPU, CUDA and HIP builds with GCC and Clang; `selftest` passes on CPU.
+
+Progress (2026-10-11): `scripts/build.sh`, `SHOEHORN_HIP`, `packaging/docker/dev-{cuda,rocm}.Dockerfile` and
+`.github/workflows/linux.yml` added. CPU builds clean with GCC 14 and Clang 19 (Debian 13 under WSL), and
+`selftest --kernel` passes. Fixes: the AVX-512 Q4_K kernel's lambdas became `target`-attributed functions (GCC does
+not give lambdas the enclosing function's ISA); `std::filesystem::u8path` (deprecated in C++20) replaced by
+`e8::u8path` (`src/util/path.h`). Phase 1 items 1-2 done early: `moe_cpu` prefetches with `madvise(MADV_WILLNEED)`;
+`os_lock` raises `RLIMIT_MEMLOCK` to the hard limit and says once how to raise it when `mlock` is refused (CUDA's
+pinned allocations are not bound by it; the half-of-RAM cap is Windows-only and only `bench_pcie` applies it).
+The CUDA release build (`86-real;89-real;120a-real`, CUDA 12.8.1, GCC 13) compiles in `shoehorn:cuda-dev`, and
+the binary starts against WSL's NVIDIA driver and passes `selftest --kernel` (a CPU-backend test: no GPU
+correctness check yet, that is item 3); `GGML_CUDA_NCCL` is off so the binary does not
+depend on NCCL. The HIP release build (`gfx1100;gfx1101;gfx1201;gfx942;gfx950`, ROCm 7.0) compiles and links in
+`shoehorn:rocm-dev` (not run: no AMD GPU here). Not done for the gate yet: GPU builds with Clang as the host
+compiler, and the CI workflow's first run on GitHub. The MSVC build still compiles and passes `selftest --kernel` after these changes.
 
 ### Phase 1: correct on NVIDIA (4-6 days)
 
@@ -119,6 +132,13 @@ architectures (different kernels).
 3. Every page (Dashboard, Sensors, Models, Settings), the Settings restart, and a Models-page download and pack job.
 
 Gate: every page shows real values on a RunPod pod; restart, pack and download complete and can be cancelled.
+
+Progress (2026-10-11): every `sysinfo` function has a POSIX implementation (item 1; AMD sensors still Phase 3), plus
+`board_sensors()` over `/sys/class/hwmon` under LibreHardwareMonitor's kind names, which the server uses when no
+`--hw-monitor` is given (the default is off on Linux). The Models page hides Browse without a desktop session.
+Checked under WSL (Debian 13): `run_process` exit codes and cancellation, `spawn_detached`, `wait_pid`, `cpu_sample`,
+`fixed_drives` / `describe_drive`, NVML through `libnvidia-ml.so.1`, and `serve` answering every page and `/stats`
+with live GPU values. Not checkable under WSL (no hwmon, no NVMe): `drive_temps`, `board_sensors`; they need the pod.
 
 ### Phase 3: AMD (ROCm/HIP) (5-8 days)
 
@@ -170,6 +190,12 @@ Gate: the tarball passes in every tier-1/2 image on NVIDIA and in the ROCm-suppo
    units, where logs and models go.
 
 Gate: a reboot brings everything back; killing the server restarts it.
+
+Progress (2026-10-11): `packaging/systemd/{shoehorn,dsh}.service`, `scripts/agent.sh`, the `persona-posix` row in
+the shoehorn preset, and `docs/linux.md` written. The Settings restart under systemd (`INVOCATION_ID` set) exits with
+status 75 and the unit restarts on it (`RestartForceExitStatus=75`); elsewhere it re-execs as on Windows. Open: dsh's
+bash tool has no auto-background (the pwsh tool's patch), so the Linux prompt tells the model to use `nohup ... &`;
+porting that patch to `dsh-tool-bash-persistent` would let both prompts match.
 
 ### Phase 7: speed (ongoing)
 

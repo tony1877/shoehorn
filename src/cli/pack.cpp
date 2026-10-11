@@ -23,6 +23,7 @@
 #include "ggml-cpu.h"
 #include "ggml.h"
 #include "gguf.h"
+#include "util/path.h"
 
 #include <algorithm>
 #include <atomic>
@@ -150,7 +151,7 @@ bool pad_to(FILE * f, size_t n, size_t align) {
 
 FILE * open_w(const std::string & path) {
 #if defined(_WIN32)
-    return _wfopen(fs::u8path(path).wstring().c_str(), L"wb");
+    return _wfopen(e8::u8path(path).wstring().c_str(), L"wb");
 #else
     return fopen(path.c_str(), "wb");
 #endif
@@ -158,7 +159,7 @@ FILE * open_w(const std::string & path) {
 
 FILE * open_r(const std::string & path) {
 #if defined(_WIN32)
-    return _wfopen(fs::u8path(path).wstring().c_str(), L"rb");
+    return _wfopen(e8::u8path(path).wstring().c_str(), L"rb");
 #else
     return fopen(path.c_str(), "rb");
 #endif
@@ -350,7 +351,7 @@ int pack(const std::vector<std::string> & args) {
         std::mt19937_64 rng(std::random_device{}());
         char            id[32];
         snprintf(id, sizeof id, "%016llx", (unsigned long long) rng());
-        const auto        fn = fs::u8path(src_dir).filename().u8string();
+        const auto        fn = e8::u8path(src_dir).filename().u8string();
         const std::string src_name(fn.begin(), fn.end());
         gguf_set_val_u32(gb, "general.file_type", base_t == GGML_TYPE_IQ4_XS ? 30u : 0u);
         gguf_set_val_str(gb, "shoehorn.pack.id", id);

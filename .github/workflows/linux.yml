@@ -1,0 +1,42 @@
+# Linux builds (docs/LINUX-PLAN.md, Phase 0): CPU build and tests with GCC and Clang, compile-only CUDA and ROCm
+# builds in the -dev images. GPU tests run on RunPod, not here.
+name: linux
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  cpu:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-22.04]
+        cc: [gcc, clang]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build clang
+      # --release: x86-64-v3 instead of -march=native, so the runner's CPU does not decide what compiles
+      - run: bash scripts/build.sh --backend cpu --release --cc ${{ matrix.cc }}
+      - run: build/bin/shoehorn selftest --kernel
+
+  gpu-compile:
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [cuda, rocm]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: free disk (the ROCm image is large)
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - run: docker build -t shoehorn:${{ matrix.backend }}-dev -f packaging/docker/dev-${{ matrix.backend }}.Dockerfile packaging/docker
+      - run: >
+          docker run --rm -v "$PWD:/src" shoehorn:${{ matrix.backend }}-dev
+          bash -c 'git config --global --add safe.directory "*" &&
+                   bash scripts/build.sh --backend ${{ matrix.backend == 'rocm' && 'hip' || 'cuda' }} --release'

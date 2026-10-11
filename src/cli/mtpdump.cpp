@@ -20,6 +20,7 @@
 #include "common.h"
 #include "ggml.h"
 #include "llama.h"
+#include "util/path.h"
 
 #include <nlohmann/json.hpp>
 
@@ -97,8 +98,8 @@ int mtpdump(const std::vector<std::string> & args) {
     }
     const int64_t E = m.hp().n_embd;
 
-    std::ifstream in(std::filesystem::u8path(in_path));
-    std::ofstream out(std::filesystem::u8path(out_path), std::ios::binary);
+    std::ifstream in(e8::u8path(in_path));
+    std::ofstream out(e8::u8path(out_path), std::ios::binary);
     if (!in || !out) {
         fprintf(stderr, "mtpdump: cannot open %s or %s\n", in_path.c_str(), out_path.c_str());
         return 1;

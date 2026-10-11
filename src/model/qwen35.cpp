@@ -24,6 +24,7 @@
 #include <windows.h>
 #else
 #include <sys/mman.h>
+#include <sys/resource.h>
 #endif
 
 namespace e8::model {
@@ -85,8 +86,30 @@ bool os_lock(void * p, size_t n, size_t locked_total) {
     }
     return VirtualLock(p, n) != 0;
 #else
+    // Linux caps locked memory at RLIMIT_MEMLOCK (often 8 MB): raise the soft limit to the hard one once
+    // (shoehorn.service sets LimitMEMLOCK=infinity)
     (void) locked_total;
-    return mlock(p, n) == 0;
+    static const bool raised = [] {
+        rlimit rl{};
+        if (getrlimit(RLIMIT_MEMLOCK, &rl) != 0) return false;
+        if (rl.rlim_cur != rl.rlim_max) {
+            rl.rlim_cur = rl.rlim_max;
+            setrlimit(RLIMIT_MEMLOCK, &rl);
+        }
+        return true;
+    }();
+    (void) raised;
+    if (mlock(p, n) == 0) return true;
+    static bool told = false;
+    if (!told) {
+        rlimit rl{};
+        getrlimit(RLIMIT_MEMLOCK, &rl);
+        fprintf(stderr, "note: mlock refused (RLIMIT_MEMLOCK %s); raise it with `ulimit -l unlimited`, LimitMEMLOCK=infinity "
+                        "in the service unit, or memlock in /etc/security/limits.conf\n",
+                rl.rlim_cur == RLIM_INFINITY ? "unlimited" : (std::to_string(rl.rlim_cur >> 10) + " KiB").c_str());
+        told = true;
+    }
+    return false;
 #endif
 }
 

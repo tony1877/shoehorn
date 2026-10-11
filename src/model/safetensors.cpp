@@ -3,6 +3,7 @@
 #include "util/json.h"
 
 #include "ggml.h"
+#include "util/path.h"
 
 #include <cstdio>
 #include <cstring>
@@ -80,7 +81,7 @@ Safetensors::~Safetensors() {
 }
 
 bool Safetensors::open(const std::string & dir, std::string & err) {
-    const fs::path d = fs::u8path(dir);
+    const fs::path d = e8::u8path(dir);
     std::vector<std::string> shards;
     std::string              text;
     if (read_text(d / "model.safetensors.index.json", text)) {
@@ -105,7 +106,7 @@ bool Safetensors::open(const std::string & dir, std::string & err) {
     }
 
     for (const std::string & s : shards) {
-        const fs::path p = d / fs::u8path(s);
+        const fs::path p = d / e8::u8path(s);
 #if defined(_WIN32)
         FILE * f = _wfopen(p.wstring().c_str(), L"rb");
 #else

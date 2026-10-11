@@ -11,6 +11,7 @@
 
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
+#include "util/path.h"
 
 #include <chrono>
 #include <cstring>
@@ -181,7 +182,7 @@ int selftest(const std::vector<std::string> & args) {
     if (rollback) {
         return rollback_test(model, res, read_token_ids(tokens_path), gpu_layers);
     }
-    std::ifstream f(std::filesystem::u8path(tokens_path), std::ios::binary);
+    std::ifstream f(e8::u8path(tokens_path), std::ios::binary);
     std::stringstream ss;
     ss << f.rdbuf();
     std::vector<int32_t> toks;

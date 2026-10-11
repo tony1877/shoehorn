@@ -1,0 +1,29 @@
+# shoehorn's inference server as a systemd user unit (the Linux counterpart of scripts/watchdog.ps1).
+#
+#   mkdir -p ~/.config/systemd/user && cp packaging/systemd/*.service ~/.config/systemd/user/
+#   edit ExecStart below (binary path, model list), then:
+#   systemctl --user daemon-reload && systemctl --user enable --now shoehorn
+#   loginctl enable-linger "$USER"     # start at boot, without a login
+#   journalctl --user -u shoehorn -f   # the log
+#
+# Restart=on-failure replaces the watchdog: a crash or a kill restarts the server. Under systemd the Settings page's
+# restart exits with status 75 and systemd starts the server again (the new settings are read from the settings file).
+[Unit]
+Description=shoehorn inference server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/shoehorn serve --host 127.0.0.1 --port 8090
+Restart=on-failure
+RestartSec=5
+RestartForceExitStatus=75
+# the RAM KV is locked in memory (mlock); the default 8 MB limit would refuse it
+LimitMEMLOCK=infinity
+# the weights are memory-mapped from many files
+LimitNOFILE=65536
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

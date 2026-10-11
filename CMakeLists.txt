@@ -10,6 +10,10 @@ if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(SHOEHORN_CUDA "Build ggml's CUDA backend" ON)
+option(SHOEHORN_HIP "Build ggml's HIP (ROCm) backend" OFF)
+if (SHOEHORN_CUDA AND SHOEHORN_HIP)
+    message(FATAL_ERROR "SHOEHORN_CUDA and SHOEHORN_HIP are exclusive")
+endif()
 
 set(E8_LLAMA_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/llama.cpp)
 if (NOT EXISTS ${E8_LLAMA_DIR}/ggml/CMakeLists.txt)
@@ -21,9 +25,17 @@ endif()
 # tools, tests or examples; only targets we link get built.
 set(BUILD_SHARED_LIBS OFF)
 set(GGML_CUDA ${SHOEHORN_CUDA} CACHE BOOL "" FORCE)
+set(GGML_HIP ${SHOEHORN_HIP} CACHE BOOL "" FORCE)
+if (SHOEHORN_HIP)
+    # the HIP objects are not PIC by default, and distributions' GCC links position-independent executables
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
 # CUDA graphs: llama.cpp's top-level CMake defaults them ON, ggml alone defaults OFF. Without them every decode
 # step pays one launch per kernel (thousands per token on WDDM).
 set(GGML_CUDA_GRAPHS ON CACHE BOOL "" FORCE)
+set(GGML_HIP_GRAPHS ON CACHE BOOL "" FORCE)
+# NCCL is for multi-GPU splits, which shoehorn does not use; linking it would make the Linux binary depend on it
+set(GGML_CUDA_NCCL OFF CACHE BOOL "" FORCE)
 # Flash-attention kernels for the KV types we serve with (ggml's default list lacks mixed q8_0 K / q4_0 V, which
 # would otherwise be converted to F16 on every attention call)
 set(GGML_CUDA_FA_QUANTS "q4_0-q4_0;q8_0-q8_0;q8_0-q4_0;f16-f16;bf16-bf16" CACHE STRING "" FORCE)

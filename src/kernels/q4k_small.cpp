@@ -111,57 +111,64 @@ void gemm_rows_ref(const ggml_tensor * w, const BlockQ8P * xq, int64_t ncols, in
 }
 
 #if defined(E8_X86)
+// GCC and Clang need the ISA on every function using its intrinsics (lambdas do not inherit it); MSVC needs nothing
 #if defined(__GNUC__) || defined(__clang__)
-__attribute__((target("avx512f,avx512bw,avx512vl")))
+#define E8_AVX512 __attribute__((target("avx512f,avx512bw,avx512vl,avx2,fma")))
+#else
+#define E8_AVX512
 #endif
-void gemm_rows_vnni(const ggml_tensor * w, const BlockQ8P * xq, int64_t ncols, int64_t r0, int64_t r1, float * y,
-                    int64_t ldy) {
-    const int64_t nblk = w->ne[0] / QK;
-    const __m512i m4   = _mm512_set1_epi8(0x0F);
 
-    // one Q4_K block unpacked: nibbles (u8) in BlockQ8P's permuted sub-block order, int16 scale vectors for madd
-    // (16 lanes per sub-block), mins, d and dmin
-    struct Unpacked {
-        __m512i q[4], s[4];
-        __m256i m;
-        float   d, dmin;
-    };
-    auto unpack = [&](const BlockQ4K & B, Unpacked & u) {
-        int sc[8], mn[8];
-        for (int j = 0; j < 8; j++) scale_min(j, B.scales, sc[j], mn[j]);
-        const __m512i v0 = _mm512_loadu_si512((const void *) B.qs);
-        const __m512i v1 = _mm512_loadu_si512((const void *) (B.qs + 64));
-        u.q[0]           = _mm512_and_si512(v0, m4);                         // sub-blocks 0, 2
-        u.q[1]           = _mm512_and_si512(_mm512_srli_epi16(v0, 4), m4);  // 1, 3
-        u.q[2]           = _mm512_and_si512(v1, m4);                         // 4, 6
-        u.q[3]           = _mm512_and_si512(_mm512_srli_epi16(v1, 4), m4);  // 5, 7
-        static constexpr int pair[4][2] = { { 0, 2 }, { 1, 3 }, { 4, 6 }, { 5, 7 } };
-        for (int i = 0; i < 4; i++) {
-            u.s[i] = _mm512_inserti64x4(_mm512_castsi256_si512(_mm256_set1_epi16((short) sc[pair[i][0]])),
-                                        _mm256_set1_epi16((short) sc[pair[i][1]]), 1);
-        }
-        u.m    = _mm256_loadu_si256((const __m256i *) mn);
-        u.d    = ggml_fp16_to_fp32(B.d);
-        u.dmin = ggml_fp16_to_fp32(B.dmin);
-    };
-    // sum over the block of scale_j * q4 * q8, as 16 int32 lanes: maddubs (u8 x s8 -> int16 pairs, max 3810) then
-    // madd with the int16 scales (-> int32), so scaling costs nothing extra
-    auto dot = [](const Unpacked & u, const __m512i * x) {
-        __m512i s = _mm512_madd_epi16(_mm512_maddubs_epi16(u.q[0], x[0]), u.s[0]);
-        s         = _mm512_add_epi32(s, _mm512_madd_epi16(_mm512_maddubs_epi16(u.q[1], x[1]), u.s[1]));
-        s         = _mm512_add_epi32(s, _mm512_madd_epi16(_mm512_maddubs_epi16(u.q[2], x[2]), u.s[2]));
-        s         = _mm512_add_epi32(s, _mm512_madd_epi16(_mm512_maddubs_epi16(u.q[3], x[3]), u.s[3]));
-        return s;
-    };
-    auto hsum = [](__m512 a, __m256 m) {
-        const __m256 lo = _mm512_castps512_ps256(a);
-        const __m256 hi = _mm256_castpd_ps(_mm512_extractf64x4_pd(_mm512_castps_pd(a), 1));
-        __m256       t  = _mm256_sub_ps(_mm256_add_ps(lo, hi), m);
-        __m128       q  = _mm_add_ps(_mm256_castps256_ps128(t), _mm256_extractf128_ps(t, 1));
-        q               = _mm_add_ps(q, _mm_movehl_ps(q, q));
-        q               = _mm_add_ss(q, _mm_movehdup_ps(q));
-        return _mm_cvtss_f32(q);
-    };
+// one Q4_K block unpacked: nibbles (u8) in BlockQ8P's permuted sub-block order, int16 scale vectors for madd
+// (16 lanes per sub-block), mins, d and dmin
+struct Unpacked {
+    __m512i q[4], s[4];
+    __m256i m;
+    float   d, dmin;
+};
+
+E8_AVX512 static inline void unpack(const BlockQ4K & B, Unpacked & u) {
+    const __m512i m4 = _mm512_set1_epi8(0x0F);
+    int sc[8], mn[8];
+    for (int j = 0; j < 8; j++) scale_min(j, B.scales, sc[j], mn[j]);
+    const __m512i v0 = _mm512_loadu_si512((const void *) B.qs);
+    const __m512i v1 = _mm512_loadu_si512((const void *) (B.qs + 64));
+    u.q[0]           = _mm512_and_si512(v0, m4);                         // sub-blocks 0, 2
+    u.q[1]           = _mm512_and_si512(_mm512_srli_epi16(v0, 4), m4);  // 1, 3
+    u.q[2]           = _mm512_and_si512(v1, m4);                         // 4, 6
+    u.q[3]           = _mm512_and_si512(_mm512_srli_epi16(v1, 4), m4);  // 5, 7
+    static constexpr int pair[4][2] = { { 0, 2 }, { 1, 3 }, { 4, 6 }, { 5, 7 } };
+    for (int i = 0; i < 4; i++) {
+        u.s[i] = _mm512_inserti64x4(_mm512_castsi256_si512(_mm256_set1_epi16((short) sc[pair[i][0]])),
+                                    _mm256_set1_epi16((short) sc[pair[i][1]]), 1);
+    }
+    u.m    = _mm256_loadu_si256((const __m256i *) mn);
+    u.d    = ggml_fp16_to_fp32(B.d);
+    u.dmin = ggml_fp16_to_fp32(B.dmin);
+}
+
+// sum over the block of scale_j * q4 * q8, as 16 int32 lanes: maddubs (u8 x s8 -> int16 pairs, max 3810) then
+// madd with the int16 scales (-> int32), so scaling costs nothing extra
+E8_AVX512 static inline __m512i dot(const Unpacked & u, const __m512i * x) {
+    __m512i s = _mm512_madd_epi16(_mm512_maddubs_epi16(u.q[0], x[0]), u.s[0]);
+    s         = _mm512_add_epi32(s, _mm512_madd_epi16(_mm512_maddubs_epi16(u.q[1], x[1]), u.s[1]));
+    s         = _mm512_add_epi32(s, _mm512_madd_epi16(_mm512_maddubs_epi16(u.q[2], x[2]), u.s[2]));
+    s         = _mm512_add_epi32(s, _mm512_madd_epi16(_mm512_maddubs_epi16(u.q[3], x[3]), u.s[3]));
+    return s;
+}
+
+E8_AVX512 static inline float hsum(__m512 a, __m256 m) {
+    const __m256 lo = _mm512_castps512_ps256(a);
+    const __m256 hi = _mm256_castpd_ps(_mm512_extractf64x4_pd(_mm512_castps_pd(a), 1));
+    __m256       t  = _mm256_sub_ps(_mm256_add_ps(lo, hi), m);
+    __m128       q  = _mm_add_ps(_mm256_castps256_ps128(t), _mm256_extractf128_ps(t, 1));
+    q               = _mm_add_ps(q, _mm_movehl_ps(q, q));
+    q               = _mm_add_ss(q, _mm_movehdup_ps(q));
+    return _mm_cvtss_f32(q);
+}
+
+E8_AVX512 void gemm_rows_vnni(const ggml_tensor * w, const BlockQ8P * xq, int64_t ncols, int64_t r0, int64_t r1,
+                              float * y, int64_t ldy) {
+    const int64_t nblk = w->ne[0] / QK;
 
     // two rows at a time: each activation load serves both
     for (int64_t r = r0; r < r1; r += 2) {

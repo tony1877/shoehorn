@@ -342,6 +342,10 @@ GpuSensors gpu_sensors() {
     return s;
 }
 
+std::vector<BoardSensor> board_sensors() {
+    return {};
+}
+
 std::vector<std::string> fixed_drives() {
     std::vector<std::string> out;
     wchar_t                  buf[512];
@@ -593,13 +597,28 @@ bool remove_dir(const std::string & path) {
 
 #else  // POSIX
 
+#include <algorithm>
 #include <cerrno>
+#include <chrono>
+#include <climits>
+#include <cstring>
+#include <dirent.h>
+#include <dlfcn.h>
+#include <fcntl.h>
 #include <fstream>
+#include <mutex>
 #include <set>
+#include <signal.h>
+#include <spawn.h>
+#include <sstream>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
+#include <sys/wait.h>
 #include <sys/statvfs.h>
 #include <sys/utsname.h>
 #include <unistd.h>
+
+extern char ** environ;
 
 namespace e8::sys {
 
@@ -660,50 +679,405 @@ int64_t free_space(const std::string & dir) {
     return (int64_t) s.f_bavail * (int64_t) s.f_frsize;
 }
 
-std::string describe_drive(const std::string &) {
-    return {};
+static std::string read_line(const std::string & path) {
+    std::ifstream f(path);
+    std::string   l;
+    std::getline(f, l);
+    while (!l.empty() && (l.back() == ' ' || l.back() == '\n')) l.pop_back();
+    return l;
+}
+
+// whole disk under /sys/devices for a /sys/dev/block/M:m or /sys/block/X path (partitions map to their disk)
+static std::string sys_disk(const std::string & link) {
+    char buf[PATH_MAX];
+    if (!realpath(link.c_str(), buf)) return {};
+    std::string dev = buf;
+    if (access((dev + "/partition").c_str(), F_OK) == 0) dev = dev.substr(0, dev.rfind('/'));
+    return dev;
+}
+
+static std::string describe_sys_disk(const std::string & dev, int depth = 0) {
+    std::string out = read_line(dev + "/device/model");
+    // device-mapper (LVM, LUKS) and md RAID have no model: describe the first underlying disk
+    if (out.empty() && depth < 4) {
+        if (DIR * d = opendir((dev + "/slaves").c_str())) {
+            std::string under;
+            for (dirent * e; (e = readdir(d));) {
+                if (e->d_name[0] != '.') {
+                    under = sys_disk(dev + "/slaves/" + e->d_name);
+                    break;
+                }
+            }
+            closedir(d);
+            if (!under.empty()) return describe_sys_disk(under, depth + 1);
+        }
+    }
+    const std::string name = dev.substr(dev.rfind('/') + 1);
+    std::string       bus;
+    if (dev.find("/usb") != std::string::npos) bus = "USB";
+    else if (name.rfind("nvme", 0) == 0) bus = "NVMe";
+    else if (name.rfind("sd", 0) == 0) bus = "SATA";
+    else if (name.rfind("vd", 0) == 0) bus = "Virtio";
+    else if (name.rfind("mmcblk", 0) == 0) bus = "SD";
+    if (!bus.empty()) out += std::string(out.empty() ? "" : " ") + "[" + bus + "]";
+    return out;
+}
+
+std::string describe_drive(const std::string & path) {
+    struct stat st {};
+    if (stat(path.c_str(), &st) != 0) return {};
+    const std::string dev =
+        sys_disk("/sys/dev/block/" + std::to_string(major(st.st_dev)) + ":" + std::to_string(minor(st.st_dev)));
+    return dev.empty() ? std::string() : describe_sys_disk(dev);  // empty: tmpfs, overlay, network file systems
 }
 
 std::vector<std::string> fixed_drives() {
-    return {};
+    // mount points of local disks, one per device (the shortest path), without boot partitions, loops and snaps
+    std::ifstream                                    f("/proc/mounts");
+    std::string                                      dev, mnt, fs, rest;
+    std::vector<std::pair<std::string, std::string>> seen;  // device, mount point
+    while (f >> dev >> mnt >> fs && std::getline(f, rest)) {
+        if (dev.rfind("/dev/", 0) != 0 || dev.rfind("/dev/loop", 0) == 0) continue;
+        if (fs == "vfat" || fs == "squashfs" || mnt.rfind("/boot", 0) == 0 || mnt.rfind("/snap", 0) == 0) continue;
+        std::string m;  // /proc/mounts escapes spaces and the like as \040
+        for (size_t i = 0; i < mnt.size(); i++) {
+            if (mnt[i] == '\\' && i + 3 < mnt.size()) {
+                m += (char) std::strtol(mnt.substr(i + 1, 3).c_str(), nullptr, 8);
+                i += 3;
+            } else {
+                m += mnt[i];
+            }
+        }
+        auto it = std::find_if(seen.begin(), seen.end(), [&](const auto & x) { return x.first == dev; });
+        if (it == seen.end()) seen.push_back({ dev, m });
+        else if (m.size() < it->second.size()) it->second = m;
+    }
+    std::vector<std::string> out;
+    for (const auto & x : seen) out.push_back(x.second);
+    return out;
 }
 
 std::vector<DriveTemp> drive_temps() {
-    return {};
+    // hwmon devices of NVMe controllers ("nvme") and SATA disks (the "drivetemp" module); no root needed
+    std::vector<DriveTemp> out;
+    DIR *                  d = opendir("/sys/class/hwmon");
+    if (!d) return out;
+    for (dirent * e; (e = readdir(d));) {
+        if (e->d_name[0] == '.') continue;
+        const std::string h    = std::string("/sys/class/hwmon/") + e->d_name;
+        const std::string name = read_line(h + "/name");
+        if (name != "nvme" && name != "drivetemp") continue;
+        const std::string t = read_line(h + "/temp1_input");
+        if (t.empty()) continue;
+        DriveTemp dt;
+        dt.temp_c = std::atoi(t.c_str()) / 1000;
+        dt.name   = read_line(h + "/device/model");
+        dt.name += std::string(dt.name.empty() ? "" : " ") + (name == "nvme" ? "[NVMe]" : "[SATA]");
+        out.push_back(dt);
+    }
+    closedir(d);
+    std::sort(out.begin(), out.end(), [](const DriveTemp & a, const DriveTemp & b) { return a.name < b.name; });
+    return out;
 }
+
+std::vector<BoardSensor> board_sensors() {
+    std::vector<BoardSensor> out;
+    DIR *                    d = opendir("/sys/class/hwmon");
+    if (!d) return out;
+    std::vector<std::string> dirs;
+    for (dirent * e; (e = readdir(d));)
+        if (e->d_name[0] != '.') dirs.push_back(std::string("/sys/class/hwmon/") + e->d_name);
+    closedir(d);
+    std::sort(dirs.begin(), dirs.end());
+    int dimm = 0;
+    for (const auto & h : dirs) {
+        const std::string drv = read_line(h + "/name");
+        std::string       kind;
+        if (drv == "k10temp" || drv == "zenpower") kind = "amdcpu";
+        else if (drv == "coretemp") kind = "intelcpu";
+        else if (drv == "spd5118" || drv == "jc42") kind = "memory";
+        else if (drv == "amdgpu") kind = "gpu-amd";
+        else if (drv.rfind("nct", 0) == 0 || drv.rfind("it8", 0) == 0 || drv.rfind("f718", 0) == 0 || drv.rfind("w83", 0) == 0 ||
+                 drv == "asus_ec_sensors" || drv == "gigabyte_wmi" || drv == "asus_wmi_sensors")
+            kind = "lpc";
+        else continue;
+        const std::string hw = kind == "lpc" ? drv : read_line(h + "/device/model").empty() ? drv : read_line(h + "/device/model");
+        for (const char * type : { "temp", "in" }) {
+            for (int i = 0; i < 32; i++) {
+                const std::string base = h + "/" + type + std::to_string(i);
+                const std::string v    = read_line(base + "_input");
+                if (v.empty()) continue;
+                std::string label = read_line(base + "_label");
+                const bool  volt  = type[0] == 'i';
+                if (kind == "memory") label = "DIMM #" + std::to_string(++dimm);
+                else if (label.empty()) {
+                    if (kind == "lpc" && volt) continue;  // unlabeled board voltages: which rail is which depends on the board
+                    label = kind == "amdcpu" && !volt ? "Tctl" : type + std::to_string(i);
+                }
+                // LibreHardwareMonitor's names, which the Sensors page looks for
+                if (label.rfind("Tccd", 0) == 0) label = "CCD" + label.substr(4);
+                if (kind == "lpc" && (label == "SYSTIN" || label == "Motherboard" || label == "SYSTEM")) label = "Motherboard";
+                BoardSensor b;
+                b.kind  = kind;
+                b.hw    = hw;
+                b.name  = label;
+                b.volt  = volt;
+                b.value = std::atof(v.c_str()) / 1000.0;  // millidegrees / millivolts
+                out.push_back(b);
+            }
+        }
+    }
+    return out;
+}
+
+// NVML from the driver (libnvidia-ml.so.1), loaded at run time; retried every 30 s while there is none
+namespace {
+struct NvmlUtil {
+    unsigned gpu, memory;
+};
+struct NvmlMem {
+    unsigned long long total, free, used;
+};
+struct Nvml {
+    void * lib = nullptr;
+    void * dev = nullptr;
+    int (*temp)(void *, int, unsigned *) = nullptr;
+    int (*power)(void *, unsigned *)     = nullptr;
+    int (*util)(void *, NvmlUtil *)      = nullptr;
+    int (*mem)(void *, NvmlMem *)        = nullptr;
+    int (*pcie)(void *, int, unsigned *) = nullptr;
+    std::chrono::steady_clock::time_point retry{};
+};
+template <class F> void sym(void * lib, const char * name, F & f) {
+    f = reinterpret_cast<F>(dlsym(lib, name));
+}
+} // namespace
 
 GpuSensors gpu_sensors() {
-    return {};
+    static std::mutex           mu;
+    static Nvml                 n;
+    std::lock_guard<std::mutex> lk(mu);
+    GpuSensors                  s;
+    if (!n.dev) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now < n.retry) return s;
+        n.retry = now + std::chrono::seconds(30);
+        if (!n.lib) n.lib = dlopen("libnvidia-ml.so.1", RTLD_NOW | RTLD_LOCAL);
+        if (!n.lib) return s;
+        int (*init)()                 = nullptr;
+        int (*get)(unsigned, void **) = nullptr;
+        sym(n.lib, "nvmlInit_v2", init);
+        sym(n.lib, "nvmlDeviceGetHandleByIndex_v2", get);
+        sym(n.lib, "nvmlDeviceGetTemperature", n.temp);
+        sym(n.lib, "nvmlDeviceGetPowerUsage", n.power);
+        sym(n.lib, "nvmlDeviceGetUtilizationRates", n.util);
+        sym(n.lib, "nvmlDeviceGetMemoryInfo", n.mem);
+        sym(n.lib, "nvmlDeviceGetPcieThroughput", n.pcie);
+        if (!init || !get || init() != 0 || get(0, &n.dev) != 0) {
+            n.dev = nullptr;
+            return s;
+        }
+    }
+    unsigned v = 0;
+    if (n.temp && n.temp(n.dev, 0 /* NVML_TEMPERATURE_GPU */, &v) == 0) s.temp_c = (int) v;
+    if (n.power && n.power(n.dev, &v) == 0) s.power_w = v / 1000.0;
+    NvmlUtil u{};
+    if (n.util && n.util(n.dev, &u) == 0) s.mem_util = (int) u.memory;
+    NvmlMem m{};
+    if (n.mem && n.mem(n.dev, &m) == 0) {
+        s.vram_total = m.total;
+        s.vram_used  = m.used;
+    }
+    if (n.pcie && n.pcie(n.dev, 1 /* NVML_PCIE_UTIL_RX_BYTES */, &v) == 0) s.pcie_rx_gbs = v * 1024.0 / 1e9;  // KB/s
+    if (n.pcie && n.pcie(n.dev, 0 /* NVML_PCIE_UTIL_TX_BYTES */, &v) == 0) s.pcie_tx_gbs = v * 1024.0 / 1e9;
+    s.ok = true;
+    return s;
 }
 
-int run_process(const std::vector<std::string> &, const std::string &, const std::atomic<bool> &, std::string & err) {
-    err = "running programs is implemented on Windows only";
-    return -1;
+// argv for posix_spawn (pointers into `args`)
+static std::vector<char *> argv_of(const std::vector<std::string> & args) {
+    std::vector<char *> v;
+    for (const auto & a : args) v.push_back(const_cast<char *>(a.c_str()));
+    v.push_back(nullptr);
+    return v;
+}
+
+int run_process(const std::vector<std::string> & args, const std::string & log_path, const std::atomic<bool> & cancel,
+                std::string & err) {
+    if (args.empty()) {
+        err = "no program";
+        return -1;
+    }
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
+    posix_spawn_file_actions_addopen(&fa, 1, log_path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+    posix_spawn_file_actions_adddup2(&fa, 1, 2);
+    posix_spawnattr_t at;
+    posix_spawnattr_init(&at);
+    posix_spawnattr_setflags(&at, POSIX_SPAWN_SETPGROUP);  // a group of its own: cancelling signals the whole job
+    posix_spawnattr_setpgroup(&at, 0);
+    pid_t     pid = 0;
+    auto      av  = argv_of(args);
+    const int rc  = posix_spawnp(&pid, args[0].c_str(), &fa, &at, av.data(), environ);
+    posix_spawn_file_actions_destroy(&fa);
+    posix_spawnattr_destroy(&at);
+    if (rc != 0) {
+        err = "cannot start " + args[0] + " (" + std::strerror(rc) + ")";
+        return -1;
+    }
+    int status = 0;
+    for (;;) {
+        const pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r == pid) return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+        if (r < 0 && errno != EINTR) return -1;
+        if (cancel.load()) {  // SIGTERM, then SIGKILL after 5 s
+            kill(-pid, SIGTERM);
+            for (int i = 0; i < 50 && waitpid(pid, &status, WNOHANG) == 0; i++) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            if (kill(pid, 0) == 0) {
+                kill(-pid, SIGKILL);
+                waitpid(pid, &status, 0);
+            }
+            return -2;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
 }
 
 std::string self_exe() {
-    return {};
+    char          buf[PATH_MAX];
+    const ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    return n > 0 ? std::string(buf, (size_t) n) : std::string();
 }
 
-std::string pick_path(bool, const std::string &, const std::string &, const std::string &) {
-    return {};
+// Runs a program and returns its stdout without the trailing newline; empty when it fails or exits non-zero
+static std::string capture(const std::vector<std::string> & args) {
+    int fd[2];
+    if (pipe(fd) != 0) return {};
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_adddup2(&fa, fd[1], 1);
+    posix_spawn_file_actions_addclose(&fa, fd[0]);
+    posix_spawn_file_actions_addclose(&fa, fd[1]);
+    pid_t     pid = 0;
+    auto      av  = argv_of(args);
+    const int rc  = posix_spawnp(&pid, args[0].c_str(), &fa, nullptr, av.data(), environ);
+    posix_spawn_file_actions_destroy(&fa);
+    close(fd[1]);
+    std::string out;
+    if (rc == 0) {
+        char buf[4096];
+        for (;;) {
+            const ssize_t n = read(fd[0], buf, sizeof(buf));
+            if (n > 0) out.append(buf, (size_t) n);
+            else if (n == 0 || errno != EINTR) break;
+        }
+    }
+    close(fd[0]);
+    if (rc != 0) return {};
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return {};
+    while (!out.empty() && out.back() == '\n') out.pop_back();
+    return out;
 }
 
-bool wait_pid(int, int) {
-    return true;
-}
-
-bool spawn_detached(const std::vector<std::string> &, std::string & err) {
-    err = "restarting is implemented on Windows only";
+static bool on_path(const char * prog) {
+    const char * p = std::getenv("PATH");
+    if (!p) return false;
+    const std::string path = p;
+    for (size_t a = 0; a <= path.size();) {
+        size_t b = path.find(':', a);
+        if (b == std::string::npos) b = path.size();
+        if (access((path.substr(a, b - a) + "/" + prog).c_str(), X_OK) == 0) return true;
+        a = b + 1;
+    }
     return false;
 }
 
+std::string pick_path(bool folder, const std::string & title, const std::string & start, const std::string & pattern) {
+    // the desktop's own dialog when there is a desktop session (kdialog on KDE, zenity elsewhere); without one (a
+    // server, a pod) this returns empty and the web UI takes a typed path
+    if (!std::getenv("DISPLAY") && !std::getenv("WAYLAND_DISPLAY")) return {};
+    const std::string dir = !start.empty() && is_directory(start) ? start : std::string(".");
+    const std::string t   = title.empty() ? std::string("Select") : title;
+    const bool        kde = std::getenv("KDE_FULL_SESSION") != nullptr;
+    if (on_path("kdialog") && (kde || !on_path("zenity"))) {
+        if (folder) return capture({ "kdialog", "--title", t, "--getexistingdirectory", dir });
+        return capture({ "kdialog", "--title", t, "--getopenfilename", dir, pattern.empty() ? "*" : pattern });
+    }
+    if (on_path("zenity")) {
+        std::vector<std::string> a = { "zenity", "--file-selection", "--title=" + t, "--filename=" + join_path(dir, "") };
+        if (folder) a.push_back("--directory");
+        if (!folder && !pattern.empty()) a.push_back("--file-filter=" + pattern);
+        return capture(a);
+    }
+    return {};
+}
+
+bool wait_pid(int pid, int ms) {
+    // kill(pid, 0) fails with ESRCH once the process is gone (it is not our child, so it leaves no zombie here)
+    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+    while (kill((pid_t) pid, 0) == 0 || errno == EPERM) {
+        if (std::chrono::steady_clock::now() >= end) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    return true;
+}
+
+bool spawn_detached(const std::vector<std::string> & args, std::string & err) {
+    if (args.empty()) {
+        err = "no program";
+        return false;
+    }
+    // a session of its own, so it outlives this process and its terminal; stdout / stderr inherited (same log)
+    posix_spawnattr_t at;
+    posix_spawnattr_init(&at);
+#if defined(POSIX_SPAWN_SETSID)
+    posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSID);
+#else
+    posix_spawnattr_setflags(&at, POSIX_SPAWN_SETPGROUP);
+    posix_spawnattr_setpgroup(&at, 0);
+#endif
+    pid_t     pid = 0;
+    auto      av  = argv_of(args);
+    const int rc  = posix_spawnp(&pid, args[0].c_str(), nullptr, &at, av.data(), environ);
+    posix_spawnattr_destroy(&at);
+    if (rc != 0) {
+        err = "cannot start " + args[0] + " (" + std::strerror(rc) + ")";
+        return false;
+    }
+    return true;
+}
+
 int self_pid() {
-    return 0;
+    return (int) getpid();
 }
 
 CpuSample cpu_sample() {
-    return {};
+    // /proc/stat's first line: all cores' jiffies (user nice system idle iowait irq softirq steal ...); this process's
+    // utime + stime (fields 14 and 15 of /proc/self/stat) are in the same unit
+    CpuSample     s;
+    std::ifstream f("/proc/stat");
+    std::string   cpu;
+    uint64_t      v[8] = {};
+    if (f >> cpu >> v[0] >> v[1] >> v[2] >> v[3] >> v[4] >> v[5] >> v[6] >> v[7] && cpu == "cpu") {
+        for (uint64_t x : v) s.total += x;
+        s.busy = s.total - v[3] - v[4];
+    }
+    std::ifstream     ps("/proc/self/stat");
+    const std::string st((std::istreambuf_iterator<char>(ps)), std::istreambuf_iterator<char>());
+    const size_t      paren = st.rfind(')');  // the command name may contain spaces
+    if (paren != std::string::npos && paren + 2 < st.size()) {
+        std::istringstream is(st.substr(paren + 2));
+        std::string        tok;
+        for (int field = 3; is >> tok && field <= 15; field++) {
+            if (field >= 14) s.self += std::strtoull(tok.c_str(), nullptr, 10);
+        }
+    }
+    return s;
 }
 
 void set_thread_high_perf() {}
