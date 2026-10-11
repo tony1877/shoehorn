@@ -278,6 +278,10 @@ porting that patch to `dsh-tool-bash-persistent` would let both prompts match.
    The GPU is the same, but the pod's CPU, RAM and PCIe slot are not, so compare the GPU-bound parts (draft time per
    cycle, base pass) and report the verify separately.
 2. Per-GPU numbers for every card tested, published in `bench/results/`.
+
+   Progress (2026-10-11): `bench/results/linux-vs-windows-2026-10-11.md`: same RTX 5080, Windows vs Linux (WSL 2): GPU-bound
+   parts within 2%, decode at parity (greedy -9%, sampled +5%). RunPod GeForce hosts (4090, 5080) could not
+   initialize CUDA for the binary in any image (driver 580, "unknown error"); pro and data-center cards worked.
 3. Linux-only gains after parity: `io_uring` for MoE expert streaming (Flash-Next), transparent huge pages for pinned
    buffers, thread pinning for CPU residual work.
 

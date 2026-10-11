@@ -20,7 +20,7 @@ estimates at today's prices (community cloud where it has stock). Full plan: [LI
 | 12 ✅ | Phase 5 (both install on Ubuntu, Debian, Fedora, Alma): `.deb` and `.rpm` from the tarball (fpm or native tools), installed in the matrix images | PC (Docker) | $0 |
 | 13 ✅ | Phase 4 (code done; 12 GB profile KLD 0.0048 vs Q8): fit profiles: pick base/residual from free VRAM (code); pack a 3-bit base (`--base iq3_s`) and measure its KLD against q8 (`E:/shoehorn/q8.kld`) on the 5080 | PC (pack on CPU, KLD on the 5080 when idle) | $0 |
 | 14 ✅ | Phase 4 (checked on the 5080 through WSL: "16 GB" profile, residual stays in RAM): Models page shows which profile fits the GPU | PC | $0 |
-| 15 | Phase 7: Windows vs Linux speed on an RTX 5080 pod: `shoehorn bench`, `bench_prose.py`; GPU-bound parts compared, verify reported separately; numbers in `bench/results/` | RTX 5080 community pod, ~1 h | ~$0.40 |
+| 15 ✅ | Phase 7 (done on this PC's 5080 via WSL: parity; RunPod GeForce hosts failed CUDA init, see bench/results): Windows vs Linux speed on an RTX 5080 pod: `shoehorn bench`, `bench_prose.py`; GPU-bound parts compared, verify reported separately; numbers in `bench/results/` | RTX 5080 community pod, ~1 h | ~$0.40 |
 
 Total ≈ $3.30 (community). Before each pod: check the balance and stock; each pod is deleted when its job reports
 done or failed, and no pod runs unwatched.
