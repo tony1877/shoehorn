@@ -853,7 +853,7 @@ template <class F> void sym(void * lib, const char * name, F & f) {
 }
 } // namespace
 
-GpuSensors gpu_sensors() {
+static GpuSensors nvml_sensors() {
     static std::mutex           mu;
     static Nvml                 n;
     std::lock_guard<std::mutex> lk(mu);
@@ -892,6 +892,60 @@ GpuSensors gpu_sensors() {
     if (n.pcie && n.pcie(n.dev, 0 /* NVML_PCIE_UTIL_TX_BYTES */, &v) == 0) s.pcie_tx_gbs = v * 1024.0 / 1e9;
     s.ok = true;
     return s;
+}
+
+// AMD GPU 0 from the amdgpu driver's sysfs (hwmon temperature and power, VRAM and memory load): no ROCm library and no
+// root, and the same files on every ROCm version (libamd_smi's structs change between releases)
+static GpuSensors amdgpu_sensors() {
+    static std::string dev;  // /sys/class/drm/cardN/device of the first AMD GPU, found once
+    static bool        looked = false;
+    GpuSensors         s;
+    if (!looked) {
+        looked = true;
+        if (DIR * d = opendir("/sys/class/drm")) {
+            std::vector<std::string> cards;
+            for (dirent * e; (e = readdir(d));) {
+                const std::string n = e->d_name;
+                if (n.rfind("card", 0) == 0 && n.find('-') == std::string::npos) cards.push_back(n);
+            }
+            closedir(d);
+            std::sort(cards.begin(), cards.end());
+            for (const auto & c : cards) {
+                const std::string p = "/sys/class/drm/" + c + "/device";
+                if (read_line(p + "/vendor") == "0x1002" && !read_line(p + "/mem_info_vram_total").empty()) {
+                    dev = p;
+                    break;
+                }
+            }
+        }
+    }
+    if (dev.empty()) return s;
+    s.vram_total = std::strtoull(read_line(dev + "/mem_info_vram_total").c_str(), nullptr, 10);
+    s.vram_used  = std::strtoull(read_line(dev + "/mem_info_vram_used").c_str(), nullptr, 10);
+    const std::string busy = read_line(dev + "/mem_busy_percent");
+    if (!busy.empty()) s.mem_util = std::atoi(busy.c_str());
+    if (DIR * d = opendir((dev + "/hwmon").c_str())) {
+        for (dirent * e; (e = readdir(d));) {
+            if (e->d_name[0] == '.') continue;
+            const std::string h = dev + "/hwmon/" + e->d_name;
+            // temp2 is the junction (hotspot) where present, temp1 the edge
+            std::string t = read_line(h + "/temp2_input");
+            if (t.empty()) t = read_line(h + "/temp1_input");
+            if (!t.empty()) s.temp_c = std::atoi(t.c_str()) / 1000;
+            std::string w = read_line(h + "/power1_average");
+            if (w.empty()) w = read_line(h + "/power1_input");
+            if (!w.empty()) s.power_w = std::atof(w.c_str()) / 1e6;  // microwatts
+            break;
+        }
+        closedir(d);
+    }
+    s.ok = s.vram_total > 0;
+    return s;
+}
+
+GpuSensors gpu_sensors() {
+    GpuSensors s = nvml_sensors();
+    return s.ok ? s : amdgpu_sensors();
 }
 
 // argv for posix_spawn (pointers into `args`)

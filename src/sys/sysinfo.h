@@ -34,7 +34,7 @@ struct DriveTemp {
 };
 std::vector<DriveTemp> drive_temps();
 
-// NVIDIA GPU 0 through NVML (nvml.dll / libnvidia-ml.so.1), loaded at run time (ok = false without an NVIDIA driver). -1 = not reported.
+// GPU 0: NVIDIA through NVML (nvml.dll / libnvidia-ml.so.1), loaded at run time; on Linux an AMD GPU from amdgpu sysfs (ok = false without an NVIDIA driver). -1 = not reported.
 struct GpuSensors {
     bool   ok       = false;
     int    temp_c   = -1;

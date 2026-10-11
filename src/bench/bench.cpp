@@ -21,6 +21,10 @@ static void header(const sys::Info & si) {
         printf("[device %zu] %s: %s, %.2f / %.2f GiB free\n", i, ggml_backend_dev_name(dev), ggml_backend_dev_description(dev),
                (double) free_b / GiB, (double) total_b / GiB);
     }
+    if (const sys::GpuSensors g = sys::gpu_sensors(); g.ok) {  // what the dashboard's GPU sensors read (NVML / amdgpu)
+        printf("[gpu-sensors] %d C, %.0f W, VRAM %.2f / %.2f GiB used, memory busy %d%%\n", g.temp_c, g.power_w,
+               (double) g.vram_used / GiB, (double) g.vram_total / GiB, g.mem_util);
+    }
     fflush(stdout);
 }
 
