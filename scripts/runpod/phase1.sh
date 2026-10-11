@@ -13,6 +13,7 @@ BRANCH=${BRANCH:-claude/qwen-custom-inference-engine-jhydpg}
 REPO=${REPO:-Tony1877/Qwen3.8-27B-Uncensored-shoehorn}
 PACK=${PACK:-orca27b-r3}
 TAG=${TAG:-linux}
+BACKEND=${BACKEND:-cuda}  # cuda, or hip (image rocm/dev-ubuntu-24.04:7.0)
 W=/work
 mkdir -p $W/out
 LOG=$W/out/phase1.$TAG.log
@@ -31,9 +32,10 @@ fail() {  # upload whatever results exist, so the failure can be read without SS
     sleep infinity
 }
 
-echo "== $(date -u) $(nproc) cpus, $(free -g | awk '/Mem/{print $2}') GB RAM"; nvidia-smi -L || true
+echo "== $(date -u) $(nproc) cpus, $(free -g | awk '/Mem/{print $2}') GB RAM"; nvidia-smi -L 2>/dev/null || rocm-smi --showproductname 2>/dev/null | head -8 || true
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq && apt-get install -y -qq git cmake ninja-build g++ python3-venv curl >/dev/null || fail apt
+[ "$BACKEND" = hip ] && { apt-get install -y -qq hipblas-dev rocblas-dev >/dev/null || fail "apt rocm libs"; }
 python3 -m venv /opt/hf && /opt/hf/bin/pip install -q "huggingface_hub[hf_xet]" || fail pip
 export PATH=/opt/hf/bin:$PATH
 hf auth whoami || fail "HF_TOKEN not accepted"
@@ -43,17 +45,17 @@ if [ -d $W/shoehorn/.git ]; then  # a restarted container keeps its disk: update
 else
     git clone -q --depth 1 -b "$BRANCH" --recurse-submodules --shallow-submodules https://github.com/tony1877/shoehorn $W/shoehorn || fail clone
 fi
-cd $W/shoehorn && bash scripts/build.sh --backend cuda --arch native || fail build
+cd $W/shoehorn && bash scripts/build.sh --backend $BACKEND || fail build
 BIN=$W/shoehorn/build/bin/shoehorn
 # a community host with a broken driver makes ggml fall back to the CPU silently: stop early instead
 "$BIN" bench --only gpu > $W/out/gpucheck.$TAG.txt 2>&1
-if [ $? != 0 ] || grep -q "failed to initialize CUDA" $W/out/gpucheck.$TAG.txt; then fail "no usable CUDA GPU on this host"; fi
+if [ $? != 0 ] || grep -qE "failed to initialize|no GPU device" $W/out/gpucheck.$TAG.txt; then fail "no usable GPU on this host"; fi
 
 status "downloading"
 hf download "$REPO" "$PACK.base.gguf" "$PACK.res.gguf" linuxtest/ppl.ids linuxtest/prompt.ids --local-dir $W/m --quiet || fail download
 cd $W/out
 
-ulimit -l; nvidia-smi --query-gpu=name,pcie.link.gen.current,pcie.link.width.current,memory.total --format=csv || true
+ulimit -l; nvidia-smi --query-gpu=name,pcie.link.gen.current,pcie.link.width.current,memory.total --format=csv 2>/dev/null || rocminfo 2>/dev/null | grep -m3 -E "gfx|Marketing" || true
 status "ppl"
 "$BIN" ppl $W/m/$PACK.base.gguf --res $W/m/$PACK.res.gguf --tokens $W/m/linuxtest/ppl.ids --ctx 512 --chunks 8 \
     --save-kld "$PACK.$TAG.kld" > "ppl.$TAG.txt" 2>&1; rc=$?
