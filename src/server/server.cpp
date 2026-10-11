@@ -2310,7 +2310,10 @@ int serve(const std::vector<std::string> & args_in) {
         const json b = body_of(req);
         if (!b.contains("flags") || !b["flags"].is_object()) return fail(resp, "need flags");
         json flags = json::object();
-        for (auto & [k, v] : b["flags"].items()) {
+        for (auto & it : b["flags"].items()) {
+            // plain variables, not a structured binding: Clang before 16 cannot capture those in the lambda below
+            const std::string k = it.key();
+            const json &      v = it.value();
             const auto * o = std::find_if(std::begin(kSettings), std::end(kSettings), [&](const SettingOpt & x) { return k == x.flag; });
             if (o == std::end(kSettings)) return fail(resp, "not a setting: " + k);
             if (!v.is_string()) return fail(resp, k + " needs a text value");
