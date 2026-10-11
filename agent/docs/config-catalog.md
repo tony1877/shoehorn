@@ -408,6 +408,20 @@ export interface BasicCompactionConfig extends CompactionPolicyConfig {
   modelPolicies?: ModelCompactPolicyConfig[]
   /** Enable automatic step-boundary pressure and overflow-recovery listeners. Defaults to `true`. */
   auto?: boolean
+  /**
+   * Summarize from condensed tool traffic: each tool call keeps its name and
+   * clipped arguments, each tool result its first and last lines plus any line
+   * that reads as an error, failure or result count. Only the summarizer's
+   * input changes; the session is untouched. Trades the provider's warm prefix
+   * cache for a much smaller prompt. Defaults to `false`.
+   */
+  condenseToolOutput?: boolean
+  /**
+   * Checkpoint template: `standard` (default) or `detailed`, which adds
+   * verbatim user rules, every user message, dead ends, commands and config
+   * sections for models that need the structure spelled out.
+   */
+  summaryTemplate?: SummaryTemplate
 }
 
 /** Policy fields shared by the default policy and exact model overrides. */
@@ -437,6 +451,9 @@ export interface ModelCompactPolicyConfig extends CompactionPolicyConfig {
   /** Exact routed model id to match within `provider`. */
   model: string
 }
+
+/** Named checkpoint templates for the summarization instruction. */
+export type SummaryTemplate = 'standard' | 'detailed'
 ```
 
 Source: [`packages/compaction/compaction-basic/src/types.ts:38`](../packages/compaction/compaction-basic/src/types.ts)
@@ -1125,6 +1142,15 @@ export interface PiAiProviderProfile {
   requestImageMaxBytes?: number
   /** Provider-owned model-request retry policy; omission uses normal mode with five retries. */
   retryPolicy?: RetryPolicyConfig
+  /**
+   * Sampling fields merged into every request body on this route
+   * (`openai-completions` only), e.g. a thinking-off summarizer route on a
+   * llama-server whose model defaults are tuned for thinking mode. Keys are the
+   * server's own wire names, e.g. `temperature`, `top_p`, `top_k`, `min_p`,
+   * `presence_penalty` (llama-server: `repeat_penalty`, vLLM:
+   * `repetition_penalty`). A request's own `temperature` still wins.
+   */
+  sampling?: Record<string, number>
 }
 
 /** One configured model entry: an id plus the catalog fields it overrides. */
@@ -1280,7 +1306,7 @@ export type PiAiThinkingFormat = NonNullable<OpenAICompletionsCompat['thinkingFo
 
 Depends on: `Api` (`@earendil-works/pi-ai`) · `CacheRetention` (`@earendil-works/pi-ai`) · `Model` (`@earendil-works/pi-ai`) · `ModelThinkingLevel` (`@earendil-works/pi-ai`) · `OpenAICompletionsCompat` (`@earendil-works/pi-ai`) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets` (`@earendil-works/pi-ai`) · `Transport` (`@earendil-works/pi-ai`)
 
-Source: [`packages/llm/llm-pi-ai/src/config.ts:216`](../packages/llm/llm-pi-ai/src/config.ts)
+Source: [`packages/llm/llm-pi-ai/src/config.ts:225`](../packages/llm/llm-pi-ai/src/config.ts)
 
 <a id="deepseek-aidsh-llm-replay"></a>
 
@@ -1682,6 +1708,26 @@ export interface Config {
    * always compares the FULL canonical string).
    */
   argumentsPreviewChars?: number
+  /**
+   * Same-result counts that trigger a reminder (default `[]`: off). A tracked
+   * call counts toward them when its model-facing result equals another
+   * result of the same tool within the agent's last {@link resultWindow}
+   * result-tracked calls, whatever the arguments: a loop that varies file
+   * names or wording but keeps getting the same answer.
+   */
+  resultThresholds?: number[]
+  /** Tool-name patterns whose results are compared; empty means every tracked tool. */
+  resultInclude?: string[]
+  /** How many of the agent's most recent result-tracked calls are searched for an equal result (default 12). */
+  resultWindow?: number
+  /** Maximum characters of the repeated result quoted in the detailed same-result reminder (default 500). */
+  resultPreviewChars?: number
+  /**
+   * Text appended to every reminder (default `''`), e.g. a chat-template
+   * control tag that raises the model's reasoning effort for the rest of the
+   * conversation.
+   */
+  reminderSuffix?: string
 }
 ```
 
@@ -2777,6 +2823,30 @@ export interface Config {
 
 Source: [`packages/lsp/tool-lsp/src/index.ts:57`](../packages/lsp/tool-lsp/src/index.ts)
 
+<a id="deepseek-aidsh-tool-memory"></a>
+
+## `@deepseek-ai/dsh-tool-memory`
+
+Requires: `tools` · `systemPrompt`
+
+```ts config-catalog
+/** Plugin configuration. */
+export interface Config {
+  /** Database file. Defaults to `$DSH_HOME/memory/memory.db` (`~/.dsh` when DSH_HOME is unset); `:memory:` keeps nothing. */
+  path?: string
+  /** Most memories listed in the runtime-context index. Defaults to 40. */
+  indexMaxItems?: number
+  /** Character budget of the runtime-context index. Defaults to 4000. */
+  indexMaxChars?: number
+  /** Hits per `memory_search` when the call gives no limit. Defaults to 10. */
+  searchLimit?: number
+  /** Most hits a `memory_search` call may ask for. Defaults to 50. */
+  maxSearchLimit?: number
+}
+```
+
+Source: [`packages/memory/tool-memory/src/index.ts:36`](../packages/memory/tool-memory/src/index.ts)
+
 <a id="deepseek-aidsh-tool-pwsh"></a>
 
 ## `@deepseek-ai/dsh-tool-pwsh`
@@ -2788,6 +2858,16 @@ Requires: `tools` · `shell` · `systemPrompt` · `shellEnv`
 export interface Config {
   /** Expose `run_in_background` (default true); disabled calls are also rejected. */
   enableRunInBackground?: boolean
+  /**
+   * Auto-background: a foreground command still running after this many
+   * milliseconds keeps running as a background job (the call returns its job
+   * id and output so far) instead of being killed at the executor timeout.
+   * `0` (default) keeps plain foreground runs. Needs `enableRunInBackground`
+   * and a job runtime (`ctx.jobs`); without one the call runs as before.
+   */
+  autoBackgroundAfterMs?: number
+  /** Upper bound on the foreground wait a call's own `timeoutMs` may request under auto-background (default 600000). */
+  maxForegroundMs?: number
 }
 ```
 
@@ -2810,10 +2890,21 @@ export interface Config {
   maxOutputChars?: number
   /** Model-facing tool description; deployments may describe their environment. */
   description?: string
+  /**
+   * Auto-background: a command still running after this many milliseconds
+   * keeps running as a background job in its own shell (the owner's next call
+   * gets a fresh shell) instead of being killed at `timeoutMs`. `0` (default)
+   * keeps the kill-and-reset behaviour. Needs a job runtime (`ctx.jobs` plus
+   * `@deepseek-ai/dsh-tool-jobs` in the composition); without one calls run
+   * as before.
+   */
+  autoBackgroundAfterMs?: number
+  /** Upper bound on the foreground wait a call's own `timeoutMs` may request (default 600000). */
+  maxForegroundMs?: number
 }
 ```
 
-Source: [`packages/shell/tool-pwsh-persistent/src/index.ts:472`](../packages/shell/tool-pwsh-persistent/src/index.ts)
+Source: [`packages/shell/tool-pwsh-persistent/src/index.ts:801`](../packages/shell/tool-pwsh-persistent/src/index.ts)
 
 <a id="deepseek-aidsh-tool-ralph"></a>
 
@@ -3079,7 +3170,7 @@ export interface Config {
 export type ToolPresentationMode = 'native' | 'ptc' | 'both'
 ```
 
-Source: [`packages/core/tools/src/index.ts:647`](../packages/core/tools/src/index.ts)
+Source: [`packages/core/tools/src/index.ts:666`](../packages/core/tools/src/index.ts)
 
 <a id="deepseek-aidsh-typert-loader"></a>
 
@@ -3367,6 +3458,7 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 - `@deepseek-ai/dsh-client-ui-settings-models` ([`packages/client/ui-settings-models/src/index.ts`](../packages/client/ui-settings-models/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-settings-plugin-inventory` ([`packages/client/ui-settings-plugin-inventory/src/index.ts`](../packages/client/ui-settings-plugin-inventory/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-settings-plugins` ([`packages/client/ui-settings-plugins/src/index.ts`](../packages/client/ui-settings-plugins/src/index.ts))
+- `@deepseek-ai/dsh-client-ui-shoehorn` ([`packages/client/ui-shoehorn/src/index.ts`](../packages/client/ui-shoehorn/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-sidebar` ([`packages/client/ui-sidebar/src/index.ts`](../packages/client/ui-sidebar/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-skill` ([`packages/client/ui-skill/src/index.ts`](../packages/client/ui-skill/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-subagent` ([`packages/client/ui-subagent/src/index.ts`](../packages/client/ui-subagent/src/index.ts))

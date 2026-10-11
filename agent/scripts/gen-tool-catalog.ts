@@ -55,6 +55,7 @@ import * as ToolGoal from '@deepseek-ai/dsh-tool-goal'
 import * as ToolSchedule from '@deepseek-ai/dsh-schedule'
 import Lsp from '@deepseek-ai/dsh-lsp'
 import * as ToolLsp from '@deepseek-ai/dsh-tool-lsp'
+import * as ToolMemory from '@deepseek-ai/dsh-tool-memory'
 import * as ToolSkill from '@deepseek-ai/dsh-tool-skill'
 import * as ToolSessionQuery from '@deepseek-ai/dsh-tool-session-query'
 import * as ToolTasks from '@deepseek-ai/dsh-tool-jobs'
@@ -407,6 +408,19 @@ const TOOL_PACKAGES: ToolPackage[] = [
     },
     note:
       'The lsp tool keeps provider selection and language-server subprocesses behind ctx.lsp, so its model-visible schema stays stable across providers. Requires a registered provider (e.g. `@deepseek-ai/dsh-lsp-stdio`) at runtime; without one, a query returns the structured `LSP_UNAVAILABLE` error rather than changing the schema.',
+  },
+  {
+    pkg: '@deepseek-ai/dsh-tool-memory',
+    dir: 'tool-memory',
+    source: 'packages/memory/tool-memory/src/index.ts',
+    requires: ['ctx.tools', 'ctx.systemPrompt'],
+    writes: ['tool/call', 'tool/result', 'the SQLite memory database'],
+    async mount(ctx) {
+      // An in-memory database: the schemas do not depend on stored memories, and the harvest writes no file.
+      await ctx.plugin(ToolMemory, { path: ':memory:' })
+    },
+    note:
+      'The memory tools read and write a SQLite database outside the session log (default `$DSH_HOME/memory/memory.db`), scoped to the caller\'s workspace or global. The plugin also adds a `tool:memory` guidance section and a `memory:index` runtime-context listing of what is already stored, re-sent only when the index changes.',
   },
   {
     pkg: '@deepseek-ai/dsh-tool-ralph',

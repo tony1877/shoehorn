@@ -40,8 +40,9 @@ export interface Config {
   indexMaxItems?: number
   /** Character budget of the runtime-context index. Defaults to 4000. */
   indexMaxChars?: number
-  /** Default and maximum hits per `memory_search`. Defaults to 10 / 50. */
+  /** Hits per `memory_search` when the call gives no limit. Defaults to 10. */
   searchLimit?: number
+  /** Most hits a `memory_search` call may ask for. Defaults to 50. */
   maxSearchLimit?: number
 }
 
