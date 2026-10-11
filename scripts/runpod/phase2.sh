@@ -39,7 +39,7 @@ print("mem: vram_total", m.get("vram_total"), "weights_gpu", m.get("weights_gpu"
 status "phase2: chat"
 echo "== chat"
 api /v1/chat/completions '{"model":"test","messages":[{"role":"user","content":"Name three primary colors."}],"max_tokens":48,"temperature":0}' \
-    | python3 -c 'import json,sys; d=json.load(sys.stdin); print("reply:", repr(d["choices"][0]["message"].get("content"))[:300]); print("usage:", d.get("usage"))'
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); m=d["choices"][0]["message"]; print("reply:", repr(m.get("content"))[:300]); print("reasoning:", repr(m.get("reasoning_content") or "")[:200]); print("usage:", d.get("usage"))'
 
 status "phase2: jobs"
 echo "== download job, cancelled after 15 s"
@@ -63,5 +63,5 @@ grep -o '"--ctx"[^,}]*' $W/out/settings.json
 tail -3 serve.$TAG.txt
 
 status "phase2: uploading"
-hf upload "$REPO" $W/out linuxtest --include "phase2.$TAG.log" "serve.$TAG.txt" --quiet || true
+hf upload "$REPO" $W/out linuxtest --include "phase2.$TAG.log" --include "serve.$TAG.txt" --quiet || true
 status "phase2: done"

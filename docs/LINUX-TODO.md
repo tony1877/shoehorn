@@ -10,7 +10,7 @@ estimates at today's prices (community cloud where it has stock). Full plan: [LI
 | 2 ✅ | Phase 1, r4 (KLD 0.00042, gen same to a near-tie): same pod with `PACK=orca27b-r4`; Windows r4 reference on the 5080 | same pod + PC | ~$0.40 |
 | 3 ✅ | Delete the pod; record results in LINUX-PLAN.md | — | — |
 | 4 | Phase 1, other architectures: sm_89 (RTX 4000 Ada / 4090) and sm_86 (A5000 / 3090) with r3; gate KLD ≤ 1e-3 | 2 community pods, ~30 min each | ~$0.30 |
-| 5 | Phase 2 on a pod: `serve` with base + residual, every page and `/stats` with real values, a chat request, Settings restart, a pack and a download job started and cancelled | sm_89 pod from step 4 (extra ~30 min) | ~$0.15 |
+| 5 ✅ | Phase 2 on a pod (L4: pages, sensors, jobs, restart pass): `serve` with base + residual, every page and `/stats` with real values, a chat request, Settings restart, a pack and a download job started and cancelled | sm_89 pod from step 4 (extra ~30 min) | ~$0.15 |
 | 6 ✅ | Phase 0 rest (CUDA build with Clang passes; CI found a Clang 14 bug, fixed): GPU builds with Clang as host compiler (Docker); check the CI workflow's GitHub runs and fix failures | PC + GitHub Actions (free) | $0 |
 | 7 ✅ | Phase 6 rest (done 2026-10-11: kill → restart, Settings restart exit 75 → restart, `wsl --terminate` → back with linger; user units are capped at the user manager's memlock, documented): systemd units in WSL (systemd enabled): enable, kill → restart, Settings restart (exit 75), `wsl --shutdown` as the reboot test | PC | $0 |
 | 8 | Phase 3, AMD: HIP build + `ppl` / `gen` on an MI300X (gfx942), gate KLD ≤ 1e-3 vs NVIDIA; check flash attention with q8_0/q4_0 KV, graph capture, `hipHostMalloc`, PCIe rate | MI300X community pod, ~1.5 h | ~$0.75 (secure: ~$3.60) |

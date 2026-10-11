@@ -156,6 +156,12 @@ accept MIG GPU types, GraphQL `podFindAndDeployOnDemand` does.
 
 Gate: every page shows real values on a RunPod pod; restart, pack and download complete and can be cancelled.
 
+Pod check (2026-10-11, L4, `scripts/runpod/phase2.sh`): `serve` with r3 answers every page and `/stats` (200);
+NVML gives GPU temperature, power, VRAM and PCIe rate; NVMe temperatures with drive names and k10temp CPU sensors
+(Tctl, CCDs) come from hwmon; a download job runs and is cancelled (no curl left); a pack job with a bad source is
+refused with a message; the Settings restart re-execs into a new process with the new flag and reloads the model.
+Not covered on a pod: a pack that runs to completion through the Models page (the RunPod pack job ran `pack` directly).
+
 Progress (2026-10-11): every `sysinfo` function has a POSIX implementation (item 1; AMD sensors still Phase 3), plus
 `board_sensors()` over `/sys/class/hwmon` under LibreHardwareMonitor's kind names, which the server uses when no
 `--hw-monitor` is given (the default is off on Linux). The Models page hides Browse without a desktop session.
