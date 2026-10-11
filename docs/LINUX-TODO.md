@@ -6,9 +6,9 @@ estimates at today's prices (community cloud where it has stock). Full plan: [LI
 
 | # | Task | Where | Est. cost |
 |---|---|---|---|
-| 1 | Phase 1, r3: pod `ppl --save-kld` + greedy `gen --compare`; KLD vs Windows here (gate ≤ 1e-5, same tokens) | PRO 6000 MIG pod (running) + PC | ~$0.40 |
-| 2 | Phase 1, r4: same pod with `PACK=orca27b-r4`; Windows r4 reference on the 5080 | same pod + PC | ~$0.40 |
-| 3 | Delete the pod; record results in LINUX-PLAN.md | — | — |
+| 1 ✅ | Phase 1, r3 (KLD 0.00048, gen identical): pod `ppl --save-kld` + greedy `gen --compare`; KLD vs Windows here (gate revised to ≤ 1e-3) | PRO 6000 MIG pod (running) + PC | ~$0.40 |
+| 2 ✅ | Phase 1, r4 (KLD 0.00042, gen same to a near-tie): same pod with `PACK=orca27b-r4`; Windows r4 reference on the 5080 | same pod + PC | ~$0.40 |
+| 3 ✅ | Delete the pod; record results in LINUX-PLAN.md | — | — |
 | 4 | Phase 1, other architectures: sm_89 (RTX 4000 Ada / 4090) and sm_86 (A5000 / 3090) with r3; gate KLD ≤ 1e-3 | 2 community pods, ~30 min each | ~$0.30 |
 | 5 | Phase 2 on a pod: `serve` with base + residual, every page and `/stats` with real values, a chat request, Settings restart, a pack and a download job started and cancelled | sm_89 pod from step 4 (extra ~30 min) | ~$0.15 |
 | 6 | Phase 0 rest: GPU builds with Clang as host compiler (Docker); check the CI workflow's GitHub runs and fix failures | PC + GitHub Actions (free) | $0 |

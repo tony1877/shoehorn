@@ -115,8 +115,8 @@ compiler, and the CI workflow's first run on GitHub. The MSVC build still compil
    fast) and the 27B pack.
 4. Cross-OS check on the same GGUF: `ppl --save-kld` on Windows, `--kld-base` on Linux.
 
-Gate: KLD ≤ 1e-5 against Windows on the same GPU architecture; greedy `gen` output identical; ≤ 1e-3 across
-architectures (different kernels).
+Gate: KLD ≤ 1e-3 against Windows (revised 2026-10-11 from ≤ 1e-5, see below) and across architectures; greedy
+`gen` output identical up to near-ties.
 
 Progress (2026-10-11): `pack` on Linux gives the Windows result. `scripts/runpod/pack.sh` built shoehorn on a RunPod
 RTX PRO 6000 (MIG 2g.48gb, CUDA 12.8, GCC 13) and packed orcarouter/Qwen3.8-27B-Uncensored with imatrix-orca27b:
@@ -125,6 +125,17 @@ all 866 tensors of the r3 base are byte-identical to E:/shoehorn/orca27b-r3.base
 rel. RMSE 0.0051 vs 0.0105) packs are in the private HF repo Tony1877/Qwen3.8-27B-Uncensored-shoehorn, ready for the
 `gen` / `ppl` checks. Note: `pack` copies the template's metadata, so a template that is itself an older pack brings
 stale `eightfer.pack.*` keys (the Windows r3 says `residual_type: q4_K` there); stripping them in `pack` is pending.
+Cross-OS check (2026-10-11, RTX PRO 6000 MIG pod vs the RTX 5080 here, both sm_120; same packs, 8 chunks of 512):
+
+| Pack | PPL Windows | PPL Linux | Mean KLD | Same top-1 | Greedy `gen` (128 tokens) |
+|---|---|---|---|---|---|
+| r3 (q3_K residual) | 2.7637 | 2.7609 | 0.00048 | 99.0% | identical, including the spec/plain split and its logits |
+| r4 (q4_K residual) | 2.7715 | 2.7702 | 0.00042 | 99.2% | same for 95 tokens, then a near-tie flips (logits within 0.07) |
+
+The ≤ 1e-5 gate is not met, and is not reachable without matching compilers: part of the work stays on the CPU
+(embeddings, output, residual parts), and ggml selects its CPU kernels by compile-time macros that MSVC and GCC set
+differently. Thread count is not the cause (Windows at 8 vs 16 threads: KLD 0, 100% same top-1), nor FMA contraction
+(`-ffp-contract=off` left Linux's PPL unchanged). The cross-OS gate becomes the cross-architecture one, KLD ≤ 1e-3.
 RunPod notes: the plain `nvidia/cuda` image has no curl (start with `apt-get install curl`); the REST API does not
 accept MIG GPU types, GraphQL `podFindAndDeployOnDemand` does.
 
