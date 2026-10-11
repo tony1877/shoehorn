@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# RunPod job: build shoehorn on Linux, pack Qwen3.8-27B-Uncensored like E:/shoehorn/orca27b-r3 (iq4_xs base + q3_K
-# residual, imatrix-orca27b), and upload the pack, its log and checksums to a Hugging Face repo.
+# RunPod job: build shoehorn on Linux, pack Qwen3.8-27B-Uncensored with an iq4_xs base and each residual in $RESIDUALS
+# (default q3_K as orca27b-r3, like E:/shoehorn/orca27b-r3, and q4_K as orca27b-r4; imatrix-orca27b), and upload the
+# packs, the log and checksums to a Hugging Face repo. The base is the same for every residual: uploaded once.
 #
 # Pod: image nvidia/cuda:12.8.1-devel-ubuntu24.04, >= 250 GB container disk, env HF_TOKEN (write access to $OUT_REPO).
 # Start command: bash -c "curl -fsSL https://raw.githubusercontent.com/tony1877/shoehorn/<branch>/scripts/runpod/pack.sh | bash"
@@ -12,10 +13,10 @@ SRC_REPO=${SRC_REPO:-orcarouter/Qwen3.8-27B-Uncensored}
 TEMPLATE_REPO=${TEMPLATE_REPO:-orcarouter/Qwen3.8-27B-Uncensored-GGUF}
 TEMPLATE_FILE=${TEMPLATE_FILE:-Qwen3.8-27B-Uncensored-Q4_K_M.gguf}
 OUT_REPO=${OUT_REPO:-Tony1877/Qwen3.8-27B-Uncensored-shoehorn}
-NAME=${NAME:-orca27b-r3}
+RESIDUALS=${RESIDUALS:-q3_K q4_K}
 W=/work
 mkdir -p $W/out
-LOG=$W/out/$NAME.linux-pack.log
+LOG=$W/out/linux-pack.log
 exec > >(tee -a "$LOG") 2>&1
 
 status() {  # progress marker in the HF repo, so the caller can follow without SSH
@@ -42,13 +43,22 @@ hf download "$SRC_REPO" --local-dir $W/src --quiet || fail "download $SRC_REPO"
 hf download "$TEMPLATE_REPO" "$TEMPLATE_FILE" --local-dir $W/tmpl --quiet || fail "download template"
 hf download "$OUT_REPO" imatrix-orca27b.gguf --local-dir $W/imat --quiet || fail "download imatrix"
 
-status "packing"
-"$BIN" pack --src $W/src --template "$W/tmpl/$TEMPLATE_FILE" --out "$W/out/$NAME" --base iq4_xs --res q3_K \
-    --imatrix $W/imat/imatrix-orca27b.gguf --threads "$(nproc)" || fail pack
-(cd $W/out && sha256sum "$NAME".base.gguf "$NAME".res.gguf | tee "$NAME".linux.sha256)
-
-status "uploading"
-hf upload "$OUT_REPO" $W/out . --include "$NAME.*" || fail upload
+base_sha=""
+for res in $RESIDUALS; do
+    NAME=orca27b-r${res:1:1}
+    status "packing $NAME (residual $res)"
+    "$BIN" pack --src $W/src --template "$W/tmpl/$TEMPLATE_FILE" --out "$W/out/$NAME" --base iq4_xs --res "$res"         --imatrix $W/imat/imatrix-orca27b.gguf --threads "$(nproc)" || fail "pack $NAME"
+    (cd $W/out && sha256sum "$NAME".base.gguf "$NAME".res.gguf | tee "$NAME".linux.sha256)
+    sha=$(cut -d' ' -f1 < "$W/out/$NAME.linux.sha256" | head -1)
+    status "uploading $NAME"
+    if [ "$sha" = "$base_sha" ]; then  # same base as the previous pack: upload only the residual
+        hf upload "$OUT_REPO" $W/out . --include "$NAME.res.gguf" "$NAME.linux.sha256" || fail "upload $NAME"
+    else
+        hf upload "$OUT_REPO" $W/out . --include "$NAME.*" || fail "upload $NAME"
+        base_sha=$sha
+    fi
+    rm -f "$W/out/$NAME".res.gguf  # disk: keep one base, drop uploaded residuals
+done
 status "done"
 echo "== done $(date -u)"
 sleep infinity
