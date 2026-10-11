@@ -23,7 +23,12 @@ status() {
     hf upload "$REPO" $W/out/STATUS linuxtest/STATUS --quiet >/dev/null 2>&1 || true
     hf upload "$REPO" "$LOG" "linuxtest/$(basename "$LOG")" --quiet >/dev/null 2>&1 || true
 }
-fail() { echo "FAILED: $*"; status "failed: $*"; sleep infinity; }
+fail() {  # upload whatever results exist, so the failure can be read without SSH
+    echo "FAILED: $*"
+    hf upload "$REPO" $W/out linuxtest --include "*.$TAG.*" --quiet >/dev/null 2>&1 || true
+    status "failed: $*"
+    sleep infinity
+}
 
 echo "== $(date -u) $(nproc) cpus, $(free -g | awk '/Mem/{print $2}') GB RAM"; nvidia-smi -L || true
 export DEBIAN_FRONTEND=noninteractive
@@ -40,15 +45,16 @@ status "downloading"
 hf download "$REPO" "$PACK.base.gguf" "$PACK.res.gguf" linuxtest/ppl.ids linuxtest/prompt.ids --local-dir $W/m --quiet || fail download
 cd $W/out
 
+ulimit -l; nvidia-smi --query-gpu=name,pcie.link.gen.current,pcie.link.width.current,memory.total --format=csv || true
 status "ppl"
 "$BIN" ppl $W/m/$PACK.base.gguf --res $W/m/$PACK.res.gguf --tokens $W/m/linuxtest/ppl.ids --ctx 512 --chunks 8 \
-    --save-kld "$PACK.$TAG.kld" > "ppl.$TAG.txt" 2>&1 || fail ppl
-tail -3 "ppl.$TAG.txt"
+    --save-kld "$PACK.$TAG.kld" > "ppl.$TAG.txt" 2>&1; rc=$?
+cat "ppl.$TAG.txt"; [ $rc = 0 ] || fail "ppl (exit $rc)"
 
 status "gen"
 "$BIN" gen $W/m/$PACK.base.gguf --res $W/m/$PACK.res.gguf --tokens $W/m/linuxtest/prompt.ids -n 128 --temp 0 --compare \
-    > "gen.$TAG.txt" 2>&1 || fail gen
-tail -12 "gen.$TAG.txt"
+    > "gen.$TAG.txt" 2>&1; rc=$?
+cat "gen.$TAG.txt"; [ $rc = 0 ] || fail "gen (exit $rc)"
 
 status "uploading"
 hf upload "$REPO" $W/out linuxtest --include "*.$TAG.*" || fail upload
