@@ -125,6 +125,8 @@ struct LoadOptions {
     int       max_record   = 16;    // most tokens per recorded eval (speculative verify batch)
     bool      mtp          = false; // load the MTP block for drafting (when the GGUF has one and a GPU exists)
     int       mtp_window   = 4096;  // MTP KV ring size
+    std::vector<int> feature_layers;  // with mtp: also keep these trunk layers' outputs (residual stream, all rows of
+                                      // each eval) for feature_rows(); training data for a multi-layer draft head
     int       gpu_kv       = -1;    // KV tokens kept in VRAM; fewer than n_ctx keeps the full KV in RAM and a
                                     // window of the most recent tokens in VRAM. -1 = auto (all if it fits)
     double    expert_cache_gb = -1; // MoE models: VRAM for the GPU expert cache; < 0 = auto, 0 = off
@@ -172,6 +174,8 @@ public:
     bool has_mtp() const { return mtp_on_; }
     // the trunk's final normed hidden states of the last eval's first n rows (what the MTP layer reads), F32 [n, n_embd]
     bool hidden_rows(int n, float * out, std::string & err) const;
+    // output of LoadOptions::feature_layers[j] (un-normed residual stream) for the last eval's first n rows, F32 [n, n_embd]
+    bool feature_rows(int j, int n, float * out, std::string & err) const;
     // row of the last eval's hidden states that belongs to position n_past() - 1, or -1 when unknown
     int  hidden_row() const { return hid_row_; }
     // One MTP draft step at position `pos`: reads `tok` (the token at pos + 1) and the hidden state at pos, which is
@@ -378,6 +382,8 @@ private:
     ggml_tensor *        mtp_eh_ = nullptr, * mtp_enorm_ = nullptr, * mtp_hnorm_ = nullptr, * mtp_norm_ = nullptr;
     ggml_tensor *        mtp_k_ = nullptr, * mtp_v_ = nullptr;  // KV ring [head_dim * n_head_kv, Wm_]
     ggml_tensor *        mtp_hid_ = nullptr;    // the last eval's trunk hidden states [n_embd, n_ubatch]
+    std::vector<int>     feat_layers_;          // LoadOptions::feature_layers (primary instance only)
+    std::vector<ggml_tensor *> feat_hid_;       // their outputs of the last eval [n_embd, n_ubatch] each
     ggml_tensor *        mtp_chain_ = nullptr;  // the last MTP step's output [n_embd, 1]
     int                  Wm_ = 0;
     std::vector<int>     mtp_slot_pos_;

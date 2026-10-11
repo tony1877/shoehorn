@@ -1,4 +1,5 @@
-// `shoehorn mtpdump <base.gguf> --in conv.jsonl --out data.bin [--topk 32] [--batch 512] [--ctx 8192] [--max-seqs N]`
+// `shoehorn mtpdump <base.gguf> --in conv.jsonl --out data.bin [--topk 32] [--batch 512] [--ctx 8192] [--max-seqs N]
+//                   [--feat L1,L2,...]`
 //
 // Training data for the MTP draft head (docs/SPEEDUP-PLAN.md idea 2): what the head reads and what it should predict,
 // taken from the 4-bit base, the model whose samples the head's proposals are checked against. Each line of conv.jsonl
@@ -9,6 +10,9 @@
 //
 // File: "MTPD", u32 version 1, u32 n_embd, u32 topk, then per sequence: u32 n, i32 tokens[n], f16 hidden[n][n_embd],
 // i32 topk_ids[n][topk], f32 topk_logits[n][topk].
+// With --feat L1,L2,... (training data for a multi-layer draft head): version 2. The header goes on with u32 n_feat and
+// i32 layers[n_feat], and each sequence ends with f16 feat[n_feat][n][n_embd], the un-normed residual stream after
+// each of those layers.
 
 #include "cli/commands.h"
 #include "model/qwen35.h"
@@ -34,6 +38,7 @@ namespace e8::cli {
 int mtpdump(const std::vector<std::string> & args) {
     std::string model, in_path, out_path;
     int         topk = 32, batch = 512, n_ctx = 8192, max_seqs = 1 << 30;
+    std::vector<int> feat;
     for (size_t i = 2; i < args.size(); i++) {
         const std::string & a   = args[i];
         auto                val = [&]() -> std::string { return i + 1 < args.size() ? args[++i] : std::string(); };
@@ -43,6 +48,14 @@ int mtpdump(const std::vector<std::string> & args) {
         else if (a == "--batch") batch = std::atoi(val().c_str());
         else if (a == "--ctx") n_ctx = std::atoi(val().c_str());
         else if (a == "--max-seqs") max_seqs = std::atoi(val().c_str());
+        else if (a == "--feat") {
+            const std::string v = val();
+            for (size_t p = 0; p < v.size();) {
+                const size_t c = std::min(v.find(',', p), v.size());
+                feat.push_back(std::atoi(v.substr(p, c - p).c_str()));
+                p = c + 1;
+            }
+        }
         else if (model.empty() && a[0] != '-') model = a;
         else {
             fprintf(stderr, "mtpdump: unknown option %s\n", a.c_str());
@@ -51,7 +64,7 @@ int mtpdump(const std::vector<std::string> & args) {
     }
     if (model.empty() || in_path.empty() || out_path.empty() || topk < 1 || batch < 1) {
         fprintf(stderr, "usage: shoehorn mtpdump <base.gguf> --in conv.jsonl --out data.bin [--topk 32] [--batch 512] "
-                        "[--ctx 8192] [--max-seqs N]\n");
+                        "[--ctx 8192] [--max-seqs N] [--feat L1,L2,...]\n");
         return 1;
     }
 
@@ -71,6 +84,7 @@ int mtpdump(const std::vector<std::string> & args) {
     o.n_ctx        = n_ctx;
     o.mtp          = true;  // the hidden states are kept for the MTP layer
     o.n_ubatch     = std::max(o.n_ubatch, batch);
+    o.feature_layers = feat;
     model::Qwen35 m;
     std::string   err;
     if (!m.load(model, o, err)) {
@@ -91,9 +105,13 @@ int mtpdump(const std::vector<std::string> & args) {
     }
     auto put_u32 = [&](uint32_t v) { out.write((const char *) &v, 4); };
     out.write("MTPD", 4);
-    put_u32(1);
+    put_u32(feat.empty() ? 1 : 2);
     put_u32((uint32_t) E);
     put_u32((uint32_t) topk);
+    if (!feat.empty()) {
+        put_u32((uint32_t) feat.size());
+        out.write((const char *) feat.data(), (std::streamsize) feat.size() * 4);
+    }
 
     std::vector<float>       hid, lg;
     std::vector<int32_t>     ids;
@@ -117,6 +135,7 @@ int mtpdump(const std::vector<std::string> & args) {
         std::vector<ggml_fp16_t> seq_h((size_t) n * E);
         std::vector<int32_t>     seq_ids((size_t) n * topk);
         std::vector<float>       seq_lg((size_t) n * topk);
+        std::vector<ggml_fp16_t> seq_f(feat.size() * (size_t) n * E);
         for (int p = 0; p < n; p += batch) {
             const int       b = std::min(batch, n - p);
             model::EvalOpts eo;
@@ -134,6 +153,13 @@ int mtpdump(const std::vector<std::string> & args) {
                 return 1;
             }
             ggml_fp32_to_fp16_row(hid.data(), seq_h.data() + (size_t) p * E, (int64_t) b * E);
+            for (size_t j = 0; j < feat.size(); j++) {
+                if (!m.feature_rows((int) j, b, hid.data(), err)) {
+                    fprintf(stderr, "mtpdump: %s\n", err.c_str());
+                    return 1;
+                }
+                ggml_fp32_to_fp16_row(hid.data(), seq_f.data() + (j * (size_t) n + (size_t) p) * E, (int64_t) b * E);
+            }
             std::copy(ids.begin(), ids.end(), seq_ids.begin() + (size_t) p * topk);
             std::copy(lg.begin(), lg.end(), seq_lg.begin() + (size_t) p * topk);
         }
@@ -142,6 +168,7 @@ int mtpdump(const std::vector<std::string> & args) {
         out.write((const char *) seq_h.data(), (std::streamsize) seq_h.size() * sizeof(ggml_fp16_t));
         out.write((const char *) seq_ids.data(), (std::streamsize) seq_ids.size() * 4);
         out.write((const char *) seq_lg.data(), (std::streamsize) seq_lg.size() * 4);
+        out.write((const char *) seq_f.data(), (std::streamsize) seq_f.size() * sizeof(ggml_fp16_t));
         n_seq++;
         n_tok += n;
         const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();

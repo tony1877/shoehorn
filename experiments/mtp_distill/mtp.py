@@ -49,7 +49,7 @@ def deq(t):
 
 
 class MTP(torch.nn.Module):
-    def __init__(self, with_res):
+    def __init__(self, with_res, n_feat=0):
         super().__init__()
         b = tensors(BASE)
         r = tensors(RES) if with_res else {}
@@ -60,8 +60,25 @@ class MTP(torch.nn.Module):
             if p + m + '.weight' in r:
                 w = w + deq(r[p + m + '.weight'])
             self.w[m.replace('.', '_')] = torch.nn.Parameter(w)
+        # EAGLE-3-style input (n_feat > 0): step 1 reads g = h_t + fuse_fc([rms(f_1) * fuse_norm_1 | ...]) in place of
+        # h_t, where f_j are earlier trunk layers' outputs. fuse_fc starts at zero, so g = h_t: the stock head. (A
+        # trainable [0 | I] block over h_t instead drifted h_t away from what the head knows: worse than no fusion.)
+        self.n_feat = n_feat
+        if n_feat:
+            E = self.w['attn_norm'].shape[0]
+            self.w['fuse_fc'] = torch.nn.Parameter(torch.zeros(E, n_feat * E))
+            for j in range(n_feat):
+                self.w[f'fuse_norm_{j}'] = torch.nn.Parameter(torch.ones(E))
         inv = ROPE_BASE ** (-torch.arange(0, N_ROT, 2, dtype=torch.float64) / N_ROT)
         self.register_buffer('inv_freq', inv.float(), persistent=False)
+
+    def fuse(self, h, ft):
+        """h [n, E]: the trunk's normed final hidden states; ft [n_feat, n, E]: earlier layers' outputs -> g [n, E]."""
+        if not self.n_feat:
+            return h
+        rms = lambda t, w: F.rms_norm(t, (t.shape[-1],), w, EPS)
+        return h + F.linear(torch.cat([rms(ft[j], self.w[f'fuse_norm_{j}']) for j in range(self.n_feat)], -1),
+                            self.w['fuse_fc'])
 
     def rope(self, x, pos):  # x [n, heads, HD]; NEOX pairs (i, i + N_ROT/2) on the first N_ROT dims
         ang = pos[:, None].float() * self.inv_freq[None, :]
@@ -123,13 +140,19 @@ def load_head_and_embd():
     return head.to(DEV), emb
 
 
-def read_data(path=DATA):
-    """The sequences of an mtpdump file as memory-mapped (toks, h, ids, logits) views (a 1M-token dump is ~10 GB)."""
+def read_data(path=DATA, feats=False):
+    """The sequences of an mtpdump file as memory-mapped (toks, h, ids, logits) views (a 1M-token dump is ~10 GB).
+    Version 2 files (mtpdump --feat) also hold layers' outputs: with feats=True each sequence gets a fifth element,
+    f16 [n_feat, n, n_embd], and the function returns (seqs, layers)."""
     with open(path, 'rb') as f:
         assert f.read(4) == b'MTPD'
-        _, E, K = struct.unpack('<3I', f.read(12))
+        ver, E, K = struct.unpack('<3I', f.read(12))
+        layers = []
+        if ver == 2:
+            nf = struct.unpack('<I', f.read(4))[0]
+            layers = list(struct.unpack(f'<{nf}i', f.read(4 * nf)))
     mm = np.memmap(path, np.uint8, 'r')
-    seqs, off = [], 16
+    seqs, off = [], 16 + (4 + 4 * len(layers) if ver == 2 else 0)
     while off < len(mm):
         n = int(mm[off:off + 4].view(np.uint32)[0])
         off += 4
@@ -141,8 +164,10 @@ def read_data(path=DATA):
         off += 4 * n * K
         lg = mm[off:off + 4 * n * K].view(np.float32).reshape(n, K)
         off += 4 * n * K
-        seqs.append((toks, h, ids, lg))
-    return seqs
+        ft = mm[off:off + 2 * len(layers) * n * E].view(np.float16).reshape(len(layers), n, E)
+        off += 2 * len(layers) * n * E
+        seqs.append((toks, h, ids, lg, ft) if feats else (toks, h, ids, lg))
+    return (seqs, layers) if feats else seqs
 
 
 def sampler(logits, ids):
@@ -163,7 +188,7 @@ def accept(p_ids, p, q_ids, q):
 def run_seq(model, head, emb, seq, steps=1, train=False, weights=None, detach=False):
     """Rows t = 0..n-1 (n = len - 1 - steps): step k reads (step k-1's hn, or h_t for k = 1; x_{t+k}) and is judged
     against the base's distribution at t + k. -> (weighted loss per row, [acceptance sum per step], n)."""
-    toks, h, ids, lg = seq
+    toks, h, ids, lg = seq[:4]
     n = len(toks) - 1 - steps
     if n < 8:
         return 0.0, [0.0] * steps, 0
@@ -176,6 +201,8 @@ def run_seq(model, head, emb, seq, steps=1, train=False, weights=None, detach=Fa
     # graph keeps its copy for the backward (3 x 0.74 GB)
     ac = torch.autocast('cuda', dtype=torch.bfloat16)
     ac.__enter__()
+    if model.n_feat:  # step 1 reads the fused features (the dump's feature layers, in file order)
+        hin = model.fuse(hin, t(seq[4][:model.n_feat, :n]).float())
     for k in range(1, steps + 1):
         ee = emb[torch.from_numpy(np.array(toks[k:k + n])).long()].to(DEV).float()
         pb, pb_ids = sampler(t(lg[k:k + n]), t(ids[k:k + n]).long())
@@ -252,9 +279,15 @@ def main():
     ap.add_argument('--eval-every', type=int, default=0, help='optimizer steps between held-out evals (0: per epoch)')
     ap.add_argument('--save', help='write the trained layer (bf16 state dict) here after every epoch')
     ap.add_argument('--load', help='start from a layer saved by --save instead of the GGUF')
+    ap.add_argument('--feat', type=int, default=0, help='fuse the first N feature layers of a --feat dump (EAGLE-3 style)')
+    ap.add_argument('--lr-fuse', type=float, default=1e-4, help='learning rate of the new fusion parameters')
     a = ap.parse_args()
     t0 = time.time()
-    seqs = [s for p in a.data for s in read_data(p)]
+    seqs, layers = [], []
+    for p in a.data:
+        s_, layers = read_data(p, feats=True)
+        seqs += s_
+    assert a.feat <= len(layers), f'--feat {a.feat}: the data holds layers {layers}'
     held = seqs[-a.held:]
     # the corpus repeats prompts: no training conversation shares its prompt (up to the first <|im_end|>) with held-out
     prompt = lambda s: bytes(s[0][:int(np.argmax(np.asarray(s[0]) == IM_END)) + 1])
@@ -263,10 +296,12 @@ def main():
     weights = [float(x) for x in a.w.split(',')][:a.steps]
     weights += [weights[-1]] * (a.steps - len(weights))
     head, emb = load_head_and_embd()
-    model = MTP(a.res or a.mode == 'train' or bool(a.load)).to(DEV)
+    model = MTP(a.res or a.mode == 'train' or bool(a.load), a.feat).to(DEV)
     if a.load:
         model.w.load_state_dict({k: v.float() for k, v in torch.load(a.load).items()})
     name = a.load or ('base+res' if a.res or a.mode == 'train' else 'base')
+    if a.feat:
+        name += f' + fusion of layers {layers[:a.feat]}'
     print(f'loaded in {time.time() - t0:.0f} s; train {len(train)} conversations, {sum(len(s[0]) for s in train)} '
           f'tokens ({len(seqs) - a.held - len(train)} dropped: prompt in held-out); held-out {len(held)}, '
           f'{sum(len(s[0]) for s in held)} tokens', flush=True)
@@ -274,7 +309,10 @@ def main():
         print(f'held-out ({name}): {fmt(evaluate(model, head, emb, held, a.steps))}')
         return
     print(f'start ({name}): held-out {fmt(evaluate(model, head, emb, held, a.steps))}', flush=True)
-    opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=0.0, fused=True)  # no param-sized temporaries
+    fuse = [v for k, v in model.w.items() if k.startswith('fuse_')]
+    rest = [v for k, v in model.w.items() if not k.startswith('fuse_')]
+    opt = torch.optim.AdamW([{'params': rest, 'lr': a.lr}] + ([{'params': fuse, 'lr': a.lr_fuse}] if fuse else []),
+                            weight_decay=0.0, fused=True)  # fused: no param-sized temporaries
     total = a.epochs * ((len(train) + a.accum - 1) // a.accum)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda i: min(1.0, (i + 1) / a.warmup) *
                                               (0.1 + 0.9 * 0.5 * (1 + np.cos(np.pi * min(1.0, i / total)))))

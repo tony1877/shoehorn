@@ -545,6 +545,14 @@ bool Qwen35::load(const std::string & path, const LoadOptions & opt, std::string
         mtp_v_    = ggml_new_tensor_2d(sctx_[0], vt, h.head_dim * h.n_head_kv, Wm_);
         mtp_hid_  = ggml_new_tensor_2d(sctx_[0], GGML_TYPE_F32, h.n_embd, opt_.n_ubatch);
         mtp_chain_ = ggml_new_tensor_2d(sctx_[0], GGML_TYPE_F32, h.n_embd, 1);
+        for (int il : opt.feature_layers) {
+            if (il < 0 || il >= h.n_layer) {
+                err = "feature layer out of range";
+                return false;
+            }
+            feat_layers_.push_back(il);
+            feat_hid_.push_back(ggml_new_tensor_2d(sctx_[0], GGML_TYPE_F32, h.n_embd, opt_.n_ubatch));
+        }
     }
     for (int i = 0; i < 2; i++) {
         ggml_backend_t be = i == 0 ? gpu_ : cpu_;
@@ -2029,6 +2037,11 @@ ggml_cgraph * Qwen35::build_graph(ggml_context * ctx, int n, const EvalOpts & o,
         ggml_tensor * ff    = ggml_swiglu_split(ctx, mm(ctx, L.ffn_gate, x), mm(ctx, L.ffn_up, x));
         cur                 = ggml_add(ctx, mm(ctx, L.ffn_down, ff), resid);
         inpL                = cur;
+        for (size_t j = 0; j < feat_layers_.size(); j++) {
+            if (feat_layers_[j] == il) {
+                ggml_build_forward_expand(gf, ggml_cpy(ctx, inpL, ggml_view_2d(ctx, feat_hid_[j], h.n_embd, n, feat_hid_[j]->nb[1], 0)));
+            }
+        }
         if (il == debug_layer_) {
             out_logits = inpL;
             ggml_set_output(out_logits);
@@ -2100,6 +2113,19 @@ bool Qwen35::hidden_rows(int n, float * out, std::string & err) const {
         return false;
     }
     ggml_backend_tensor_get(mtp_hid_, out, 0, (size_t) n * (size_t) hp_.n_embd * sizeof(float));
+    return true;
+}
+
+bool Qwen35::feature_rows(int j, int n, float * out, std::string & err) const {
+    if (j < 0 || j >= (int) feat_hid_.size()) {
+        err = "feature_rows: no such feature layer (LoadOptions::feature_layers, needs mtp)";
+        return false;
+    }
+    if (n < 0 || n > (int) feat_hid_[(size_t) j]->ne[1]) {
+        err = "feature_rows: more rows than the last batch holds";
+        return false;
+    }
+    ggml_backend_tensor_get(feat_hid_[(size_t) j], out, 0, (size_t) n * (size_t) hp_.n_embd * sizeof(float));
     return true;
 }
 
