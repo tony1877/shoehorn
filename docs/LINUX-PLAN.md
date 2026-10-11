@@ -179,6 +179,15 @@ with live GPU values. Not checkable under WSL (no hwmon, no NVMe): `drive_temps`
 5. Consumer RDNA3/RDNA4: RunPod offers no consumer AMD cards. Correctness carries over from CDNA where the kernels
    are shared, but speed needs a real RX 7900 / 9070, local or from another provider (open).
 
+Progress (2026-10-11, RunPod MI300X, ROCm 7.0, gfx942): the HIP build with the patched ggml runs the whole path.
+r3 against the Windows RTX 5080 run: PPL 2.7675 vs 2.7637, mean KLD 0.00043, 98.9% same top-1 (gate met). Greedy
+`gen` with speculation works (6.0 tokens per cycle), also with a q8_0 KV cache (flash attention on quantized KV).
+`bench`: IQ4_XS matrix-vector 1.8 TB/s at N=1; 16 GiB pinned (`hipHostMalloc`) in 1.4 s; PCIe 5.0 at 57 GB/s H2D.
+AMD sensors read the amdgpu driver's sysfs (hwmon temperature and power, `mem_info_vram_*`, `mem_busy_percent`)
+instead of `libamd_smi`, whose structs change between ROCm releases: 44 C, 137 W, VRAM shown on the pod. Limitation:
+the first AMD card in /sys/class/drm is used; a container on a multi-GPU server sees every card of the host, so the
+reading may belong to another GPU there (one-GPU desktops are fine). Open: consumer RDNA3 / RDNA4 (item 5).
+
 If a HIP gap blocks the speculative path, ggml's Vulkan backend is the fallback for AMD (and Intel): it runs without
 the prefetch patches, so the verify would be slower.
 
