@@ -355,3 +355,28 @@ distillation, dropped.**
   higher cost per step, with ~0.5 GB more VRAM than the head, and with a second model to roll back on rejections.
 - The MTP head wins because it reads the 27B's own hidden state. A better trained drafter should keep that input and
   add capacity: an EAGLE-3-style head on features from several layers, not a separate small model.
+
+## 8. EAGLE-3-style multi-layer input for the MTP head (2026-10-11): gate 1 failed, dropped
+
+**Idea.** EAGLE-3's main change over a one-layer head that reads the final hidden state: also read earlier layers.
+Here, step 1 reads g = h_t + fuse_fc([rms(f_2) | rms(f_32)]) in place of h_t, where f_l is the residual stream after
+layer l. fuse_fc starts at zero, so training starts at the stock head. Later steps chain on hn as before.
+
+**Gate 1:** the same 1.32M tokens and training recipe as the chained run in section 2. Pass: kept for 3 proposals
+>= 0.55 (no fusion: 0.515 after 3 epochs).
+- `mtpdump --feat 2,32` writes version-2 dumps with those layers' outputs (`E:\shoehorn\mtp\corpus-feat.bin`,
+  46 GB; its final hidden states and top-k match the version-1 dump exactly). `mtp.py --feat N` trains the fusion.
+- Held-out kept for 3 proposals, at the same optimizer steps:
+
+  | Step | 130 | 260 | 390 | 517 (epoch 1) |
+  |---|---|---|---|---|
+  | No fusion (section 2 run) | 0.4797 | 0.4870 | 0.4900 | 0.4942 |
+  | Fusion of layers 2 and 32 | 0.4788 | 0.4863 | 0.4888 | 0.4933 |
+
+- The fusion did learn: it adds a median 5.8% (up to 9.5%) to the input's norm. Training acceptance is equal as
+  well (0.4856 against 0.4866), so the head finds nothing in layers 2 and 32 that the final hidden state lacks. This
+  is not a shortage of data. Stopped after epoch 1.
+- First attempt, a trainable [0 | 0 | I] block over [f_2 | f_32 | h_t] at lr 1e-4: worse than no fusion (0.461 at
+  step 260), because the h_t path drifted.
+- So, for a better drafter on this model: the MTP head already gets what EAGLE-3's features would add. More data
+  helps it only slowly (section 2: x1.08 at 1.3M tokens).
