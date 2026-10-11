@@ -1588,7 +1588,7 @@ const SettingOpt kSettings[] = {
     { "--idle-unload", "0", "Context and memory", "Free the GPU after this many idle seconds (0 = keep the model loaded).", "" },
     { "--sys-cache", "4", "Context and memory", "System prompts kept in RAM for new conversations (0 = off).", "" },
     { "--sys-cache-gb", "3", "Context and memory", "RAM cap of the system prompt cache, GB.", "" },
-    { "--res-gpu-gb", "0", "Context and memory", "Residual kept in VRAM, GB, or auto (faster verify; on 16 GB only about 1 GB fits).", "" },
+    { "--res-gpu-gb", "", "Context and memory", "Residual kept in VRAM, GB, or auto (faster verify; on 16 GB only about 1 GB fits). Empty: auto from 24 GB of VRAM up, else 0.", "" },
     { "--spec", "auto", "Speed", "Speculative decoding: auto, or a fixed draft length.", "" },
     { "--fast-prefill", "0", "Speed", "Read all but the last N prompt tokens without the residual (about 1.7x prefill; KLD 0.0028).", "" },
     { "--ubatch", "1024", "Speed", "Prompt batch size in tokens.", "" },
@@ -1601,6 +1601,32 @@ const SettingOpt kSettings[] = {
     { "--min-p", "0", "Sampling defaults", "Min-p for requests that set none.", "" },
     { "--presence-penalty", "0", "Sampling defaults", "Presence penalty for requests that set none.", "" },
 };
+
+// GPU fit profiles (docs/LINUX-PLAN.md, Phase 4): what the 27B pack should look like on this GPU, from its total VRAM.
+// The default for --res-gpu-gb follows it (residual in VRAM from 24 GB cards up); the Models page shows it.
+struct GpuFit {
+    double      vram_gb = 0;
+    std::string profile, base, residual;
+    bool        res_in_vram = false;
+};
+static GpuFit gpu_fit() {
+    GpuFit f;
+    if (ggml_backend_dev_t g = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU)) {
+        size_t fr = 0, tot = 0;
+        ggml_backend_dev_memory(g, &fr, &tot);
+        f.vram_gb = tot / 1e9;
+    }
+    if (f.vram_gb >= 22) {
+        f = { f.vram_gb, "24 GB+", "iq4_xs", "q4_K, part or all of it in VRAM (--res-gpu-gb auto)", true };
+    } else if (f.vram_gb >= 15) {
+        f = { f.vram_gb, "16 GB", "iq4_xs", "q4_K or q3_K, streamed from RAM", false };
+    } else if (f.vram_gb >= 11) {
+        f = { f.vram_gb, "12 GB", "a 3-bit base (pack --base iq3_xxs)", "q4_K, streamed from RAM", false };
+    } else {
+        f.profile = f.vram_gb > 0 ? "under 12 GB: the 27B does not fit" : "no GPU";
+    }
+    return f;
+}
 
 int serve(const std::vector<std::string> & args_in) {
     // The Settings page's flags (~/.shoehorn/settings.json, or --settings PATH) go after the command line's, so they
@@ -1641,6 +1667,7 @@ int serve(const std::vector<std::string> & args_in) {
     int  fast_prefill = 0;  // > 0: read all but the last N prompt tokens without the residual
     int n_slots = 1, draft_batch = 0;
     double kv_pool_gb = 0, res_gpu_gb = 0;
+    bool   res_gpu_given = false;  // without --res-gpu-gb the GPU fit profile decides
     std::string router_url;
     std::vector<Entry> extra;
     double      cache_gb = -1;
@@ -1684,6 +1711,7 @@ int serve(const std::vector<std::string> & args_in) {
         else if (a == "--res-gpu-gb") {  // G, or "auto" (all free VRAM but 3 GB)
             const std::string v = val();
             res_gpu_gb          = v == "auto" ? -1 : std::atof(v.c_str());
+            res_gpu_given       = true;
         }
         else if (a == "--draft-batch") draft_batch = std::max(1, std::atoi(val().c_str()));
         else if (a == "--gpu-layers") gpu_layers = std::atoi(val().c_str());
@@ -1833,7 +1861,7 @@ int serve(const std::vector<std::string> & args_in) {
     o.draft_batch     = n_slots > 1 ? (draft_batch > 0 ? std::min(draft_batch, n_slots) : std::min(n_slots, 2)) : 1;
     S->draft_batch    = o.draft_batch;
     o.residual_path   = res;
-    o.res_gpu_gb      = res_gpu_gb;
+    o.res_gpu_gb      = res_gpu_given ? res_gpu_gb : gpu_fit().res_in_vram ? -1 : 0;
     o.expert_cache_gb = cache_gb;
     o.max_record      = n_slots > 1 ? 64 : S->spec_k + 1;  // slots: a joint verify's sequences (VRAM: see qwen35.cpp)
     o.mtp             = S->mtp > 0;
@@ -2195,6 +2223,10 @@ int serve(const std::vector<std::string> & args_in) {
 #endif
         out["can_change"] = local(req) || S->api_key.empty() || req.get_header_value("Authorization") == "Bearer " + S->api_key;
         out["key_needed"] = !local(req) && !S->api_key.empty();
+        {
+            const GpuFit f = gpu_fit();
+            out["fit"] = { { "vram_gb", f.vram_gb }, { "profile", f.profile }, { "base", f.base }, { "residual", f.residual } };
+        }
         resp.set_header("Cache-Control", "no-store");
         resp.set_content(out.dump(), "application/json");
     });

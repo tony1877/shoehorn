@@ -111,6 +111,7 @@ pre { margin: 6px 0 0; max-height: 180px; overflow: auto; background: var(--bg);
 
   <section class="panel">
     <div class="mhead"><b>Models on this server</b><span class="mono" id="modelsNote"></span></div>
+    <div class="note" id="fitNote"></div>
     <div class="rows" id="models"></div>
     <div class="err" id="modelsErr"></div>
     <details id="addBox"><summary>Add a GGUF already on disk</summary>
@@ -240,6 +241,10 @@ async function pollState() {
   }
   for (const id of ["addGo", "pullGo", "packGo"]) $(id).disabled = !can;
   for (const b of document.querySelectorAll("button.browse")) b.hidden = !state.can_pick;
+  // which pack fits this GPU (the server's GPU fit profile)
+  const f = state.fit;
+  $("fitNote").textContent = !f ? "" : f.base ? `This GPU (${f.vram_gb.toFixed(0)} GB): ${f.profile} profile, base ${f.base}, residual ${f.residual}.`
+                                              : `This GPU: ${f.profile}.`;
 }
 document.addEventListener("click", async e => {
   const b = e.target.closest("button"); if (!b) return;
