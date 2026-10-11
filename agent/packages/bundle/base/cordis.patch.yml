@@ -426,12 +426,17 @@
       config:
         maxOutputChars: 16000
 
-    # Consecutive-repeat reminders on the tool chain.
+    # Consecutive-repeat reminders on the tool chain, and same-result reminders
+    # for shell commands: a loop that varies its script but keeps printing the
+    # same output never repeats a call exactly.
     - id: repeat-tool-reminder
       name: '@deepseek-ai/dsh-repeat-tool-reminder'
       config:
         thresholds: [3, 5, 8]
         argumentsPreviewChars: 500
+        resultThresholds: [3, 5, 8]
+        resultInclude: [pwsh, bash]
+        resultWindow: 12
 
     # The shared base enables the stable model-facing web_search and web_fetch
     # tools. The Web app disables this host row and composes both tools per agent

@@ -369,6 +369,140 @@ describe('fold onto the downstream decision', () => {
   })
 })
 
+describe('same-result detection', () => {
+  /** The core harness plus `run`, a tool whose output is its `out` argument (the `file` argument only varies the call). */
+  async function resultHarness(config: Config): Promise<Context> {
+    const ctx = await harness(config)
+    ctx.tools.register(defineContentToolFixture({
+      name: 'run',
+      description: 'r',
+      parameters: { file: { type: 'string' }, out: { type: 'string' } },
+      async execute(args) { return [{ type: 'text', text: args.out ?? '' }] },
+    }))
+    return ctx
+  }
+
+  /** Run one turn of scripted `run` calls, one per output, each with a fresh `file` argument; then finish. */
+  async function runTurn(ctx: Context, outputs: string[]): Promise<Agent> {
+    ctx.llm.registerAdapter(['mock'], new MockAdapter([
+      ...outputs.map((out, i) => toolCallResponse(`c${i}`, 'run', { file: `rtest${i}.py`, out })),
+      textResponse('done'),
+    ]))
+    const agent = await ctx.agentLoop.create(SessionId('a1'), { provider: 'mock', model: 'mock' })
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, agent)
+    return agent
+  }
+
+  it('is off by default: varied calls returning one result draw no reminder', async () => {
+    const ctx = await resultHarness({})
+    expect(reminders(await runTurn(ctx, Array.from({ length: 8 }, () => '10000')))).toHaveLength(0)
+  })
+
+  it('reminds gently at resultThresholds[0] and in detail at the next, though every call differs', async () => {
+    const ctx = await resultHarness({ resultThresholds: [3, 5] })
+    const found = reminders(await runTurn(ctx, ['10000', '10000', 'other', '10000', '10000', '10000']))
+    expect(found).toHaveLength(2)
+    expect(found[0]!.text).toContain('keep returning the same result')
+    expect(found[0]!.source).toEqual({ kind: 'plugin', plugin: 'repeat-tool-reminder', form: 'notice', summary: 'run same result × 3' })
+    expect(found[1]!.text).toContain('- tool: run')
+    expect(found[1]!.text).toContain('- same_result_count: 5 of the last 6 calls')
+    expect(found[1]!.text).toContain('- result: 10000')
+  })
+
+  it('counts only results inside the window', async () => {
+    const ctx = await resultHarness({ resultThresholds: [3], resultWindow: 3 })
+    // the same result 4 times, but never 3 times within any 3 consecutive calls
+    expect(reminders(await runTurn(ctx, ['10000', 'a', '10000', 'b', '10000', 'c', '10000']))).toHaveLength(0)
+  })
+
+  it('reminds once per threshold when the window slides away and back', async () => {
+    const ctx = await resultHarness({ resultThresholds: [3], resultWindow: 4 })
+    // count reaches 3 at call 3, drops to 2 when call 1 leaves the window, and reaches 3 again at call 5
+    expect(reminders(await runTurn(ctx, ['10000', '10000', '10000', 'x', '10000']))).toHaveLength(1)
+  })
+
+  it('compares only tools matching resultInclude', async () => {
+    const ctx = await resultHarness({ resultThresholds: [2], resultInclude: ['pwsh', 'bash'] })
+    expect(reminders(await runTurn(ctx, ['10000', '10000', '10000']))).toHaveLength(0)
+  })
+
+  it('delivers the exact-repeat reminder alone when both detectors fire on one call', async () => {
+    const ctx = await harness({ thresholds: [3], resultThresholds: [3] })
+    ctx.llm.registerAdapter(['mock'], new MockAdapter([
+      ...Array.from({ length: 3 }, (_, i) => toolCallResponse(`c${i}`, 'probe', { q: 'same' })),
+      textResponse('done'),
+    ]))
+    const agent = await ctx.agentLoop.create(SessionId('a1'), { provider: 'mock', model: 'mock' })
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, agent)
+
+    const found = reminders(agent)
+    expect(found).toHaveLength(1)
+    expect(found[0]!.text).toContain('repeating the exact same tool call')
+  })
+
+  it('a new user prompt clears the result history', async () => {
+    const ctx = await resultHarness({ resultThresholds: [3] })
+    ctx.llm.registerAdapter(['mock'], new MockAdapter([
+      toolCallResponse('c1', 'run', { file: 'a.py', out: '10000' }),
+      toolCallResponse('c2', 'run', { file: 'b.py', out: '10000' }),
+      textResponse('turn one done'),
+      toolCallResponse('c3', 'run', { file: 'c.py', out: '10000' }), // without the reset this would be the 3rd
+      textResponse('turn two done'),
+    ]))
+    const agent = await ctx.agentLoop.create(SessionId('a1'), { provider: 'mock', model: 'mock' })
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, agent)
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'again' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, agent)
+
+    expect(reminders(agent)).toHaveLength(0)
+  })
+
+  it('appends reminderSuffix to every reminder', async () => {
+    const ctx = await resultHarness({ thresholds: [2], resultThresholds: [2], reminderSuffix: '<|think_xhigh|>' })
+    const found = reminders(await runTurn(ctx, ['10000', '10000']))
+    expect(found).toHaveLength(1)
+    expect(found[0]!.text.endsWith('\n\n<|think_xhigh|>')).toBe(true)
+  })
+
+  it('compares whole blocks: equal images repeat, different images do not, and the quote names the block type', async () => {
+    const ctx = await harness({ resultThresholds: [2, 3] })
+    ctx.tools.register(defineContentToolFixture({
+      name: 'shot',
+      description: 's',
+      parameters: { data: { type: 'string' } },
+      async execute(args) { return [{ type: 'image', data: args.data ?? '', mimeType: 'image/png' }] },
+    }))
+    ctx.llm.registerAdapter(['mock'], new MockAdapter([
+      toolCallResponse('c1', 'shot', { data: 'AQ==' }),
+      toolCallResponse('c2', 'shot', { data: 'Ag==' }), // a different image: no repeat
+      toolCallResponse('c3', 'shot', { data: 'AQ==' }), // 2nd equal → gentle
+      toolCallResponse('c4', 'shot', { data: 'AQ==' }), // 3rd equal → detailed
+      textResponse('done'),
+    ]))
+    const agent = await ctx.agentLoop.create(SessionId('a1'), { provider: 'mock', model: 'mock' })
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, agent)
+
+    const found = reminders(agent)
+    expect(found.map(r => r.source)).toEqual([
+      { kind: 'plugin', plugin: 'repeat-tool-reminder', form: 'notice', summary: 'shot same result × 2' },
+      { kind: 'plugin', plugin: 'repeat-tool-reminder', form: 'notice', summary: 'shot same result × 3' },
+    ])
+    expect(found[1]!.text).toContain('- result: [image content]')
+  })
+
+  it('caps the quoted result at resultPreviewChars', async () => {
+    const ctx = await resultHarness({ resultThresholds: [2, 3], resultPreviewChars: 10 })
+    const big = 'y'.repeat(100)
+    const found = reminders(await runTurn(ctx, [big, big, big]))
+    expect(found[1]!.text).toContain('- result: yyyyyyyyyy… (+90 more chars)')
+    expect(found[1]!.text).not.toContain(big)
+  })
+})
+
 describe('config validation fails loud', () => {
   async function spine(): Promise<Context> {
     const ctx = new Context()
@@ -403,5 +537,20 @@ describe('config validation fails loud', () => {
     await expect(ctx.plugin(RepeatToolGuard, { argumentsPreviewChars: 0 })).rejects.toThrow(/argumentsPreviewChars/)
     const ctx2 = await spine()
     await expect(ctx2.plugin(RepeatToolGuard, { argumentsPreviewChars: 12.5 })).rejects.toThrow(/argumentsPreviewChars/)
+  })
+
+  it('rejects resultThresholds entries below 2 or duplicated, and accepts an empty list', async () => {
+    await expect((await spine()).plugin(RepeatToolGuard, { resultThresholds: [1] })).rejects.toThrow(/resultThresholds entry 1/)
+    await expect((await spine()).plugin(RepeatToolGuard, { resultThresholds: [3, 3] })).rejects.toThrow(/`resultThresholds` must not contain duplicates/)
+    await expect((await spine()).plugin(RepeatToolGuard, { resultThresholds: [] })).resolves.toBeDefined()
+  })
+
+  it('rejects a resultWindow smaller than the highest resultThresholds entry', async () => {
+    await expect((await spine()).plugin(RepeatToolGuard, { resultThresholds: [3, 8], resultWindow: 5 })).rejects.toThrow(/could never be reached/)
+  })
+
+  it('rejects a non-positive resultWindow or resultPreviewChars', async () => {
+    await expect((await spine()).plugin(RepeatToolGuard, { resultWindow: 0 })).rejects.toThrow(/resultWindow/)
+    await expect((await spine()).plugin(RepeatToolGuard, { resultPreviewChars: 1.5 })).rejects.toThrow(/resultPreviewChars/)
   })
 })

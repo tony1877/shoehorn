@@ -595,15 +595,18 @@ export type PostToolDecision =
 /**
  * Best-effort human-readable message from an arbitrary thrown value: Error
  * instances use `.message`; non-Error objects with a string `message`
- * property (e.g. `throw { message: 'denied' }`) use it too; everything else
- * is stringified.
+ * property (e.g. `throw { message: 'denied' }`) use it too; other objects use
+ * their JSON text (a tool that rethrows its aborted signal's reason throws the
+ * plain cancel cause, e.g. `{"kind":"user"}`), capped at
+ * {@link THROWN_JSON_MAX_CHARS}; everything else is stringified.
  */
 function errorMessage(error: unknown): string {
   try {
     if (error instanceof Error) return error.message
-    if (typeof error === 'object' && error !== null
-      && 'message' in error && typeof error.message === 'string') {
-      return error.message
+    if (typeof error === 'object' && error !== null) {
+      if ('message' in error && typeof error.message === 'string') return error.message
+      const json = thrownJson(error)
+      if (json !== undefined) return json
     }
     return String(error)
   } catch {
@@ -612,6 +615,22 @@ function errorMessage(error: unknown): string {
     // fallback must itself be total.
     return '<unprintable thrown value>'
   }
+}
+
+/** Longest JSON text {@link errorMessage} quotes from a thrown object; the rendered error reaches the model. */
+const THROWN_JSON_MAX_CHARS = 500
+
+/** JSON text of a thrown non-Error object, or undefined when it has none worth quoting (`{}`, a cycle, a BigInt). */
+function thrownJson(error: object): string | undefined {
+  let json: string | undefined
+  try {
+    json = JSON.stringify(error)
+  } catch {
+    // Cyclic and BigInt-holding values have no JSON text; errorMessage falls back to String().
+    return undefined
+  }
+  if (json === undefined || json === '{}') return undefined
+  return json.length > THROWN_JSON_MAX_CHARS ? `${json.slice(0, THROWN_JSON_MAX_CHARS)}…` : json
 }
 
 /** Derive one failure message from policy feedback without changing its rendered blocks. */

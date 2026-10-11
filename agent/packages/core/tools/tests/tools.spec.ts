@@ -2435,7 +2435,7 @@ describe('schema DSL optional and nested contracts', () => {
     expect(result.content[0]).toMatchObject({ text: 'Error: kaboom' })
   })
 
-  it('reports messages from throws of objects without message property', async () => {
+  it('reports throws of objects without a message property as their JSON text', async () => {
     const ctx = await setup()
     ctx.tools.register({
       ...echoTool,
@@ -2450,8 +2450,37 @@ describe('schema DSL optional and nested contracts', () => {
     const firstContent = result.content[0]!
     expect(firstContent.type).toBe('text')
     if (firstContent.type === 'text') {
-      expect(firstContent.text).toBe('Error: [object Object]')
+      expect(firstContent.text).toBe('Error: {"code":500}')
     }
+  })
+
+  it('names the cancel cause when a tool rethrows its aborted signal reason', async () => {
+    const ctx = await setup()
+    ctx.tools.register({
+      ...echoTool,
+      name: 'rethrows-abort-reason',
+      async execute() {
+        // An agent cancel aborts the call's signal with a plain cause object; some tools rethrow signal.reason.
+        throw { kind: 'user' }
+      },
+    })
+    const result = await ctx.tools.execute({ signal: testToolSignal, callId: ToolCallId('c1'), name: 'rethrows-abort-reason', arguments: {} })
+    expect(result.content[0]).toMatchObject({ text: 'Error: {"kind":"user"}' })
+  })
+
+  it('falls back to String() for thrown objects without JSON text, and caps long JSON', async () => {
+    const ctx = await setup()
+    const cyclic: Record<string, unknown> = {}
+    cyclic['self'] = cyclic
+    ctx.tools.register({ ...echoTool, name: 'throws-cyclic', async execute() { throw cyclic } })
+    ctx.tools.register({ ...echoTool, name: 'throws-empty', async execute() { throw {} } })
+    ctx.tools.register({ ...echoTool, name: 'throws-big', async execute() { throw { blob: 'x'.repeat(2000) } } })
+    const run = (name: string) => ctx.tools.execute({ signal: testToolSignal, callId: ToolCallId('c1'), name, arguments: {} })
+    expect((await run('throws-cyclic')).content[0]).toMatchObject({ text: 'Error: [object Object]' })
+    expect((await run('throws-empty')).content[0]).toMatchObject({ text: 'Error: [object Object]' })
+    const big = (await run('throws-big')).content[0]
+    expect(big?.type === 'text' ? big.text.length : 0).toBe('Error: '.length + 500 + 1)
+    expect(big).toMatchObject({ text: expect.stringMatching(/^Error: \{"blob":"x+…$/) })
   })
 })
 

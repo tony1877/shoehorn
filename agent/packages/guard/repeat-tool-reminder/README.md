@@ -1,5 +1,5 @@
 ---
-description: "Advisory loop-hygiene guard that nudges the model out of identical tool-call loops, for users and maintainers choosing, configuring, or debugging the plugin."
+description: "Advisory loop-hygiene guard that nudges the model out of identical tool-call loops and loops that keep getting the same result, for users and maintainers choosing, configuring, or debugging the plugin."
 kind: "package-reference"
 ---
 
@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-A model can get stuck calling the same tool with the same arguments — re-running a failing command, re-reading an unchanged file — burning time and tokens without making progress. `dsh-repeat-tool-reminder` notices the pattern and tells the model to stop: at chosen repeat counts it delivers a reminder to analyze the last result and either try a different approach or finish. The reminder is advice, never a block: a legitimate repeated call is delayed by nothing, and the decision to continue, change approach, or stop stays with the model. It tracks each agent separately, so one agent's loop never disturbs another's work, and a new user message clears the count. It ships enabled in the `dsh` base bundle with reminders at 3, 5, and 8 repeats.
+A model can get stuck calling the same tool with the same arguments — re-running a failing command, re-reading an unchanged file — burning time and tokens without making progress. `dsh-repeat-tool-reminder` notices the pattern and tells the model to stop: at chosen repeat counts it delivers a reminder to analyze the last result and either try a different approach or finish. The reminder is advice, never a block: a legitimate repeated call is delayed by nothing, and the decision to continue, change approach, or stop stays with the model. It tracks each agent separately, so one agent's loop never disturbs another's work, and a new user message clears the count. It ships enabled in the `dsh` base bundle with reminders at 3, 5, and 8 repeats. A loop can also vary its calls — a new script name each time — while getting the same answer back; with same-result detection on, which the base bundle enables for `pwsh` and `bash`, the guard catches that too.
 
 ## Table of Contents
 
@@ -29,7 +29,7 @@ Mount this plugin when the model should catch itself looping on identical tool c
 
 ### When to choose it
 
-Choose it when the model works autonomously for long stretches and a stuck loop is the failure you want to break with advice rather than force. Avoid it when identical repeats are legitimate and must run undisturbed — the guard only reminds, and a reminder is a small extra message after the repeated call — and when near-identical variants must be caught, because only exact repeats (same tool, same arguments regardless of property order) are detected.
+Choose it when the model works autonomously for long stretches and a stuck loop is the failure you want to break with advice rather than force. Avoid it when identical repeats are legitimate and must run undisturbed — the guard only reminds, and a reminder is a small extra message after the repeated call — and when near-identical calls with different outputs must be caught: the repeat chain matches only exact repeats (same tool, same arguments regardless of property order), and same-result detection matches only equal results.
 
 ### Setting the thresholds and scope
 
@@ -42,6 +42,11 @@ When you want to change when reminders fire or which tools they cover, mount the
     include: []                  # track every tool; list patterns to track only some
     exclude: [todo_write]        # never track these tools
     argumentsPreviewChars: 500   # cap on arguments shown in the detailed reminder
+    resultThresholds: [3, 5, 8]  # remind when one tool returns the same result 3, 5, 8 times
+    resultInclude: [pwsh, bash]  # compare only these tools' results
+    resultWindow: 12             # ...within the agent's last 12 such calls
+    resultPreviewChars: 500      # cap on the result shown in the detailed reminder
+    reminderSuffix: ''           # text appended to every reminder
 ```
 
 | Field | Default | Meaning |
@@ -50,12 +55,19 @@ When you want to change when reminders fire or which tools they cover, mount the
 | `include` | `[]` | Only these tools are tracked; empty means every tool |
 | `exclude` | `[]` | These tools are never tracked; calls to them neither count nor reset |
 | `argumentsPreviewChars` | `500` | How many characters of the repeated arguments the detailed reminder shows |
+| `resultThresholds` | `[]` (off) | Same-result counts that trigger a reminder, whatever the calls' arguments |
+| `resultInclude` | `[]` | Only these tracked tools' results are compared; empty means every tracked tool |
+| `resultWindow` | `12` | How many of the agent's recent result-compared calls are searched for an equal result |
+| `resultPreviewChars` | `500` | How many characters of the repeated result the detailed same-result reminder shows |
+| `reminderSuffix` | `''` | Text appended to every reminder, e.g. a chat-template tag that raises reasoning effort |
 
-Invalid configuration fails at startup with a clear error — an empty `thresholds` list, a repeat count below 2, or a duplicate — never a silent change of behavior. The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-repeat-tool-reminder) documents every accepted value.
+Invalid configuration fails at startup with a clear error — an empty `thresholds` list, a repeat count below 2, a duplicate, or a `resultWindow` smaller than the highest `resultThresholds` entry — never a silent change of behavior. The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-repeat-tool-reminder) documents every accepted value.
 
 ### What you get
 
 With the defaults, a model that repeats the same call with identical arguments receives a short reminder on the third repeat — to analyze the previous result before calling again — and detailed reminders on the fifth and eighth, naming the tool and the repeated arguments so it can decide whether to change approach, gather more evidence, or finish. A new user message clears the count, so a fresh instruction is never treated as a loop. Reminders appear in the conversation after the repeated call's result, attributed to the plugin, so the model reads them like any other message.
+
+With same-result detection on, a tool that returns the same output a third time within the window — though each call ran a different script — draws a short reminder to stop running variations and question its assumptions, including any expectation stated in the task, which may itself be wrong. The fifth and eighth equal results draw detailed reminders that quote the result. Each threshold reminds once per distinct result until the next user message.
 
 -----
 
@@ -74,7 +86,7 @@ The guard is built on four commitments:
 - **Advisory, not veto.** The guard enriches post-execute decisions with model context; it never blocks or rewrites a call, so `PostToolDecision` blocking stays a later listener's job.
 - **Count in post-execute.** Detection runs on `tools/post-execute`, which also fires for denied calls; counting there lets one listener cover every attempt with no cross-event state.
 - **Exact-match canonicalization.** Arguments reach the guard as the loop's `JSON.parse` output (or its raw-string fallback), so JSON's value domain is the whole input domain and a deep key-sort plus `JSON.stringify` is a complete, deterministic identity — no bigint, cycle, or `undefined` handling exists because no input path can produce them.
-- **Fail loud at load.** `thresholds` and `argumentsPreviewChars` validate in `apply` and throw, never falling back to defaults.
+- **Fail loud at load.** Both threshold lists, the preview caps and `resultWindow` validate in `apply` and throw, never falling back to defaults.
 
 ### Detection: the repeat chain
 
@@ -86,9 +98,13 @@ Each agent's chain is keyed by `(tool name, canonical arguments)` — two calls 
 - **Per-agent keying, reset on user prompts.** One agent's repetition never trips another's reminder; a user prompt (`agent/pre-step`) deletes the submitting agent's chain, and object lifetime bounds the weak entry without a disposal listener.
 - **In-memory only.** A session resumed from persistence starts with a fresh chain — the guard is a heuristic nudge, not a logged invariant, so reminders after a resume are the accepted cost.
 
+### Detection: repeated results
+
+Same-result detection is off until `resultThresholds` is non-empty. For each tracked call to a tool matching `resultInclude`, the guard records `(tool name, result content blocks)` in the agent's history of its last `resultWindow` such calls and counts the equal entries. Keying on the whole blocks keeps two different images apart; the reminder quotes their text rendering, with a non-text block named `[<type> content]`. A threshold reminds once per distinct result: the count can fall as old calls leave the window and climb back, and a second crossing stays silent. When the repeat chain also fires on the same call, only its exact-repeat reminder is delivered, because it names the repeated arguments. A user prompt clears the history together with the chain.
+
 ### Reminder delivery
 
-Reminders ride the post-execute decision's `additionalContexts` (source `{kind: 'plugin', plugin: 'repeat-tool-reminder', form: 'notice', summary: '<tool> × <count>'}`), never a `content` replacement: the `tool/result` event stays the tool's own output for audit. The loop buffers the context and appends it as an injected `user/message` after the step's tool results, which the session renders as a plain synthetic user message — model-visible, source-attributed, and reconstructable from the session log with no new session event. The guard always delegates via `next()` and prepends its reminder to the downstream decision's context array, so both decision variants (a blocked call included) still get the nudge while every entry retains its own source and metadata.
+Reminders ride the post-execute decision's `additionalContexts` (source `{kind: 'plugin', plugin: 'repeat-tool-reminder', form: 'notice', summary: '<tool> × <count>'}`, or `'<tool> same result × <count>'` for same-result reminders; a non-empty `reminderSuffix` follows the text after a blank line), never a `content` replacement: the `tool/result` event stays the tool's own output for audit. The loop buffers the context and appends it as an injected `user/message` after the step's tool results, which the session renders as a plain synthetic user message — model-visible, source-attributed, and reconstructable from the session log with no new session event. The guard always delegates via `next()` and prepends its reminder to the downstream decision's context array, so both decision variants (a blocked call included) still get the nudge while every entry retains its own source and metadata.
 
 ### Source map
 
@@ -159,6 +175,36 @@ Each reminder is retained history; `argumentsPreviewChars` bounds its data-depen
 
 Append-only; newly visible content follows the reusable request prefix and does not invalidate existing KV-cache entries.
 
+### Same-result context messages
+
+#### What the model sees
+
+When same-result detection is on, the first `resultThresholds` entry delivers the first reminder below and later entries the detailed template. A capped result preview ends exactly `… (+<omitted> more chars)`.
+
+##### First same-result reminder
+
+```markdown
+Your recent calls to this tool keep returning the same result. Running more variations of the same check will not change it. Before calling again, work out why the result differs from what you expected: re-check your assumptions, including any expectation stated in the task, which may itself be wrong. Then change approach, or report the discrepancy and finish.
+```
+
+##### Later same-result reminder
+
+```markdown
+Repeated tool result detected:
+- tool: <toolName>
+- same_result_count: <count> of the last <window> calls
+- result: <result>
+These calls are not making progress: the result is not going to change. Do not run another variation of this check. State what you expected and why the observed result differs, verify that expectation itself, then take a different action or finish the task and report the discrepancy.
+```
+
+#### Token effect
+
+Zero tokens while detection is off or below the first threshold. Each reminder is retained history; `resultPreviewChars` bounds its data-dependent result text.
+
+#### KV Cache effect
+
+Append-only, like the repeat-chain reminders. A `reminderSuffix` that the chat template interprets, such as a reasoning-effort tag, can change text rendered before the reminder and so invalidates the cached prefix once.
+
 ## Known Limitations and Deferred Work
 
 <a id="known-limitations-and-deferred-work"></a>
@@ -166,7 +212,8 @@ Append-only; newly visible content follows the reusable request prefix and does 
 
 These limits define when the guard is a poor fit. They are current package constraints, not a task backlog.
 
-- **Exact-match detection only** — canonicalization is a deep key-sort, so near-identical variants (a tweaked path, extra whitespace inside a value) evade the chain; fuzzy matching is rejected pending evidence of need.
+- **Exact-match detection only** — canonicalization is a deep key-sort, so near-identical variants (a tweaked path, extra whitespace inside a value) evade the chain; fuzzy matching is rejected pending evidence of need. Same-result detection catches varied calls only when their results are equal, so output that embeds a timestamp or a temporary path evades it.
+- **An equal result is not always a loop** — a test run that keeps passing, or a command that keeps printing nothing, draws same-result reminders; `resultInclude` and `resultThresholds` are the pressure valves.
 - **Compaction does not reset chains** — a chain spanning a compaction checkpoint keeps counting.
 - **Advisory only** — escalating to a blocking form at a high threshold is not implemented, though `PostToolDecision` already supports blocking.
 - **No subagent chain-sharing** — chains stay isolated per agent; a parent and its subagent repeating the same call never combine.
