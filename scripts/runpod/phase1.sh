@@ -55,6 +55,9 @@ status "downloading"
 hf download "$REPO" "$PACK.base.gguf" "$PACK.res.gguf" linuxtest/ppl.ids linuxtest/prompt.ids --local-dir $W/m --quiet || fail download
 cd $W/out
 
+# ONLY_EXTRA=amd: skip ppl / gen (already done on this GPU) and run the AMD follow-up checks
+if [ -n "${ONLY_EXTRA:-}" ]; then bash $W/shoehorn/scripts/runpod/${ONLY_EXTRA}_extra.sh; sleep infinity; fi
+
 ulimit -l; nvidia-smi --query-gpu=name,pcie.link.gen.current,pcie.link.width.current,memory.total --format=csv 2>/dev/null || rocminfo 2>/dev/null | grep -m3 -E "gfx|Marketing" || true
 status "ppl"
 "$BIN" ppl $W/m/$PACK.base.gguf --res $W/m/$PACK.res.gguf --tokens $W/m/linuxtest/ppl.ids --ctx 512 --chunks 8 \
