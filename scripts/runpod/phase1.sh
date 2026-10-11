@@ -43,7 +43,7 @@ if [ -d $W/shoehorn/.git ]; then  # a restarted container keeps its disk: update
 else
     git clone -q --depth 1 -b "$BRANCH" --recurse-submodules --shallow-submodules https://github.com/tony1877/shoehorn $W/shoehorn || fail clone
 fi
-cd $W/shoehorn && bash scripts/build.sh --clean --backend cuda --arch native || fail build
+cd $W/shoehorn && bash scripts/build.sh --backend cuda --arch native || fail build
 BIN=$W/shoehorn/build/bin/shoehorn
 
 status "downloading"
