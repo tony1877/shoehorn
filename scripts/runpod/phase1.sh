@@ -16,6 +16,7 @@ TAG=${TAG:-linux}
 W=/work
 mkdir -p $W/out
 LOG=$W/out/phase1.$TAG.log
+: > "$LOG"
 exec > >(tee -a "$LOG") 2>&1
 
 status() {
@@ -37,7 +38,11 @@ python3 -m venv /opt/hf && /opt/hf/bin/pip install -q "huggingface_hub[hf_xet]" 
 export PATH=/opt/hf/bin:$PATH
 hf auth whoami || fail "HF_TOKEN not accepted"
 status "building"
-git clone -q --depth 1 -b "$BRANCH" --recurse-submodules --shallow-submodules https://github.com/tony1877/shoehorn $W/shoehorn || fail clone
+if [ -d $W/shoehorn/.git ]; then  # a restarted container keeps its disk: update instead of cloning
+    git -C $W/shoehorn pull -q --ff-only || fail pull
+else
+    git clone -q --depth 1 -b "$BRANCH" --recurse-submodules --shallow-submodules https://github.com/tony1877/shoehorn $W/shoehorn || fail clone
+fi
 cd $W/shoehorn && bash scripts/build.sh --backend cuda --arch native || fail build
 BIN=$W/shoehorn/build/bin/shoehorn
 

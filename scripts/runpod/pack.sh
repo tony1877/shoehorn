@@ -35,7 +35,11 @@ export PATH=/opt/hf/bin:$PATH HF_HUB_ENABLE_HF_TRANSFER=0
 hf auth whoami || fail "HF_TOKEN not accepted"
 status "building"
 
-git clone -q --depth 1 -b "$BRANCH" --recurse-submodules --shallow-submodules https://github.com/tony1877/shoehorn $W/shoehorn || fail clone
+if [ -d $W/shoehorn/.git ]; then  # a restarted container keeps its disk: update instead of cloning
+    git -C $W/shoehorn pull -q --ff-only || fail pull
+else
+    git clone -q --depth 1 -b "$BRANCH" --recurse-submodules --shallow-submodules https://github.com/tony1877/shoehorn $W/shoehorn || fail clone
+fi
 cd $W/shoehorn && bash scripts/build.sh --backend cuda --arch native || fail build
 BIN=$W/shoehorn/build/bin/shoehorn
 
