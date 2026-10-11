@@ -894,7 +894,7 @@ static GpuSensors nvml_sensors() {
     return s;
 }
 
-// AMD GPU 0 from the amdgpu driver's sysfs (hwmon temperature and power, VRAM and memory load): no ROCm library and no
+// AMD GPU (the first one this process can use) from the amdgpu driver's sysfs (hwmon temperature and power, VRAM and memory load): no ROCm library and no
 // root, and the same files on every ROCm version (libamd_smi's structs change between releases)
 static GpuSensors amdgpu_sensors() {
     static std::string dev;  // /sys/class/drm/cardN/device of the first AMD GPU, found once
@@ -909,14 +909,30 @@ static GpuSensors amdgpu_sensors() {
                 if (n.rfind("card", 0) == 0 && n.find('-') == std::string::npos) cards.push_back(n);
             }
             closedir(d);
-            std::sort(cards.begin(), cards.end());
+            std::sort(cards.begin(), cards.end(), [](const std::string & a, const std::string & b) {
+                return std::atoi(a.c_str() + 4) < std::atoi(b.c_str() + 4);  // card2 before card10
+            });
+            // a container sees every card of the host in /sys but gets only its own GPU's render node in /dev/dri:
+            // take the first AMD card whose render node this process can open (on a desktop: the first AMD card)
+            std::string first;
             for (const auto & c : cards) {
                 const std::string p = "/sys/class/drm/" + c + "/device";
-                if (read_line(p + "/vendor") == "0x1002" && !read_line(p + "/mem_info_vram_total").empty()) {
+                if (read_line(p + "/vendor") != "0x1002" || read_line(p + "/mem_info_vram_total").empty()) continue;
+                if (first.empty()) first = p;
+                bool mine = false;
+                if (DIR * r = opendir((p + "/drm").c_str())) {
+                    for (dirent * e; (e = readdir(r));) {
+                        const std::string n = e->d_name;
+                        if (n.rfind("renderD", 0) == 0 && access(("/dev/dri/" + n).c_str(), R_OK | W_OK) == 0) mine = true;
+                    }
+                    closedir(r);
+                }
+                if (mine) {
                     dev = p;
                     break;
                 }
             }
+            if (dev.empty()) dev = first;
         }
     }
     if (dev.empty()) return s;
