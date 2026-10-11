@@ -1,54 +1,29 @@
-# Linux port: to do
+# Linux port: Claude's work list
 
-Working list for [LINUX-PLAN.md](LINUX-PLAN.md). Updated 2026-10-11.
+Only what Claude can do itself: on this PC (WSL Debian 13, Docker, the RTX 5080 when the Windows server is idle) or
+on RunPod within the balance ($14.26 on 2026-10-11; budget below keeps ~$4 in reserve). In order. Costs are
+estimates at today's prices (community cloud where it has stock). Full plan: [LINUX-PLAN.md](LINUX-PLAN.md).
 
-## Now
-- [ ] Phase 1: r3 on the pod (`ppl --save-kld`, greedy `gen --compare`); compare with the Windows reference
-      (PPL 2.7637, KLD ≤ 1e-5, same greedy tokens per mode)
-- [ ] Phase 1: r4 on the same pod (`PACK=orca27b-r4`); Windows reference for r4 once the download finishes
-- [ ] Delete the pod; record the results in LINUX-PLAN.md
+| # | Task | Where | Est. cost |
+|---|---|---|---|
+| 1 | Phase 1, r3: pod `ppl --save-kld` + greedy `gen --compare`; KLD vs Windows here (gate ≤ 1e-5, same tokens) | PRO 6000 MIG pod (running) + PC | ~$0.40 |
+| 2 | Phase 1, r4: same pod with `PACK=orca27b-r4`; Windows r4 reference on the 5080 | same pod + PC | ~$0.40 |
+| 3 | Delete the pod; record results in LINUX-PLAN.md | — | — |
+| 4 | Phase 1, other architectures: sm_89 (RTX 4000 Ada / 4090) and sm_86 (A5000 / 3090) with r3; gate KLD ≤ 1e-3 | 2 community pods, ~30 min each | ~$0.30 |
+| 5 | Phase 2 on a pod: `serve` with base + residual, every page and `/stats` with real values, a chat request, Settings restart, a pack and a download job started and cancelled | sm_89 pod from step 4 (extra ~30 min) | ~$0.15 |
+| 6 | Phase 0 rest: GPU builds with Clang as host compiler (Docker); check the CI workflow's GitHub runs and fix failures | PC + GitHub Actions (free) | $0 |
+| 7 | Phase 6 rest: systemd units in WSL (systemd enabled): enable, kill → restart, Settings restart (exit 75), `wsl --shutdown` as the reboot test | PC | $0 |
+| 8 | Phase 3, AMD: HIP build + `ppl` / `gen` on an MI300X (gfx942), gate KLD ≤ 1e-3 vs NVIDIA; check flash attention with q8_0/q4_0 KV, graph capture, `hipHostMalloc`, PCIe rate | MI300X community pod, ~1.5 h | ~$0.75 (secure: ~$3.60) |
+| 9 | Phase 3: AMD sensors through `libamd_smi` (code), checked on the same MI300X pod | PC + step 8 pod | (in 8) |
+| 10 | Phase 5: portable CUDA tarball built in an AlmaLinux 9 container; `shoehorn:cuda` runtime image | PC (Docker) | $0 |
+| 11 | Phase 5: distribution matrix: the tarball on pods running ubuntu 22.04/24.04, debian 12/13, fedora, almalinux 9/10, archlinux images, `selftest` + short `gen` on a small model | 8 short A4000 community pods | ~$0.50 |
+| 12 | Phase 5: `.deb` and `.rpm` from the tarball (fpm or native tools), installed in the matrix images | PC (Docker) | $0 |
+| 13 | Phase 4: fit profiles: pick base/residual from free VRAM (code); pack a 3-bit base (`--base iq3_s`) and measure its KLD against q8 (`E:/shoehorn/q8.kld`) on the 5080 | PC (pack on CPU, KLD on the 5080 when idle) | $0 |
+| 14 | Phase 4: Models page shows which profile fits the GPU | PC | $0 |
+| 15 | Phase 7: Windows vs Linux speed on an RTX 5080 pod: `shoehorn bench`, `bench_prose.py`; GPU-bound parts compared, verify reported separately; numbers in `bench/results/` | RTX 5080 community pod, ~1 h | ~$0.40 |
 
-## Phase 0 (builds)
-- [x] `scripts/build.sh`, CMake HIP option, dev images, CI workflow
-- [x] CPU builds clean with GCC and Clang; CUDA and HIP release builds compile
-- [ ] GPU builds with Clang as the host compiler
-- [ ] First green CI run on GitHub
+Total ≈ $3.30 (community). Before each pod: check the balance and stock; each pod is deleted when its job reports
+done or failed, and no pod runs unwatched.
 
-## Phase 1 (correct on NVIDIA)
-- [x] `moe_cpu` madvise prefetch; `RLIMIT_MEMLOCK` handling
-- [x] Linux `pack` = Windows `pack` byte for byte (866/866 tensors)
-- [x] `pack` drops the template's old `eightfer.*` / `shoehorn.pack.*` keys
-- [ ] sm_89 (RTX 4090 / 4000 Ada) and sm_86 (A4000 / 3090) runs; gate KLD ≤ 1e-3 across architectures
-- [ ] `serve` with base + residual on a pod
-
-## Phase 2 (server and dashboard)
-- [x] POSIX `sysinfo` (processes, restart, CPU, drives, NVML, hwmon sensors, file pickers)
-- [ ] On a pod: every page shows real values (drive temps and board sensors untested in WSL)
-- [ ] Restart, pack and download jobs complete and can be cancelled
-
-## Phase 3 (AMD)
-- [x] HIP build compiles (`__ldcs` gap fixed, PIC)
-- [ ] Run on a RunPod MI300X / MI350: `ppl` / `gen`, gate KLD ≤ 1e-3 against NVIDIA
-- [ ] Check IQ4_XS speed, flash attention with q8_0/q4_0 KV, graph capture, `hipHostMalloc`, PCIe rate
-- [ ] AMD sensors through `libamd_smi`
-- [ ] Consumer RX 7900 / 9070 speed (needs hardware outside RunPod)
-
-## Phase 4 (GPU fit profiles)
-- [ ] Defaults from free VRAM (24 GB+: residual partly in VRAM; 16 GB: streamed; 12 GB: 3-bit base)
-- [ ] Measure the 12 GB profile's quality before offering it
-- [ ] Models page shows which profile fits
-
-## Phase 5 (packaging)
-- [ ] `shoehorn:cuda` / `shoehorn:rocm` images and portable tarballs (AlmaLinux 9 build) in CI
-- [ ] Distribution matrix on one pod: Ubuntu 22.04/24.04/26.04, Debian 12/13, Fedora, Alma 9/10, Arch
-- [ ] `.deb`, `.rpm`, AUR
-
-## Phase 6 (service and docs)
-- [x] systemd units, Settings restart under systemd, `scripts/agent.sh`, Linux agent prompt, `docs/linux.md`
-- [ ] Reboot brings everything back; killing the server restarts it (on a real machine)
-- [ ] Optional: port the pwsh auto-background patch to dsh's bash tool
-
-## Phase 7 (speed)
-- [ ] Windows vs Linux benchmarks on the same GPU class (`bench`, `bench_prose.py`, code benchmark)
-- [ ] Per-GPU numbers in `bench/results/`
-- [ ] Linux-only gains: `io_uring` for MoE streaming, huge pages for pinned buffers, thread pinning
+Not on this list (needs something Claude does not have): consumer AMD RX 7900 / 9070 hardware, a bare-metal Linux
+reboot test with real sensors, publishing to the AUR or a package repository, Intel Arc.
