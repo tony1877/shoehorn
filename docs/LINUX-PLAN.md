@@ -199,6 +199,20 @@ the prefetch patches, so the verify would be slower.
 
 Gate: each profile loads and runs `bench_prose.py` on a RunPod card of that size; numbers recorded per GPU.
 
+Progress (2026-10-11): `gpu_fit()` in the server picks the profile from total VRAM; without `--res-gpu-gb` the
+residual goes to VRAM from 22 GB up (a 16 GB card keeps today's default); `/models/state` and the Models page show
+the profile. The 12 GB profile measured against Q8 (`q8.kld`, first 40 chunks of 512, RTX 5080):
+
+| Pack | Base in VRAM | Mean KLD vs Q8 | Same top-1 | PPL |
+|---|---|---|---|---|
+| r4: iq4_xs + q4_K | ~13.9 GB | 0.0020 | 97.7% | 4.002 |
+| r3: iq4_xs + q3_K | ~13.9 GB | 0.0031 | 97.4% | 3.996 |
+| b3: iq3_xxs + q4_K (12 GB profile) | ~10.1 GB | 0.0048 | 96.9% | 4.017 |
+| b3 base alone | ~10.1 GB | 0.236 | 82.0% | 4.480 |
+
+The residual carries the 3-bit base close to the 16 GB setup (1.5x r3's KLD). Whether to offer it is open
+question 3. Not yet run: `bench_prose.py` per profile on a card of each size.
+
 ### Phase 5: packaging and the distribution matrix (4-6 days)
 
 1. Container images and tarballs built in CI (see [Packaging](#packaging)).
@@ -272,6 +286,6 @@ porting that patch to `dsh-tool-bash-persistent` would let both prompts match.
 
 1. Consumer AMD speed testing (RDNA3/RDNA4): local hardware or another cloud.
 2. Intel Arc through Vulkan: out of scope unless asked.
-3. Whether the 12 GB profile's quality is acceptable, measured in Phase 4.
+3. Whether the 12 GB profile's quality is acceptable: measured in Phase 4 (KLD 0.0048 vs Q8, 96.9% same top-1; r3 0.0031). Owner's decision.
 
 Estimate: about 6-8 weeks for Phases 0-6; Phase 7 runs alongside.
