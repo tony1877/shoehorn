@@ -45,6 +45,9 @@ else
 fi
 cd $W/shoehorn && bash scripts/build.sh --backend cuda --arch native || fail build
 BIN=$W/shoehorn/build/bin/shoehorn
+# a community host with a broken driver makes ggml fall back to the CPU silently: stop early instead
+"$BIN" bench --only gpu > $W/out/gpucheck.$TAG.txt 2>&1
+if [ $? != 0 ] || grep -q "failed to initialize CUDA" $W/out/gpucheck.$TAG.txt; then fail "no usable CUDA GPU on this host"; fi
 
 status "downloading"
 hf download "$REPO" "$PACK.base.gguf" "$PACK.res.gguf" linuxtest/ppl.ids linuxtest/prompt.ids --local-dir $W/m --quiet || fail download
