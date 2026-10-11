@@ -51,7 +51,14 @@ The binary is `build/bin/shoehorn`.
 The server keeps the RAM part of a long-context KV locked in memory (`mlock`). Most distributions cap that at 8 MB
 per process; shoehorn raises its limit to the hard limit at start, and prints once how to raise it further when that
 is not enough. For an interactive shell: `ulimit -l unlimited` (needs a hard limit that allows it, e.g.
-`* - memlock unlimited` in `/etc/security/limits.conf`). The systemd unit below sets `LimitMEMLOCK=infinity`.
+`* - memlock unlimited` in `/etc/security/limits.conf`). The systemd unit below sets `LimitMEMLOCK=infinity`, but a
+user unit cannot go above its user manager's own limit (64 MB on Debian 13), so raise that once, as root:
+
+```bash
+sudo mkdir -p /etc/systemd/system/user@.service.d
+printf '[Service]\nLimitMEMLOCK=infinity\n' | sudo tee /etc/systemd/system/user@.service.d/memlock.conf
+sudo systemctl daemon-reload    # then log out and in (or reboot)
+```
 
 ## 4. Run as a service
 
