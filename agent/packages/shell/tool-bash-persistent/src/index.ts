@@ -7,7 +7,8 @@ import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { TerminalReadResult, TerminalSessionId } from '@deepseek-ai/dsh-terminal'
+import type { JobHooks, JobOutcome, JobRegistry } from '@deepseek-ai/dsh-jobs'
+import type { TerminalReadResult, TerminalSendOperation, TerminalSendResult, TerminalSessionId } from '@deepseek-ai/dsh-terminal'
 import { deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
@@ -22,13 +23,38 @@ const SCROLLBACK_PAGE_LINES = 1_000
 const POLL_INTERVAL_MS = 25
 
 const DEFAULT_DESCRIPTION = 'Run commands in a persistent bash shell. State, including the current directory and exported environment variables, persists across calls for this agent.'
+// A background watcher polls the detached shell at this interval between sends.
+const BACKGROUND_POLL_MS = 250
+const PROMOTED_PREFIX = '[still running after '
+const LOST_HEAD_NOTICE = '[earlier output of this job is no longer retained by the terminal]\n'
 
 interface ResolvedConfig {
   backendType: string
   timeoutMs: number
   maxOutputChars: number
   description: string
+  /** Auto-background wait in ms; 0 keeps kill-and-reset on `timeoutMs`. */
+  autoBackgroundAfterMs: number
+  /** Upper bound on a call's own foreground wait under auto-background. */
+  maxForegroundMs: number
 }
+
+/** One command's progress through its shell: markers, the send in flight, and the output seen so far. */
+interface CommandRun {
+  id: TerminalSessionId
+  marker: CommandMarkers
+  wrapped: string
+  first: boolean
+  fallback: string
+  fallbackTruncated: boolean
+  operation: TerminalSendOperation | undefined
+}
+
+/** How a command's shell interaction settled, independent of who is waiting on it. */
+type Settled =
+  | { kind: 'complete'; output: CapturedOutput }
+  | { kind: 'exited'; status: { exitCode: number | null; signal: NodeJS.Signals | null } }
+  | { kind: 'prompt' }
 
 interface CommandMarkers {
   start: string
@@ -49,6 +75,19 @@ interface CapturedOutput {
 interface PersistentShells {
   get(owner: Agent, signal: AbortSignal): Promise<TerminalSessionId>
   reset(owner: Agent, reason: string): Promise<void>
+  /**
+   * Hand the owner's current shell over to a background command: the shell
+   * keeps running, but the owner's next `get` spawns a fresh one.
+   */
+  detach(owner: Agent): TerminalSessionId | undefined
+  /** Close a detached shell once its background command is over (idempotent). */
+  closeDetached(id: TerminalSessionId, reason: string): Promise<void>
+}
+
+declare module '@deepseek-ai/dsh-jobs' {
+  interface JobKindMap {
+    bash: 'bash'
+  }
 }
 
 function maybeTruncate(content: string, maxOutputChars: number, incomplete = false): string {
@@ -222,6 +261,8 @@ function persistentShells(ctx: Context, config: ResolvedConfig): PersistentShell
   const creating = new Set<Promise<TerminalSessionId>>()
   const ownerCleanupInstalled = new WeakSet<Agent>()
   const lifecycle = new AbortController()
+  // Shells running a background command, no longer any owner's current shell.
+  const detached = new Map<TerminalSessionId, Agent>()
 
   const close = async (owner: Agent, id: TerminalSessionId, reason: string): Promise<void> => {
     if (!ctx.terminals.list(owner).some(snapshot => snapshot.sessionId === id)) return
@@ -231,10 +272,27 @@ function persistentShells(ctx: Context, config: ResolvedConfig): PersistentShell
   ctx.effect(() => async () => {
     lifecycle.abort(new Error('tool-bash-persistent disposed during shell creation'))
     await Promise.allSettled([...creating])
-    const closing = [...live].map(async ([owner, id]) => { await close(owner, id, 'tool-bash-persistent disposed') })
-    await Promise.all(closing)
+    const closing = [...live, ...[...detached].map(([id, owner]) => [owner, id] as const)]
+      .map(async ([owner, id]) => { await close(owner, id, 'tool-bash-persistent disposed') })
+    await Promise.allSettled(closing)
     live.clear()
+    detached.clear()
   }, 'tool-bash-persistent shell cleanup')
+
+  const detach = (owner: Agent): TerminalSessionId | undefined => {
+    pending.delete(owner)
+    const id = live.get(owner)
+    live.delete(owner)
+    if (id !== undefined) detached.set(id, owner)
+    return id
+  }
+
+  const closeDetached = async (id: TerminalSessionId, reason: string): Promise<void> => {
+    const owner = detached.get(id)
+    if (owner === undefined) return
+    detached.delete(id)
+    await close(owner, id, reason)
+  }
 
   const reset = async (owner: Agent, reason: string): Promise<void> => {
     pending.delete(owner)
@@ -287,7 +345,7 @@ function persistentShells(ctx: Context, config: ResolvedConfig): PersistentShell
     return tracked
   }
 
-  return { get, reset }
+  return { get, reset, detach, closeDetached }
 }
 
 async function executeCommand(
@@ -378,6 +436,259 @@ async function executeCommand(
 }
 
 /**
+ * Fold one settled send into the command's state and report whether the
+ * command is over: its end marker arrived (`complete`), the shell itself
+ * exited, or the shell read stdin again without the marker (`prompt`: an
+ * `exec`, an interrupt or an interactive child, as in `executeCommand`).
+ */
+function absorbSend(
+  ctx: Context,
+  owner: Agent,
+  run: CommandRun,
+  operation: TerminalSendOperation,
+  result: TerminalSendResult,
+): Settled | undefined {
+  const incremental = operation.readOutput()
+  run.fallback = incremental.delta.length > 0 ? run.fallback + incremental.delta : result.viewport
+  run.fallbackTruncated ||= incremental.truncated || result.truncated
+  const latest = ctx.terminals.read(owner, run.id, { offset: 0, count: SCROLLBACK_PAGE_LINES })
+  if (latest.text.includes(run.marker.end)) {
+    const complete = commandOutput(retainedScrollback(ctx, owner, run.id, latest), run.marker)
+    if (complete !== undefined) return { kind: 'complete', output: complete }
+  }
+  if (result.sessionStatus.kind === 'exited') return { kind: 'exited', status: result.sessionStatus }
+  if (result.waitReason === 'stdin_read') return { kind: 'prompt' }
+  return undefined
+}
+
+/** The command's output so far (from its start marker), from retained scrollback. */
+function runOutputSoFar(ctx: Context, owner: Agent, run: CommandRun): CapturedOutput {
+  return partialOutput(retainedScrollback(ctx, owner, run.id), run.marker, run.fallback, run.fallbackTruncated)
+}
+
+/** Keep the tail of an over-long job read, marking the cut. */
+function clipTail(text: string, maxOutputChars: number): string {
+  if (text.length <= maxOutputChars) return text
+  return `[${text.length - maxOutputChars} earlier characters omitted]\n${text.slice(-maxOutputChars)}`
+}
+
+/**
+ * A command that outlived its foreground wait, still running in the shell it
+ * started in. The shell is detached from the owner (their next call gets a
+ * fresh one) and this watcher keeps polling it until the command's end marker
+ * arrives, the shell exits, or the job is cancelled - then closes the shell.
+ * Output reads are consuming: each returns only what the command printed
+ * since the previous read (or since the promotion notice).
+ */
+class BackgroundCommand {
+  private emitted = ''
+  private final: CapturedOutput | undefined
+  private cancelled = false
+
+  constructor(
+    private readonly ctx: Context,
+    private readonly shells: PersistentShells,
+    private readonly owner: Agent,
+    private readonly run: CommandRun,
+    private readonly config: ResolvedConfig,
+  ) {}
+
+  /** Consume the output produced since the previous read. */
+  readNew(): string {
+    let current: string
+    if (this.final !== undefined) {
+      current = this.final.text
+    } else {
+      try {
+        current = runOutputSoFar(this.ctx, this.owner, this.run).text
+      } catch {
+        // The shell is already closed; nothing new can be read from it.
+        current = this.emitted
+      }
+    }
+    const max = Math.min(current.length, this.emitted.length)
+    let common = 0
+    while (common < max && current.charCodeAt(common) === this.emitted.charCodeAt(common)) common++
+    let delta: string
+    if (common === this.emitted.length) {
+      delta = current.slice(common)
+    } else {
+      // The terminal re-rendered or dropped earlier lines: resend from the
+      // first changed line, and say so only when the head itself is gone.
+      const lineStart = current.lastIndexOf('\n', Math.max(0, common - 1)) + 1
+      delta = (common < this.emitted.length / 2 ? LOST_HEAD_NOTICE : '') + current.slice(lineStart)
+    }
+    this.emitted = current
+    return clipTail(delta, this.config.maxOutputChars)
+  }
+
+  private isCancelled(): boolean {
+    return this.cancelled
+  }
+
+  /** The job hooks; starting them starts the watcher. */
+  hooks(): JobHooks {
+    return {
+      cancel: () => {
+        if (this.cancelled) return
+        this.cancelled = true
+        void this.shells.closeDetached(this.run.id, 'background bash command cancelled')
+      },
+      done: this.watch(),
+      readOutput: () => this.readNew(),
+    }
+  }
+
+  private async watch(): Promise<JobOutcome> {
+    const { ctx, owner, run } = this
+    try {
+      while (!this.cancelled) {
+        const status = ctx.terminals.list(owner).find(session => session.sessionId === run.id)?.status
+        if (status === undefined) break
+        if (status.kind === 'exited') {
+          this.final = runOutputSoFar(ctx, owner, run)
+          return { status: 'completed', detail: renderShellExitStatus('', status.exitCode, status.signal) }
+        }
+        const operation = run.operation ?? ctx.terminals.startSend(owner, run.id, { text: '', submit: false })
+        run.operation = operation
+        const result = await operation.done
+        run.operation = undefined
+        // job_kill may have cancelled the job while the send was in flight
+        if (this.isCancelled()) break
+        const settled = absorbSend(ctx, owner, run, operation, result)
+        if (settled?.kind === 'complete') {
+          this.final = settled.output
+          return { status: 'completed', detail: `exit code: ${settled.output.exitCode ?? 0}` }
+        }
+        if (settled?.kind === 'exited') {
+          this.final = runOutputSoFar(ctx, owner, run)
+          return { status: 'completed', detail: renderShellExitStatus('', settled.status.exitCode, settled.status.signal) }
+        }
+        if (settled?.kind === 'prompt') {
+          this.final = runOutputSoFar(ctx, owner, run)
+          return { status: 'completed', detail: 'exit code unknown' }
+        }
+        await new Promise(resolve => setTimeout(resolve, BACKGROUND_POLL_MS))
+      }
+      return { status: 'killed', detail: 'cancelled' }
+    } catch (error: unknown) {
+      if (this.cancelled) return { status: 'killed', detail: 'cancelled' }
+      return { status: 'failed', detail: `persistent bash shell failed: ${error instanceof Error ? error.message : String(error)}` }
+    } finally {
+      await this.shells.closeDetached(run.id, 'background bash command finished')
+    }
+  }
+}
+
+/**
+ * Run one command with auto-background: wait up to `waitMs` in the
+ * foreground; a command still running then keeps running in its own shell as
+ * a background job, and the owner gets a fresh shell on their next call. The
+ * wait never interrupts the command - it simply stops awaiting the send. The
+ * call's own cancellation interrupts the command only BEFORE promotion.
+ */
+async function executeCommandAuto(
+  ctx: Context,
+  shells: PersistentShells,
+  owner: Agent,
+  command: string,
+  config: ResolvedConfig,
+  upstream: AbortSignal,
+  waitMs: number,
+  jobs: JobRegistry,
+): Promise<string> {
+  upstream.throwIfAborted()
+  const foreground = new AbortController()
+  const forward = (): void => { foreground.abort(upstream.reason) }
+  upstream.addEventListener('abort', forward, { once: true })
+  try {
+    const id = await shells.get(owner, foreground.signal)
+    const marker = markers()
+    const run: CommandRun = {
+      id, marker, wrapped: wrapCommand(command, marker), first: true, fallback: '', fallbackTruncated: false, operation: undefined,
+    }
+    const promoteAt = Date.now() + waitMs
+
+    while (true) {
+      const status = ctx.terminals.list(owner).find(session => session.sessionId === id)?.status
+      if (status?.kind === 'exited') {
+        return await respondToSessionExit(ctx, shells, owner, id, status, marker, run.fallback, run.fallbackTruncated, config)
+      }
+      let operation = run.operation
+      if (operation === undefined) {
+        try {
+          operation = ctx.terminals.startSend(owner, id, {
+            text: run.first ? run.wrapped : '',
+            submit: run.first,
+            signal: foreground.signal,
+          })
+        } catch (error: unknown) {
+          await shells.reset(owner, 'persistent bash send failed')
+          throw error
+        }
+        run.first = false
+        run.operation = operation
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined
+      let result: TerminalSendResult | 'promote'
+      try {
+        result = await Promise.race([
+          operation.done,
+          new Promise<'promote'>((resolve) => { timer = setTimeout(() => { resolve('promote') }, Math.max(0, promoteAt - Date.now())) }),
+        ])
+      } catch (error: unknown) {
+        await shells.reset(owner, 'persistent bash send failed')
+        throw error
+      } finally {
+        if (timer !== undefined) clearTimeout(timer)
+      }
+
+      if (result === 'promote') {
+        // From here on the job owns the command: the call's cancellation no
+        // longer reaches the send in flight.
+        upstream.removeEventListener('abort', forward)
+        shells.detach(owner)
+        const background = new BackgroundCommand(ctx, shells, owner, run, config)
+        const soFar = background.readNew()
+        let jobId: string
+        try {
+          jobId = jobs.start({ kind: 'bash', label: command, owner, run: () => background.hooks() })
+        } catch (error: unknown) {
+          await shells.closeDetached(id, 'background registration refused')
+          const reason = error instanceof Error ? error.message : String(error)
+          throw new Error(`command still running after ${Math.round(waitMs / 1000)}s could not move to the background (${reason}); it was stopped and the shell was reset`)
+        }
+        return [
+          `${PROMOTED_PREFIX}${Math.round(waitMs / 1000)}s - moved to background job ${jobId}; it keeps running in its own shell]`,
+          soFar.length > 0 ? soFar.replace(/\n+$/, '') : '(no output yet)',
+          `[you are notified in-session when job ${jobId} finishes; read new output with job_output, stop it with job_kill. Your next bash call starts a NEW shell from the workspace - the old shell's current directory and variables stay with the job]`,
+        ].join('\n')
+      }
+
+      run.operation = undefined
+      if (foreground.signal.aborted) {
+        await shells.reset(owner, 'persistent bash command aborted')
+        upstream.throwIfAborted()
+        foreground.signal.throwIfAborted()
+      }
+      const settled = absorbSend(ctx, owner, run, operation, result)
+      if (settled?.kind === 'complete') return renderCaptured(settled.output, config.maxOutputChars)
+      if (settled?.kind === 'exited') {
+        return await respondToSessionExit(
+          ctx, shells, owner, id, settled.status, marker, run.fallback, run.fallbackTruncated, config,
+        )
+      }
+      if (settled?.kind === 'prompt') {
+        return renderCaptured(runOutputSoFar(ctx, owner, run), config.maxOutputChars)
+      }
+      await pause()
+    }
+  } finally {
+    upstream.removeEventListener('abort', forward)
+  }
+}
+
+/**
  * Register the model-facing persistent `bash` tool.
  * @param ctx - plugin context carrying tools and the owner-scoped PTY service.
  * @param config - selected PTY backend and command deadline.
@@ -398,30 +709,54 @@ function registerPersistentBash(ctx: Context, config: ResolvedConfig): void {
     }
   }
 
+  const autoBackground = config.autoBackgroundAfterMs > 0
+  const description = autoBackground
+    ? `${config.description} A command still running after ${Math.round(config.autoBackgroundAfterMs / 1000)}s (or after \`timeoutMs\`, at most ${Math.round(config.maxForegroundMs / 1000)}s) is NOT killed: it keeps running as a background job in its own shell, the call returns its job id and the output so far, you are notified when it finishes, and your next call gets a fresh shell.`
+    : config.description
+
   ctx.tools.register(defineTool({
     name: 'bash',
-    description: config.description,
+    description,
     parameters: {
       command: {
         type: 'string',
         required: true,
         description: 'The bash command to run. Relative path is preferred in the command.',
       },
+      ...autoBackground ? {
+        timeoutMs: {
+          type: 'number' as const,
+          description: `How long to wait in the foreground, in milliseconds (default ${config.autoBackgroundAfterMs}, max ${config.maxForegroundMs}). A command still running then continues as a background job instead of being killed.`,
+        },
+      } : {},
     },
     output: {
       schema: { type: 'string' },
       render: (_args, value) => [{ type: 'text', text: value }],
     },
-    async execute(args, exec) {
+    async execute(args: { command: string; timeoutMs?: number }, exec) {
       if (args.command.trim().length === 0) throw new Error('command must be a non-empty string')
+      if (args.timeoutMs !== undefined && (!Number.isFinite(args.timeoutMs) || args.timeoutMs <= 0)) {
+        throw new Error(`invalid timeoutMs: expected a positive number, got ${JSON.stringify(args.timeoutMs)}`)
+      }
       const owner = exec.agent
       if (owner === undefined) throw new Error('bash requires an owning agent session')
       return serialized(owner, async () => {
         exec.signal.throwIfAborted()
+        const jobs = autoBackground ? ctx.get('jobs') : undefined
+        if (jobs !== undefined) {
+          const waitMs = Math.min(args.timeoutMs ?? config.autoBackgroundAfterMs, config.maxForegroundMs)
+          return executeCommandAuto(ctx, shells, owner, args.command, config, exec.signal, waitMs, jobs)
+        }
         return executeCommand(ctx, shells, owner, args.command, config, exec.signal)
       })
     },
     presentCall: args => ({ card: 'terminal', title: args.command }),
+    presentResult: (_args, result) => {
+      const block = result.content.length === 1 ? result.content[0] : undefined
+      if (block === undefined || block.type !== 'text' || !block.text.startsWith(PROMOTED_PREFIX)) return undefined
+      return { card: 'generic', content: [{ type: 'text', text: `\`\`\`console\n${block.text}\n\`\`\`` }] }
+    },
   }))
 }
 
@@ -438,6 +773,17 @@ export interface Config {
   maxOutputChars?: number
   /** Model-facing tool description; deployments may describe their environment. */
   description?: string
+  /**
+   * Auto-background: a command still running after this many milliseconds
+   * keeps running as a background job in its own shell (the owner's next call
+   * gets a fresh shell) instead of being killed at `timeoutMs`. `0` (default)
+   * keeps the kill-and-reset behaviour. Needs a job runtime (`ctx.jobs` plus
+   * `@deepseek-ai/dsh-tool-jobs` in the composition); without one calls run
+   * as before.
+   */
+  autoBackgroundAfterMs?: number
+  /** Upper bound on the foreground wait a call's own `timeoutMs` may request (default 600000). */
+  maxForegroundMs?: number
 }
 
 /** Runtime configuration schema for the persistent Bash tool. */
@@ -446,6 +792,8 @@ export const Config: z<Config> = z.object({
   timeoutMs: z.number().default(300_000),
   maxOutputChars: z.number().default(16_000),
   description: z.string().default(DEFAULT_DESCRIPTION),
+  autoBackgroundAfterMs: z.number().default(0),
+  maxForegroundMs: z.number().default(600_000),
 })
 
 /** Register one owner-scoped persistent `bash` tool. */
@@ -455,6 +803,14 @@ export function apply(ctx: Context, config: Config): void {
     timeoutMs: config.timeoutMs ?? 300_000,
     maxOutputChars: config.maxOutputChars ?? 16_000,
     description: config.description ?? DEFAULT_DESCRIPTION,
+    autoBackgroundAfterMs: config.autoBackgroundAfterMs ?? 0,
+    maxForegroundMs: config.maxForegroundMs ?? 600_000,
+  }
+  if (!Number.isSafeInteger(resolved.autoBackgroundAfterMs) || resolved.autoBackgroundAfterMs < 0) {
+    throw new Error('tool-bash-persistent: autoBackgroundAfterMs must be a non-negative safe integer')
+  }
+  if (!Number.isSafeInteger(resolved.maxForegroundMs) || resolved.maxForegroundMs <= 0) {
+    throw new Error('tool-bash-persistent: maxForegroundMs must be a positive safe integer')
   }
   if (resolved.backendType.trim().length === 0) {
     throw new Error('tool-bash-persistent: backendType must be non-empty')

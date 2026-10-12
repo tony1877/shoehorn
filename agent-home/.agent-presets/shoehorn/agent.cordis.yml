@@ -276,17 +276,23 @@
 
       ## Long-running commands
 
-      A command in the shell is stopped after 30 minutes, and you wait for it
-      the whole time. For a build, test run or download that may take long, or
-      when you have other work meanwhile, start it in the background with its
-      output in a log:
+      A build or a large download can run for minutes. Just run it: if it is
+      still running after 2 minutes (or after the `timeoutMs` you pass, at most
+      10 minutes), it is NOT killed. It keeps running as a background job in
+      its own shell, and the call returns the job id plus the output so far.
 
-          nohup make -j"$(nproc)" > /tmp/build.log 2>&1 &
-          echo $! > /tmp/build.pid
-
-      then keep working, and check it with `tail -20 /tmp/build.log` and
-      `kill -0 "$(cat /tmp/build.pid)" 2>/dev/null && echo running`. Do not
-      check it in a tight loop; look again when you have finished another step.
+      - You are notified in-session when the job finishes. Do not poll or
+        sleep on it: keep working on independent steps.
+      - `job_output` reads the output produced since your last read
+        (`wait: true` only when you are genuinely blocked on the result);
+        `job_kill` stops it; `job_list` shows your jobs.
+      - Your NEXT bash call starts a fresh shell from the workspace: the old
+        shell's current directory and exported variables stay with the job.
+        `cd` again and re-export anything you need.
+      - Pass `timeoutMs: 1000` to start a build, test run or download in the
+        background right away when you have other work meanwhile.
+      - Servers and other never-ending processes: start them detached
+        (`nohup cmd > /tmp/name.log 2>&1 &`), not as a job.
 
       ## When a tool looks broken
 
@@ -354,7 +360,12 @@
       name: '@deepseek-ai/dsh-tool-bash-persistent'
       disabled: !!js process.platform === 'win32'
       config:
-        timeoutMs: 1800000
+        # Auto-background, as persistent-pwsh below: a command still running
+        # after 2 min (or the call's timeoutMs, capped at 10 min) keeps running
+        # as a background job in its own shell instead of being killed; the
+        # agent gets the job id and is notified when it ends. Needs tool-jobs.
+        autoBackgroundAfterMs: 120000
+        maxForegroundMs: 600000
         description: |-
           Run commands in a bash shell
           * When invoking this tool, the contents of the "command" parameter does NOT need to be XML-escaped.
@@ -363,7 +374,7 @@
           * State is persistent across command calls and discussions with the user.
           * To inspect a particular line range of a file, e.g. lines 10-25, try 'sed -n 10,25p /path/to/the/file'.
           * Please avoid commands that may produce a very large amount of output.
-          * Please run long lived commands in the background, e.g. 'sleep 10 &' or start a server in the background.
+          * Long builds and downloads are fine: a command still running after the foreground wait is not killed, it continues as a background job. Start servers and other never-ending processes detached (nohup ... &).
 
     - id: terminal-pwsh
       name: '@deepseek-ai/dsh-terminal-bash'

@@ -18,6 +18,8 @@ import type {
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import * as ToolBashPersistent from '@deepseek-ai/dsh-tool-bash-persistent'
+import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
+import * as ToolJobs from '@deepseek-ai/dsh-tool-jobs'
 
 const contexts: Context[] = []
 let callNumber = 0
@@ -100,6 +102,10 @@ type StubMode =
   | 'empty-page-after-latest'
   | 'paged-scrollback'
   | 'exit-after-send'
+  | 'long'
+
+const START_PATTERN = /__DSH_PERSISTENT_BASH_START_[^_]+(?:-[^_]+)*__/
+const END_PATTERN = /__DSH_PERSISTENT_BASH_END_[^:]+:/
 
 class StubPtySession implements TerminalBackendSession {
   readonly motd = 'stub> '
@@ -112,9 +118,40 @@ class StubPtySession implements TerminalBackendSession {
   pendingText = ''
   historyTruncated = false
   throwOnSend = false
+  /** `long` mode: the in-flight command's end marker and the send waiting on it. */
+  longEnd: string | undefined
+  longSettle: ((viewport: string, waitReason: TerminalWaitReason) => void) | undefined
 
   constructor(mode: StubMode) {
     this.mode = mode
+  }
+
+  /** Finish the `long` command: print its remaining output, then its end marker and the prompt. */
+  finishLong(tail: string, exitCode = 0): void {
+    const output = `${tail}\n${this.longEnd ?? ''}${exitCode}\n${this.motd}`
+    this.scrollback += output
+    this.mode = 'normal'
+    const settle = this.longSettle
+    this.longSettle = undefined
+    settle?.(output, 'stdin_read')
+  }
+
+  /** A `long` send: settles only when the command finishes, the call aborts, or the shell closes. */
+  private longSend(request: TerminalSendRequest): TerminalSendOperation {
+    if (request.text.length > 0) {
+      this.longEnd = END_PATTERN.exec(request.text)?.[0]
+      const start = START_PATTERN.exec(request.text)?.[0]
+      this.scrollback += `${start ?? ''}\nworking...\n`
+    }
+    const done = new Promise<ReturnType<StubPtySession['result']>>((resolve) => {
+      this.longSettle = (viewport, waitReason) => { resolve(this.result(viewport, waitReason)) }
+      request.signal?.addEventListener('abort', () => {
+        this.scrollback += 'interrupted\n'
+        this.longSettle = undefined
+        resolve(this.result('interrupted', 'stdin_read'))
+      }, { once: true })
+    })
+    return this.operation(done)
   }
 
   startSend(request: TerminalSendRequest): TerminalSendOperation {
@@ -131,6 +168,8 @@ class StubPtySession implements TerminalBackendSession {
     }
     if (this.mode === 'send-error') throw new Error('stub send failed')
     if (this.throwOnSend) throw new Error('PTY session has exited')
+    if (this.statusValue.kind === 'exited') throw new Error('PTY session has exited')
+    if (this.mode === 'long') return this.longSend(request)
     if (this.mode === 'wait-for-abort' || this.mode === 'end-on-abort') {
       const done = new Promise<ReturnType<StubPtySession['result']>>((resolve) => {
         request.signal?.addEventListener('abort', () => {
@@ -266,6 +305,10 @@ class StubPtySession implements TerminalBackendSession {
   async close(reason: string) {
     this.closed.push(reason)
     this.statusValue = { kind: 'exited', exitCode: 0, signal: null }
+    // Like a real backend, closing the shell settles a send still waiting on it.
+    const settle = this.longSettle
+    this.longSettle = undefined
+    settle?.('', 'session_exit')
   }
 
   private result(viewport: string, waitReason: TerminalWaitReason) {
@@ -598,5 +641,147 @@ describe('tool-bash-persistent', () => {
     expect(() => {
       ToolBashPersistent.apply(new Context(), { description: ' ' })
     }).toThrow('description must be non-empty')
+  })
+})
+
+async function setupWithJobs(config: ToolBashPersistent.Config) {
+  const ctx = new Context()
+  contexts.push(ctx)
+  await ctx.plugin(SystemPrompt)
+  await ctx.plugin(ToolRuntime)
+  await ctx.plugin(AgentRegistry)
+  await ctx.plugin(TerminalSessionService)
+  await ctx.plugin(LocalJobRegistry)
+  await ctx.plugin(ToolJobs)
+  const stub = stubBackend('normal')
+  ctx.terminals.registerBackend(stub.backend)
+  const fiber = await ctx.plugin(ToolBashPersistent, config)
+  return { ctx, stub, fiber, owner: agent(ctx, '/workspace') }
+}
+
+function jobCall(ctx: Context, owner: Agent, name: string, args: unknown) {
+  return ctx.tools.execute({
+    signal: new AbortController().signal,
+    callId: ToolCallId(`persistent-bash-job-${++callNumber}`),
+    name,
+    arguments: args,
+    agent: owner,
+  })
+}
+
+describe('tool-bash-persistent auto-background', () => {
+  it('is off by default: no timeoutMs parameter and the plain description', async () => {
+    const { ctx } = await setupWithJobs({ backendType: 'stub' })
+    const schema = ctx.tools.schemas().find(s => s.name === 'bash')!
+    expect(Object.keys(schema.parameters.properties as Record<string, unknown>)).toEqual(['command'])
+    expect(schema.description).not.toContain('is NOT killed')
+  })
+
+  it('moves a long command to a background job in its own shell; the next call gets a fresh shell', async () => {
+    const { ctx, owner, stub } = await setupWithJobs({ backendType: 'stub', autoBackgroundAfterMs: 30 })
+    expect(text(await call(ctx, owner, 'warm up'))).toBe('hello from stub')
+    const shell = stub.sessions[0]!
+    shell.mode = 'long'
+
+    const promoted = text(await call(ctx, owner, 'make -j16'))
+    expect(promoted).toContain('[still running after 0s - moved to background job bash-1; it keeps running in its own shell]')
+    expect(promoted).toContain('working...')
+    expect(promoted).toContain('Your next bash call starts a NEW shell from the workspace')
+    expect(shell.closed).toEqual([])
+
+    // The owner's next call runs in a new shell while the job keeps the old one.
+    expect(text(await call(ctx, owner, 'pwd'))).toBe('hello from stub')
+    expect(stub.sessions).toHaveLength(2)
+
+    shell.finishLong('build ok')
+    const final = text(await jobCall(ctx, owner, 'job_output', { job_id: 'bash-1', wait: true }))
+    expect(final).toContain('build ok')
+    expect(final).not.toContain('working...')
+    expect(final).toContain('[status: completed, exit code: 0]')
+    expect(shell.closed).toContain('background bash command finished')
+  })
+
+  it('reports a background command\'s non-zero exit code', async () => {
+    const { ctx, owner, stub } = await setupWithJobs({ backendType: 'stub', autoBackgroundAfterMs: 30 })
+    await call(ctx, owner, 'warm up')
+    const shell = stub.sessions[0]!
+    shell.mode = 'long'
+    await call(ctx, owner, 'make test')
+    shell.finishLong('2 tests failed', 2)
+    const final = text(await jobCall(ctx, owner, 'job_output', { job_id: 'bash-1', wait: true }))
+    expect(final).toContain('2 tests failed')
+    expect(final).toContain('[status: completed, exit code: 2]')
+  })
+
+  it('job_kill closes the detached shell and settles the job as killed', async () => {
+    const { ctx, owner, stub } = await setupWithJobs({ backendType: 'stub', autoBackgroundAfterMs: 30 })
+    await call(ctx, owner, 'warm up')
+    const shell = stub.sessions[0]!
+    shell.mode = 'long'
+    await call(ctx, owner, 'sleep 600')
+    expect(text(await jobCall(ctx, owner, 'job_kill', { job_id: 'bash-1' }))).toBe('requested cancellation of job bash-1')
+    const final = text(await jobCall(ctx, owner, 'job_output', { job_id: 'bash-1', wait: true }))
+    expect(final).toContain('[status: killed, cancelled]')
+    expect(shell.closed).toContain('background bash command cancelled')
+  })
+
+  it('cancelling the call before promotion interrupts the command and resets the shell', async () => {
+    const { ctx, owner, stub } = await setupWithJobs({ backendType: 'stub', autoBackgroundAfterMs: 5_000 })
+    await call(ctx, owner, 'warm up')
+    stub.sessions[0]!.mode = 'long'
+    const controller = new AbortController()
+    const pending = call(ctx, owner, 'sleep 600', controller.signal)
+    setTimeout(() => { controller.abort(new Error('caller stopped')) }, 20)
+    expect((await pending).isError).toBe(true)
+    expect(stub.sessions[0]?.closed).toContain('persistent bash command aborted')
+    expect(text(await jobCall(ctx, owner, 'job_list', {}))).toBe('(no background jobs)')
+  })
+
+  it('a command finishing within the wait returns normally with no job', async () => {
+    const { ctx, owner } = await setupWithJobs({ backendType: 'stub', autoBackgroundAfterMs: 5_000 })
+    expect(text(await call(ctx, owner, 'date'))).toBe('hello from stub')
+    expect(text(await jobCall(ctx, owner, 'job_list', {}))).toBe('(no background jobs)')
+  })
+
+  it('a call timeoutMs sets the wait, capped at maxForegroundMs', async () => {
+    const { ctx, owner, stub } = await setupWithJobs({ backendType: 'stub', autoBackgroundAfterMs: 60_000, maxForegroundMs: 40 })
+    await call(ctx, owner, 'warm up')
+    const shell = stub.sessions[0]!
+    shell.mode = 'long'
+    const started = Date.now()
+    const result = await ctx.tools.execute({
+      signal: new AbortController().signal,
+      callId: ToolCallId(`persistent-bash-${++callNumber}`),
+      name: 'bash',
+      arguments: { command: 'sleep 600', timeoutMs: 120_000 },
+      agent: owner,
+    })
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(text(result)).toContain('moved to background job bash-1')
+    shell.finishLong('')
+    await jobCall(ctx, owner, 'job_output', { job_id: 'bash-1', wait: true })
+  })
+
+  it('advertises the wait and exposes timeoutMs when enabled', async () => {
+    const { ctx } = await setupWithJobs({ backendType: 'stub', autoBackgroundAfterMs: 120_000 })
+    const schema = ctx.tools.schemas().find(s => s.name === 'bash')!
+    expect(Object.keys(schema.parameters.properties as Record<string, unknown>)).toEqual(['command', 'timeoutMs'])
+    expect(schema.description).toContain('still running after 120s (or after `timeoutMs`, at most 600s) is NOT killed')
+  })
+
+  it('without a job runtime keeps the kill-on-timeout behaviour', async () => {
+    const { ctx, owner, stub } = await setup({ backendType: 'stub', timeoutMs: 50, autoBackgroundAfterMs: 10 })
+    await call(ctx, owner, 'warm up')
+    stub.sessions[0]!.mode = 'long'
+    const result = text(await call(ctx, owner, 'hang'))
+    expect(result).toContain('timed out after 0 seconds')
+    expect(stub.sessions[0]?.closed).toContain('persistent bash command timed out')
+  })
+
+  it('rejects an invalid auto-background config', () => {
+    expect(() => { ToolBashPersistent.apply(new Context(), { autoBackgroundAfterMs: -1 }) })
+      .toThrow('autoBackgroundAfterMs must be a non-negative safe integer')
+    expect(() => { ToolBashPersistent.apply(new Context(), { maxForegroundMs: 0 }) })
+      .toThrow('maxForegroundMs must be a positive safe integer')
   })
 })

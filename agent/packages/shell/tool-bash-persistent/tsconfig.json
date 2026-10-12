@@ -10,6 +10,7 @@
     { "path": "../../../vendor/schemastery" },
     { "path": "../../core/agent" },
     { "path": "../../core/tools" },
+    { "path": "../../jobs/jobs" },
     { "path": "../../terminal/terminal" },
     { "path": "../../util/timeout" }
   ]
