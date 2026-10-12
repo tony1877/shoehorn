@@ -1,0 +1,27 @@
+# Maintainer: tony1877 <https://github.com/tony1877>
+# Built from packaging/aur/ in https://github.com/tony1877/shoehorn; the binaries are the release's portable tarball.
+pkgname=shoehorn-rocm-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Local inference engine for Qwen3.x with a split-precision residual (ROCm build: AMD RDNA3/RDNA4, MI300/MI350; with a CPU fallback)"
+arch=('x86_64')
+url="https://github.com/tony1877/shoehorn"
+license=('MIT')
+depends=('glibc' 'gcc-libs' 'hip-runtime-amd' 'hipblas' 'rocblas' 'hipblaslt')
+provides=('shoehorn')
+conflicts=('shoehorn' 'shoehorn-cuda-bin')
+options=('!strip' '!debug')
+_dir="shoehorn-${pkgver}-linux-x86_64-rocm"
+source=("https://github.com/tony1877/shoehorn/releases/download/v${pkgver}/${_dir}.tar.gz")
+sha256sums=('2925b919ebbfbcd718671fa835567bf4c33483b2ec8c75dfd140d071db4e3b00')
+
+package() {
+    install -d "$pkgdir/opt/shoehorn" "$pkgdir/usr/bin"
+    cp -a "$_dir/." "$pkgdir/opt/shoehorn/"
+    ln -s /opt/shoehorn/bin/shoehorn "$pkgdir/usr/bin/shoehorn"
+    install -Dm644 "$_dir/systemd/shoehorn.service" "$pkgdir/usr/lib/systemd/user/shoehorn.service"
+    install -Dm644 "$_dir/systemd/dsh.service" "$pkgdir/usr/lib/systemd/user/dsh.service"
+    sed -i 's|%h/.local/bin/shoehorn|/usr/bin/shoehorn|' "$pkgdir/usr/lib/systemd/user/shoehorn.service"
+    install -Dm644 "$_dir/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 "$_dir/licenses/ggml-llama.cpp.LICENSE" "$pkgdir/usr/share/licenses/$pkgname/ggml-llama.cpp.LICENSE"
+}
