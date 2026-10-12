@@ -130,6 +130,7 @@ worth about twice a PCIe 4.0 one. Measured (27B, 256 tokens, greedy decode):
 | RTX 5080 16 GB (PCIe 5.0), Windows / Linux (WSL) | 16 GB | 20.2 / 18.3 tok/s |
 | RTX A5000 24 GB (PCIe 4.0) | 24 GB | 13.5 tok/s |
 | RTX 4000 Ada 20 GB (PCIe 4.0) | 16 GB | 10.1 tok/s |
+| RTX A4000 16 GB (PCIe 4.0), 3-bit base | 12 GB | 6.1 tok/s |
 | AMD MI300X (ROCm 7) | 24 GB+ (residual on host here) | 9.4 tok/s, 13.6 with a q8_0 KV |
 
 On RunPod, use pro or data-center cards: its GeForce hosts (RTX 4090 / 5080) fail CUDA initialization for any program

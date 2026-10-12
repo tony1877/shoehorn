@@ -228,8 +228,8 @@ the profile. The 12 GB profile measured against Q8 (`q8.kld`, first 40 chunks of
 
 The residual carries the 3-bit base close to the 16 GB setup (1.5x r3's KLD). Whether to offer it is open
 question 3. Speed per profile (`bench/results/fit-profiles-2026-10-12.md`, `gen` on RunPod pro cards): 24 GB (RTX A5000,
-r4, residual partly in VRAM) 13.5 tok/s greedy; 16 GB (RTX 4000 Ada, r3 streamed) 10.1 tok/s. The 12 GB run waits for an
-RTX A2000 on RunPod (none available on 2026-10-12).
+r4, residual partly in VRAM) 13.5 tok/s greedy; 16 GB (RTX 4000 Ada, r3 streamed) 10.1 tok/s; 12 GB (b3, 10.07 GB of
+base in VRAM, run on an RTX A4000 since RunPod had no 12 GB card) 6.1 tok/s, 4.9 tokens per cycle.
 
 ### Phase 5: packaging and the distribution matrix (4-6 days)
 
