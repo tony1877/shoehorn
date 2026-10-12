@@ -299,7 +299,7 @@ struct Server {
     std::mutex                       jobs_mu;                     // guards jobs, models_cfg and the list file
     std::vector<std::shared_ptr<ModelJob>> jobs;
     int                              next_job = 1;
-    size_t                           fixed_entries = 0;            // entries from the command line (not removable)
+    std::vector<std::string>         cmd_aliases;                  // models the command line names (remembered as removed)
     // the Settings page: the command line to start again with, and the settings file over it
     std::vector<std::string>         cmdline, args;                // as started / with the settings applied
     std::string                      settings_file;
@@ -493,6 +493,11 @@ bool add_entry(Server & S, const std::string & alias, const std::string & path, 
     std::lock_guard<std::mutex> lk(S.jobs_mu);
     if (!S.models_cfg["models"].is_array()) S.models_cfg["models"] = json::array();
     S.models_cfg["models"].push_back({ { "alias", alias }, { "path", path }, { "res", res } });
+    if (S.models_cfg.contains("removed") && S.models_cfg["removed"].is_array()) {  // added again: no longer removed
+        json & rm = S.models_cfg["removed"];
+        for (size_t k = 0; k < rm.size(); k++)
+            if (rm[k] == alias) rm.erase(k--);
+    }
     save_models(S);
     fprintf(stderr, "model added: %s (%s)\n", alias.c_str(), path.c_str());
     return true;
@@ -1782,30 +1787,13 @@ int serve(const std::vector<std::string> & args_in) {
 
     // tokenizer + chat templates (llama.cpp, vocab only)
     llama_backend_init();
-    llama_model_params mp = llama_model_default_params();
-    mp.vocab_only         = true;
     S->entries.reserve(64);  // entries added while serving never move the existing ones (see add_entry)
     S->tmpl_file = tmpl_file;
-    {
-        Entry main;
-        main.alias = S->alias;
-        main.path  = model_path;
-        main.res   = res;
-        S->entries.push_back(std::move(main));
-        for (auto & e : extra) S->entries.push_back(std::move(e));
-    }
-    for (auto & e : S->entries) {  // one chat template file (if given) for every model
-        e.vocab_model = llama_model_load_from_file(e.path.c_str(), mp);
-        if (!e.vocab_model) {
-            fprintf(stderr, "cannot load the vocabulary from %s\n", e.path.c_str());
-            return 1;
-        }
-        e.vocab = llama_model_get_vocab(e.vocab_model);
-        e.tmpls = common_chat_templates_init(e.vocab_model, tmpl_file.empty() ? "" : read_file(tmpl_file));
-    }
-    S->fixed_entries = S->entries.size();
-    S->port = port;
-    // the models added from the Models page earlier (a missing file only skips that model)
+    S->port      = port;
+    // One model list for all models (the Models page can remove any of them): the model file. The command line's
+    // models (the main one and --also) are merged into it at the front, in their order, unless the page removed them
+    // earlier ("removed" in the file, so a restart does not bring them back); for those it lists, the command line
+    // keeps the path current. A model whose files are missing is skipped.
     if (S->models_file.empty()) {
         const char * home = std::getenv("USERPROFILE") ? std::getenv("USERPROFILE") : std::getenv("HOME");
         if (home) S->models_file = sys::join_path(sys::join_path(home, ".shoehorn"), "models.json");
@@ -1817,22 +1805,56 @@ int serve(const std::vector<std::string> & args_in) {
         } catch (const std::exception & ex) {
             fprintf(stderr, "%s: %s\n", S->models_file.c_str(), ex.what());
         }
-        if (S->models_cfg.contains("models") && S->models_cfg["models"].is_array()) {
-            for (const auto & m : S->models_cfg["models"]) {
-                Entry e;
-                e.alias = m.value("alias", std::string());
-                e.path  = m.value("path", std::string());
-                e.res   = m.value("res", std::string());
-                std::string err;
-                if (e.alias.empty() || std::any_of(S->entries.begin(), S->entries.end(), [&](const Entry & x) { return x.alias == e.alias; }))
-                    continue;
-                if (!load_vocab(e, tmpl_file, err)) {
-                    fprintf(stderr, "%s: skipped %s: %s\n", S->models_file.c_str(), e.alias.c_str(), err.c_str());
-                    continue;
+    }
+    if (!S->models_cfg.is_object()) S->models_cfg = json::object();
+    if (!S->models_cfg.contains("models") || !S->models_cfg["models"].is_array()) S->models_cfg["models"] = json::array();
+    {
+        std::vector<Entry> cmd;
+        Entry              main;
+        main.alias = S->alias;
+        main.path  = model_path;
+        main.res   = res;
+        cmd.push_back(std::move(main));
+        for (auto & e : extra) cmd.push_back(std::move(e));
+        for (const Entry & c : cmd) S->cmd_aliases.push_back(c.alias);
+        json &       ms      = S->models_cfg["models"];
+        const json & removed = S->models_cfg.contains("removed") && S->models_cfg["removed"].is_array() ? S->models_cfg["removed"] : json::array();
+        size_t       front   = 0;  // where the next command-line model goes when the file does not list it yet
+        bool         changed = false;
+        for (const Entry & c : cmd) {
+            if (std::find(removed.begin(), removed.end(), json(c.alias)) != removed.end()) continue;
+            auto it = std::find_if(ms.begin(), ms.end(), [&](const json & m) { return m.value("alias", std::string()) == c.alias; });
+            if (it == ms.end()) {
+                ms.insert(ms.begin() + (long long) front++, json{ { "alias", c.alias }, { "path", c.path }, { "res", c.res } });
+                changed = true;
+            } else {
+                front = (size_t) (it - ms.begin()) + 1;
+                if (it->value("path", std::string()) != c.path || it->value("res", std::string()) != c.res) {
+                    (*it)["path"] = c.path;
+                    (*it)["res"]  = c.res;
+                    changed       = true;
                 }
-                S->entries.push_back(std::move(e));
             }
         }
+        if (changed) save_models(*S);
+    }
+    for (const auto & m : S->models_cfg["models"]) {
+        Entry e;
+        e.alias = m.value("alias", std::string());
+        e.path  = m.value("path", std::string());
+        e.res   = m.value("res", std::string());
+        std::string err;
+        if (e.alias.empty() || std::any_of(S->entries.begin(), S->entries.end(), [&](const Entry & x) { return x.alias == e.alias; }))
+            continue;
+        if (!load_vocab(e, tmpl_file, err)) {
+            fprintf(stderr, "%s: skipped %s: %s\n", S->models_file.c_str(), e.alias.c_str(), err.c_str());
+            continue;
+        }
+        S->entries.push_back(std::move(e));
+    }
+    if (S->entries.empty()) {
+        fprintf(stderr, "no model to serve: every model in %s was removed or is missing\n", S->models_file.c_str());
+        return 1;
     }
 
     model::LoadOptions o;
@@ -2209,7 +2231,7 @@ int serve(const std::vector<std::string> & args_in) {
             std::error_code ec;
             const uint64_t  sz = std::filesystem::file_size(e.path, ec) + (e.res.empty() ? 0 : std::filesystem::file_size(e.res, ec));
             out["models"].push_back({ { "alias", e.alias }, { "path", e.path }, { "res", e.res }, { "bytes", sz },
-                                      { "loaded", S->model && S->active == (int) i }, { "removable", i >= S->fixed_entries } });
+                                      { "loaded", S->model && S->active == (int) i }, { "removable", S->entries.size() > 1 } });
         }
         {
             std::lock_guard<std::mutex> lk(S->jobs_mu);
@@ -2271,9 +2293,10 @@ int serve(const std::vector<std::string> & args_in) {
         const std::string alias = body_of(req).value("alias", std::string());
         {
             Turn turn(*S, true);
-            size_t i = S->fixed_entries;
+            size_t i = 0;
             while (i < S->entries.size() && S->entries[i].alias != alias) i++;
-            if (i >= S->entries.size()) return fail(resp, "only models added from this page can be removed");
+            if (i >= S->entries.size()) return fail(resp, "no model named " + alias, 404);
+            if (S->entries.size() == 1) return fail(resp, "the last model cannot be removed");
             if (S->model && S->active == (int) i) return fail(resp, "unload it first");
             if (S->active > (int) i) S->active--;
             llama_model_free(S->entries[i].vocab_model);
@@ -2284,6 +2307,11 @@ int serve(const std::vector<std::string> & args_in) {
         if (ms.is_array())
             for (size_t k = 0; k < ms.size(); k++)
                 if (ms[k].value("alias", std::string()) == alias) ms.erase(k--);
+        // a model the start command names would come back at the next start: remember that it was removed
+        if (std::find(S->cmd_aliases.begin(), S->cmd_aliases.end(), alias) != S->cmd_aliases.end()) {
+            if (!S->models_cfg.contains("removed") || !S->models_cfg["removed"].is_array()) S->models_cfg["removed"] = json::array();
+            S->models_cfg["removed"].push_back(alias);
+        }
         save_models(*S);
         resp.set_content(json{ { "success", true } }.dump(), "application/json");
     });
@@ -2708,7 +2736,7 @@ int serve(const std::vector<std::string> & args_in) {
             }
             const std::string id      = random_id(S->rng, chat ? "chatcmpl-" : "cmpl-");
             const int64_t     created = (int64_t) std::time(nullptr);
-            const std::string alias   = ours ? want : S->alias;
+            const std::string alias   = ours ? want : S->entries[0].alias;  // the first model is the default
             auto obj = [id, created, alias, chat](const json & choice, bool chunk) {
                 return json{ { "id", id }, { "object", chat ? (chunk ? "chat.completion.chunk" : "chat.completion") : "text_completion" },
                              { "created", created }, { "model", alias }, { "choices", json::array({ choice }) } };
