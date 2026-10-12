@@ -37,6 +37,7 @@ missing, so it always starts.
 | `shoehorn-cuda_<ver>_amd64.deb`, `shoehorn-rocm_<ver>_amd64.deb` | Debian 12+, Ubuntu 22.04+ | `sudo apt install ./shoehorn-cuda_*.deb` |
 | `shoehorn-cuda-<ver>-1.x86_64.rpm`, `shoehorn-rocm-<ver>-1.x86_64.rpm` | Fedora, RHEL / Alma / Rocky 9+ | `sudo dnf install ./shoehorn-cuda-*.rpm` |
 | container `shoehorn:cuda`, `shoehorn:rocm` | Docker + NVIDIA container toolkit / AMD devices | see below |
+| Arch: `shoehorn-cuda-bin`, `shoehorn-rocm-bin` | Arch Linux | not on the AUR yet (its registration is paused); build the PKGBUILD from the repo: `cd packaging/aur/shoehorn-cuda-bin && makepkg -si` |
 
 The tarball was checked on Ubuntu 22.04 / 24.04 / 26.04, Debian 12 / 13, Fedora 43, AlmaLinux 9 / 10 and Arch. The
 packages install to `/opt/shoehorn`, link `/usr/bin/shoehorn` and put the systemd user units in `/usr/lib/systemd/user`.
