@@ -48,7 +48,8 @@ else
     patchelf --set-rpath "\$ORIGIN/../lib:/opt/rocm/lib" $st/libexec/shoehorn-rocm
     patchelf --set-rpath "\$ORIGIN/../lib" $st/libexec/shoehorn-cpu
 fi
-cp -r packaging/systemd $st/; cp docs/linux.md $st/README-linux.md; cp LICENSE* $st/ 2>/dev/null || true
+cp -r packaging/systemd $st/; cp docs/linux.md $st/README-linux.md; cp LICENSE $st/
+mkdir -p $st/licenses; cp third_party/llama.cpp/LICENSE $st/licenses/ggml-llama.cpp.LICENSE
 echo "glibc needed: $(objdump -T $st/libexec/shoehorn-* $st/lib/*.so* | grep -o "GLIBC_[0-9.]*" | sort -V | tail -1)"
 ldd $st/libexec/shoehorn-$FLAVOR | grep -v "linux-vdso\|ld-linux" | sed "s/^/  /"
 tar -C /tmp -czf /dist/$name.tar.gz $name
