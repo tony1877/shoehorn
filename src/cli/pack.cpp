@@ -323,6 +323,15 @@ int pack(const std::vector<std::string> & args) {
         } else if (p.n_dims == 2 && t->ne[0] % qblk == 0 && t->ne[1] >= 256) {
             p.base_type = base_t;
             p.split     = has_res;
+            // types that cannot quantize without importance data (iq2_xxs, iq2_xs, iq1_*): a tensor the imatrix does
+            // not cover gets q2_K (same block size, no imatrix needed); the residual corrects it like any other
+            if (ggml_quantize_requires_imatrix(base_t)) {
+                const auto it = imatrix.find(p.name);
+                if (it == imatrix.end() || (int64_t) it->second.size() != t->ne[0]) {
+                    p.base_type = GGML_TYPE_Q2_K;
+                    printf("%s: no imatrix entry, base q2_K instead of %s\n", p.name.c_str(), ggml_type_name(base_t));
+                }
+            }
         } else {
             p.base_type = GGML_TYPE_F32;
         }
