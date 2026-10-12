@@ -262,7 +262,13 @@ debian:12, fedora:43 and almalinux:9. The CUDA binary links `libcuda.so.1` (ggml
 start without the NVIDIA driver; `GGML_CUDA_NO_VMM` removes that link but cost ~4% decode on the RTX 5080 (greedy
 19.80 -> 19.05, sampled 18.35 -> 17.65 tok/s). Instead the tarball carries a CPU build too: `bin/shoehorn` is a
 launcher that runs `libexec/shoehorn-cuda` when it loads and `libexec/shoehorn-cpu` (with a note) when the driver is
-missing; checked in a plain ubuntu container (CPU) and on the RTX 5080 (CUDA, full speed). Open: the ROCm tarball, container images, the AUR.
+missing; checked in a plain ubuntu container (CPU) and on the RTX 5080 (CUDA, full speed). `FLAVOR=rocm scripts/package-tarball.sh` builds `shoehorn-0.1.0-linux-x86_64-rocm.tar.gz` (74 MB) in AlmaLinux 9 with
+ROCm 7.0 from repo.radeon.com and gcc-toolset-13 (ROCm's compiler emits `__truncsfhf2`, which EL9's GCC 11 runtime
+lacks); it needs glibc 2.34 and an installed ROCm 7 (/opt/rocm, RPATH), and its launcher falls back to the CPU build
+without one (checked on ubuntu:24.04 and almalinux:9). Not yet run on an AMD GPU: no community MI300X on 2026-10-12
+(the job: `scripts/runpod/matrix.sh` with `TARBALL=...-rocm.tar.gz` on `rocm/dev-ubuntu-24.04:7.0`). The `.deb` / `.rpm`
+were rebuilt from the CUDA tarball with the launcher; with no driver they start the CPU build (ubuntu:24.04, fedora:43).
+Open: container images, the AUR.
 
 ### Phase 6: running it as a service, and docs (2-3 days)
 
@@ -277,9 +283,9 @@ Gate: a reboot brings everything back; killing the server restarts it.
 
 Progress (2026-10-11): `packaging/systemd/{shoehorn,dsh}.service`, `scripts/agent.sh`, the `persona-posix` row in
 the shoehorn preset, and `docs/linux.md` written. The Settings restart under systemd (`INVOCATION_ID` set) exits with
-status 75 and the unit restarts on it (`RestartForceExitStatus=75`); elsewhere it re-execs as on Windows. Open: dsh's
-bash tool has no auto-background (the pwsh tool's patch), so the Linux prompt tells the model to use `nohup ... &`;
-porting that patch to `dsh-tool-bash-persistent` would let both prompts match.
+status 75 and the unit restarts on it (`RestartForceExitStatus=75`); elsewhere it re-execs as on Windows. dsh's bash tool now has
+auto-background too (the pwsh patch ported to `dsh-tool-bash-persistent`, 10 new tests); the Linux preset turns it on
+and its prompt describes it as the Windows one does.
 
 ### Phase 7: speed (ongoing)
 
