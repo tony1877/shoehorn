@@ -47,6 +47,8 @@ Source0: $name.tar.gz
 AutoReqProv: no
 Requires: glibc >= 2.34
 %global debug_package %{nil}
+# the bundled libraries (libgomp, CUDA runtime) would register build-id links that clash with the system's own copies
+%global _build_id_links none
 %global __strip /bin/true
 %description
 $desc
