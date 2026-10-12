@@ -2243,6 +2243,9 @@ int serve(const std::vector<std::string> & args_in) {
             if (!S->load(idx, err)) return fail(resp, err, 500);
             S->active = idx;
         }
+        // a load counts as use: without this the idle unloader (--idle-unload) drops a model loaded after a long
+        // quiet spell within 5 s, since the last request is still older than the idle limit
+        S->last_used = std::chrono::steady_clock::now();
         resp.set_content(json{ { "success", true }, { "loaded", alias } }.dump(), "application/json");
     });
     http.Post("/models/unload", [&](const httplib::Request & req, httplib::Response & resp) {
