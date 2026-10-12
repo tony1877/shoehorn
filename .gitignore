@@ -14,3 +14,4 @@ experiments/nested_quant/nested
 /tests/tiny/out/
 /tests/tiny/out4/
 dist/
+agent/.shoehorn-built

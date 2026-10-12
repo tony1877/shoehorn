@@ -1,7 +1,9 @@
 # shoehorn on Linux
 
-Status (2026-10-11): builds with GCC and Clang (CPU) and with the CUDA and HIP (ROCm) backends; the HIP build is
-not yet tested on an AMD GPU. GPU correctness against Windows is the next step (see [LINUX-PLAN.md](LINUX-PLAN.md), Phase 1).
+Status (2026-10-12): runs on NVIDIA (RTX 30xx/40xx/50xx, pro and data-center cards) and AMD (ROCm 7, checked on an
+MI300X), with the same output as Windows within KLD 5e-4 (99% the same top-1 token); a pack made on Linux is
+byte-identical to the Windows one. Details and per-GPU results: [LINUX-PLAN.md](LINUX-PLAN.md),
+[bench/results](../bench/results).
 
 ## 1. GPU driver
 
@@ -23,7 +25,32 @@ Debian 13). Add yourself to the `render` and `video` groups.
 
 Check: `nvidia-smi`, or `rocminfo | grep gfx`.
 
-## 2. Build
+## 2. Install
+
+Pick one; all of them carry a CPU build too, which `shoehorn` falls back to (with a note) when the GPU stack is
+missing, so it always starts.
+
+| Package | Needs | Notes |
+|---|---|---|
+| `shoehorn-<ver>-linux-x86_64-cuda.tar.gz` | glibc 2.34+, NVIDIA driver 570+ | CUDA runtime bundled; unpack anywhere, run `bin/shoehorn` |
+| `shoehorn-<ver>-linux-x86_64-rocm.tar.gz` | glibc 2.34+, ROCm 7 in `/opt/rocm` | RDNA3 (gfx1100/1101), RDNA4 (gfx1201), MI300/MI350 |
+| `shoehorn-cuda_<ver>_amd64.deb`, `shoehorn-rocm_<ver>_amd64.deb` | Debian 12+, Ubuntu 22.04+ | `sudo apt install ./shoehorn-cuda_*.deb` |
+| `shoehorn-cuda-<ver>-1.x86_64.rpm`, `shoehorn-rocm-<ver>-1.x86_64.rpm` | Fedora, RHEL / Alma / Rocky 9+ | `sudo dnf install ./shoehorn-cuda-*.rpm` |
+| container `shoehorn:cuda`, `shoehorn:rocm` | Docker + NVIDIA container toolkit / AMD devices | see below |
+
+The tarball was checked on Ubuntu 22.04 / 24.04 / 26.04, Debian 12 / 13, Fedora 43, AlmaLinux 9 / 10 and Arch. The
+packages install to `/opt/shoehorn`, link `/usr/bin/shoehorn` and put the systemd user units in `/usr/lib/systemd/user`.
+They are built from the source tree with `scripts/package-tarball.sh` (`FLAVOR=cuda|rocm`),
+`scripts/package-distro.sh <tarball>` and `scripts/package-images.sh`.
+
+Containers:
+
+```bash
+docker run --gpus all -p 8090:8090 -v ~/models:/models -v ~/.shoehorn-data:/data shoehorn:cuda     serve /models/x.base.gguf --res /models/x.res.gguf --host 0.0.0.0
+docker run --device /dev/kfd --device /dev/dri -p 8090:8090 -v ~/models:/models shoehorn:rocm serve ...
+```
+
+## 3. Build from source
 
 ```bash
 sudo apt install build-essential cmake ninja-build git        # Fedora / RHEL: gcc-c++ cmake ninja-build git
@@ -46,7 +73,7 @@ docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src" shoehorn:cuda
 
 The binary is `build/bin/shoehorn`.
 
-## 3. Locked memory
+## 4. Locked memory
 
 The server keeps the RAM part of a long-context KV locked in memory (`mlock`). Most distributions cap that at 8 MB
 per process; shoehorn raises its limit to the hard limit at start, and prints once how to raise it further when that
@@ -60,10 +87,10 @@ printf '[Service]\nLimitMEMLOCK=infinity\n' | sudo tee /etc/systemd/system/user@
 sudo systemctl daemon-reload    # then log out and in (or reboot)
 ```
 
-## 4. Run as a service
+## 5. Run as a service
 
 ```bash
-install -Dm755 build/bin/shoehorn ~/.local/bin/shoehorn
+install -Dm755 build/bin/shoehorn ~/.local/bin/shoehorn   # (the packages put it in /usr/bin)
 mkdir -p ~/.config/systemd/user && cp packaging/systemd/*.service ~/.config/systemd/user/
 # edit ExecStart in ~/.config/systemd/user/shoehorn.service (model list, flags), then:
 systemctl --user daemon-reload
@@ -77,14 +104,33 @@ loginctl enable-linger "$USER"      # start at boot without logging in
 - Settings and the model list live in `~/.shoehorn/` (`settings.json`, `models.json`), as on Windows.
 
 The agent (`dsh.service`) runs `scripts/agent.sh` from the checkout (set `WorkingDirectory`); it needs Node 24 and
-pnpm (`corepack enable`). Enable it like the server: `systemctl --user enable --now dsh`.
+pnpm (`corepack enable`). Enable it like the server: `systemctl --user enable --now dsh`. `scripts/agent.sh` rebuilds
+the agent when its sources changed since the last build (after a `git pull`), so updates reach a running install.
 
-## 5. Sensors
+## 6. Sensors
 
-The Sensors page reads the GPU through NVML (`libnvidia-ml.so.1`, part of the driver), drive temperatures from the
+The Sensors page reads an NVIDIA GPU through NVML (`libnvidia-ml.so.1`, part of the driver), an AMD GPU from the
+amdgpu driver's sysfs (temperature, power, VRAM, memory load), drive temperatures from the
 NVMe and `drivetemp` hwmon drivers, and CPU, memory and board sensors from `/sys/class/hwmon` (k10temp, coretemp,
 nct6775 / it87, spd5118 / jc42). No helper program and no root. Board voltages appear only when the driver labels
 them. For SATA drive temperatures load the `drivetemp` module (`echo drivetemp | sudo tee /etc/modules-load.d/drivetemp.conf`).
 
 The Models page's folder and file pickers open `kdialog` or `zenity` when a desktop session is running; on a headless
 machine type the path instead.
+
+## 7. Which GPU, how fast
+
+The server picks a profile from the GPU's VRAM and the Models page shows it: from 24 GB the residual goes partly to
+VRAM by default, a 16 GB card streams it from RAM, a 12 GB card needs a 3-bit base (`pack --base iq3_xxs`; KLD 0.0048
+against Q8, against 0.0031 for the 16 GB setup). The verify streams the residual over PCIe, so a PCIe 5.0 slot is
+worth about twice a PCIe 4.0 one. Measured (27B, 256 tokens, greedy decode):
+
+| GPU | Profile | Decode |
+|---|---|---|
+| RTX 5080 16 GB (PCIe 5.0), Windows / Linux (WSL) | 16 GB | 20.2 / 18.3 tok/s |
+| RTX A5000 24 GB (PCIe 4.0) | 24 GB | 13.5 tok/s |
+| RTX 4000 Ada 20 GB (PCIe 4.0) | 16 GB | 10.1 tok/s |
+| AMD MI300X (ROCm 7) | 24 GB+ (residual on host here) | 9.4 tok/s, 13.6 with a q8_0 KV |
+
+On RunPod, use pro or data-center cards: its GeForce hosts (RTX 4090 / 5080) fail CUDA initialization for any program
+(`cuInit` 999), which is the host's container setup, not shoehorn.

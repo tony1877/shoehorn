@@ -39,6 +39,15 @@ export DSH_TELEMETRY_MODE=${DSH_TELEMETRY_MODE:-DISABLED}
 
 command -v pnpm >/dev/null 2>&1 || { echo "pnpm not found: install Node 24 and run \`corepack enable\`" >&2; exit 1; }
 cd "$root/agent"
-[ -d node_modules ] || pnpm install --frozen-lockfile
-[ -f packages/client/ui-shoehorn/lib/index.js ] || pnpm run build
+stamp=.shoehorn-built
+# a fresh checkout, or a pull that changed the lockfile: install the dependencies again
+if [ ! -d node_modules ] || [ pnpm-lock.yaml -nt node_modules ]; then
+    pnpm install --frozen-lockfile && touch node_modules
+fi
+# build when nothing is built yet or a source file is newer than the last build (an update to the agent)
+if [ ! -f "$stamp" ] || [ -n "$(find packages vendor -path '*/node_modules' -prune -o -path '*/lib' -prune \
+        -o -type f \( -name '*.ts' -o -name '*.tsx' -o -name '*.json' -o -name '*.css' \) -newer "$stamp" -print -quit)" ]; then
+    echo "building the agent (sources changed since the last build)"
+    pnpm run build && touch "$stamp"
+fi
 exec pnpm dsh web "$@"
