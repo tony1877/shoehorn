@@ -9,7 +9,7 @@
 # The container stays up when done (RunPod restarts a container that exits); the caller deletes the pod.
 set -uo pipefail
 
-BRANCH=${BRANCH:-claude/qwen-custom-inference-engine-jhydpg}
+BRANCH=${BRANCH:-main}
 SRC_REPO=${SRC_REPO:-orcarouter/Qwen3.8-27B-Uncensored}
 TEMPLATE_REPO=${TEMPLATE_REPO:-orcarouter/Qwen3.8-27B-Uncensored-GGUF}
 TEMPLATE_FILE=${TEMPLATE_FILE:-Qwen3.8-27B-Uncensored-Q4_K_M.gguf}

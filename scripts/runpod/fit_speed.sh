@@ -7,7 +7,7 @@
 # (e.g. iq3_xxs / q4_K: pack $PACK here). Image: nvidia/cuda:12.8.1-devel-ubuntu24.04, a pro / data-center card.
 set -uo pipefail
 REPO=${REPO:-Tony1877/Qwen3.8-27B-Uncensored-shoehorn}
-BRANCH=${BRANCH:-claude/qwen-custom-inference-engine-jhydpg}
+BRANCH=${BRANCH:-main}
 W=/work
 mkdir -p $W/out $W/m
 LOG=$W/out/fit.$TAG.log

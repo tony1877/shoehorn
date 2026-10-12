@@ -9,7 +9,7 @@
 #   https://raw.githubusercontent.com/tony1877/shoehorn/<branch>/scripts/runpod/phase1.sh | bash"
 set -uo pipefail
 
-BRANCH=${BRANCH:-claude/qwen-custom-inference-engine-jhydpg}
+BRANCH=${BRANCH:-main}
 REPO=${REPO:-Tony1877/Qwen3.8-27B-Uncensored-shoehorn}
 PACK=${PACK:-orca27b-r3}
 TAG=${TAG:-linux}

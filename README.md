@@ -58,7 +58,7 @@ winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet -
 Clone to a short path and build. The first build compiles ggml's CUDA kernels and takes several minutes.
 
 ```powershell
-git clone --recurse-submodules --shallow-submodules -b claude/qwen-custom-inference-engine-jhydpg https://github.com/tony1877/shoehorn C:\src\shoehorn
+git clone --recurse-submodules --shallow-submodules https://github.com/tony1877/shoehorn C:\src\shoehorn
 cd C:\src\shoehorn
 .\scripts\build.ps1                 # options: -Portable (no AVX-512), -CudaArch <sm>, -NoCuda
 ```
