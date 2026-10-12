@@ -225,7 +225,9 @@ the profile. The 12 GB profile measured against Q8 (`q8.kld`, first 40 chunks of
 | b3 base alone | ~10.1 GB | 0.236 | 82.0% | 4.480 |
 
 The residual carries the 3-bit base close to the 16 GB setup (1.5x r3's KLD). Whether to offer it is open
-question 3. Not yet run: `bench_prose.py` per profile on a card of each size.
+question 3. Speed per profile (`bench/results/fit-profiles-2026-10-12.md`, `gen` on RunPod pro cards): 24 GB (RTX A5000,
+r4, residual partly in VRAM) 13.5 tok/s greedy; 16 GB (RTX 4000 Ada, r3 streamed) 10.1 tok/s. The 12 GB run waits for an
+RTX A2000 on RunPod (none available on 2026-10-12).
 
 ### Phase 5: packaging and the distribution matrix (4-6 days)
 
