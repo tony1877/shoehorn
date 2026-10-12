@@ -1752,8 +1752,20 @@ int serve(const std::vector<std::string> & args_in) {
             return 1;
         }
     }
-    if (model_path.empty()) {
-        fprintf(stderr, "usage: shoehorn serve <model.gguf> [--res r.gguf] [--host H] [--port 8090] [--alias NAME]\n"
+    // no model on the command line: serve the model list file's models (all of them live there anyway)
+    if (S->models_file.empty()) {
+        const char * home = std::getenv("USERPROFILE") ? std::getenv("USERPROFILE") : std::getenv("HOME");
+        if (home) S->models_file = sys::join_path(sys::join_path(home, ".shoehorn"), "models.json");
+    }
+    bool listed = false;
+    if (model_path.empty() && !S->models_file.empty()) {
+        try {
+            const json f = json::parse(read_file(S->models_file));
+            listed       = f.contains("models") && f["models"].is_array() && !f["models"].empty();
+        } catch (...) {}
+    }
+    if (model_path.empty() && !listed) {
+        fprintf(stderr, "usage: shoehorn serve [<model.gguf>] [--res r.gguf] [--host H] [--port 8090] [--alias NAME]\n"
                         "         [--api-key-file F] [--chat-template-file F] [--ctx 16384] [--kv f16|q8_0|q4_0] [--spec auto|K]\n"
                         "         [--kv-v TYPE (V cache type, default: --kv)] [--kv-lock (keep the RAM KV in physical memory)]\n"
                         "         [--slots N (sequences kept, one per conversation)] [--kv-pool-gb G (RAM KV of all slots)]\n"
@@ -1771,7 +1783,8 @@ int serve(const std::vector<std::string> & args_in) {
                         "         [--temperature 1.0] [--top-p 0.95] [--top-k 20] [--min-p 0] [--presence-penalty 0] (request defaults)\n"
                         "         [--fast-prefill N (read all but the last N prompt tokens without the residual: ~2x prefill)]\n"
                         "         [--tool-temp 0.6 (temperature inside <tool_call> blocks; 0 = the request's)]\n"
-                        "         [--timing-log FILE (JSON lines of per-request timings, no content)]\n");
+                        "         [--timing-log FILE (JSON lines of per-request timings, no content)]\n"
+                        "  without <model.gguf>: the models of the model list file (--models-file)\n");
         return 1;
     }
     if (!key_file.empty()) {  // last non-comment line (same format as the llama-server key file)
@@ -1781,7 +1794,7 @@ int serve(const std::vector<std::string> & args_in) {
             if (!line.empty() && line[0] != '#') S->api_key = line;
         }
     }
-    if (S->alias.empty()) {
+    if (S->alias.empty() && !model_path.empty()) {
         S->alias = model_path.substr(model_path.find_last_of("/\\") + 1);
     }
 
@@ -1794,10 +1807,6 @@ int serve(const std::vector<std::string> & args_in) {
     // models (the main one and --also) are merged into it at the front, in their order, unless the page removed them
     // earlier ("removed" in the file, so a restart does not bring them back); for those it lists, the command line
     // keeps the path current. A model whose files are missing is skipped.
-    if (S->models_file.empty()) {
-        const char * home = std::getenv("USERPROFILE") ? std::getenv("USERPROFILE") : std::getenv("HOME");
-        if (home) S->models_file = sys::join_path(sys::join_path(home, ".shoehorn"), "models.json");
-    }
     if (!S->models_file.empty()) {
         try {
             const std::string txt = read_file(S->models_file);
@@ -1814,7 +1823,7 @@ int serve(const std::vector<std::string> & args_in) {
         main.alias = S->alias;
         main.path  = model_path;
         main.res   = res;
-        cmd.push_back(std::move(main));
+        if (!model_path.empty()) cmd.push_back(std::move(main));
         for (auto & e : extra) cmd.push_back(std::move(e));
         for (const Entry & c : cmd) S->cmd_aliases.push_back(c.alias);
         json &       ms      = S->models_cfg["models"];
@@ -2819,8 +2828,8 @@ int serve(const std::vector<std::string> & args_in) {
     http.Post("/v1/chat/completions", handler(true));
     http.Post("/v1/completions", handler(false));
 
-    printf("shoehorn serve: %s on http://%s:%d (model id \"%s\", ctx %d, %s)\n", model_path.c_str(), host.c_str(), port,
-           S->alias.c_str(), n_ctx,
+    printf("shoehorn serve: %s on http://%s:%d (model id \"%s\", ctx %d, %s)\n", S->entries[0].path.c_str(), host.c_str(), port,
+           S->entries[0].alias.c_str(), n_ctx,
            idle_unload > 0 ? "loaded on demand" : S->q35 && S->q35->has_residual() ? "base + residual, speculative" : "plain decoding");
     fflush(stdout);
     if (!http.listen(host, port)) {
