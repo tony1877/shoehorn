@@ -323,5 +323,9 @@ and its prompt describes it as the Windows one does.
 2. Intel Arc through Vulkan: out of scope unless asked.
 3. ~~Whether the 12 GB profile's quality is acceptable~~: offered (owner's decision, 2026-10-12): KLD 0.0048 vs Q8, 96.9% same
    top-1, 6.1 tok/s on an RTX A4000. The Models page preselects the 3-bit base on 12 GB cards.
+4. 8 GB profile (added 2026-10-12): IQ2_XXS base + q4_K residual, 6.93 GB of base in VRAM; against Q8 (40 chunks) KLD
+   0.0093, 96.4% same top-1, PPL 4.025 (the base alone: KLD 0.53, 73.3%); 12.4 tok/s greedy on the RTX 5080 (4.1 tokens
+   per cycle). IQ2 types need an imatrix: `pack` now uses q2_K for tensors the imatrix does not cover (the output layer
+   and the MTP layer here) instead of aborting.
 
 Estimate: about 6-8 weeks for Phases 0-6; Phase 7 runs alongside.

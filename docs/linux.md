@@ -123,7 +123,8 @@ machine type the path instead.
 
 The server picks a profile from the GPU's VRAM and the Models page shows it: from 24 GB the residual goes partly to
 VRAM by default, a 16 GB card streams it from RAM, a 12 GB card needs a 3-bit base (`pack --base iq3_xxs`; KLD 0.0048
-against Q8, against 0.0031 for the 16 GB setup). The verify streams the residual over PCIe, so a PCIe 5.0 slot is
+against Q8, against 0.0031 for the 16 GB setup), an 8 GB card a 2-bit base (`pack --base iq2_xxs` with an imatrix;
+6.9 GB of VRAM, KLD 0.0093, 96.4% the same top-1 token as Q8; needs 32 GB of RAM and a small context). The verify streams the residual over PCIe, so a PCIe 5.0 slot is
 worth about twice a PCIe 4.0 one. Measured (27B, 256 tokens, greedy decode):
 
 | GPU | Profile | Decode |
@@ -132,6 +133,7 @@ worth about twice a PCIe 4.0 one. Measured (27B, 256 tokens, greedy decode):
 | RTX A5000 24 GB (PCIe 4.0) | 24 GB | 13.5 tok/s |
 | RTX 4000 Ada 20 GB (PCIe 4.0) | 16 GB | 10.1 tok/s |
 | RTX A4000 16 GB (PCIe 4.0), 3-bit base | 12 GB | 6.1 tok/s |
+| RTX 5080 16 GB (PCIe 5.0), 2-bit base | 8 GB | 12.4 tok/s (a laptop GPU on fewer PCIe lanes: expect 3-5) |
 | AMD MI300X (ROCm 7) | 24 GB+ (residual on host here) | 9.4 tok/s, 13.6 with a q8_0 KV |
 
 On RunPod, use pro or data-center cards: its GeForce hosts (RTX 4090 / 5080) fail CUDA initialization for any program

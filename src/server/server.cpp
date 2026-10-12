@@ -1607,7 +1607,8 @@ const SettingOpt kSettings[] = {
     { "--presence-penalty", "0", "Sampling defaults", "Presence penalty for requests that set none.", "" },
 };
 
-// GPU fit profiles (docs/LINUX-PLAN.md, Phase 4): what the 27B pack should look like on this GPU, from its total VRAM.
+// GPU fit profiles (docs/LINUX-PLAN.md, Phase 4): what the 27B pack should look like on this GPU, from its total VRAM
+// (24 GB+, 16 GB, 12 GB: 3-bit base, 8 GB: 2-bit base).
 // The default for --res-gpu-gb follows it (residual in VRAM from 24 GB cards up); the Models page shows it.
 struct GpuFit {
     double      vram_gb = 0;
@@ -1627,8 +1628,11 @@ static GpuFit gpu_fit() {
         f = { f.vram_gb, "16 GB", "iq4_xs", "q4_K or q3_K, streamed from RAM", false };
     } else if (f.vram_gb >= 11) {
         f = { f.vram_gb, "12 GB", "iq3_xxs (a 3-bit base: KLD 0.0048 against Q8, ~60% of the 16 GB speed)", "q4_K, streamed from RAM", false };
+    } else if (f.vram_gb >= 7) {  // 8 GB cards report a little under 8
+        f = { f.vram_gb, "8 GB", "iq2_xxs (a 2-bit base, 6.9 GB: KLD 0.0093 against Q8, ~60% of the 16 GB speed; keep the context small)",
+              "q4_K, streamed from RAM (32 GB of RAM)", false };
     } else {
-        f.profile = f.vram_gb > 0 ? "under 12 GB: the 27B does not fit" : "no GPU";
+        f.profile = f.vram_gb > 0 ? "under 8 GB: the 27B does not fit" : "no GPU";
     }
     return f;
 }
