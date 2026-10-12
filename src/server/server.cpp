@@ -1626,7 +1626,7 @@ static GpuFit gpu_fit() {
     } else if (f.vram_gb >= 15) {
         f = { f.vram_gb, "16 GB", "iq4_xs", "q4_K or q3_K, streamed from RAM", false };
     } else if (f.vram_gb >= 11) {
-        f = { f.vram_gb, "12 GB", "a 3-bit base (pack --base iq3_xxs)", "q4_K, streamed from RAM", false };
+        f = { f.vram_gb, "12 GB", "iq3_xxs (a 3-bit base: KLD 0.0048 against Q8, ~60% of the 16 GB speed)", "q4_K, streamed from RAM", false };
     } else {
         f.profile = f.vram_gb > 0 ? "under 12 GB: the 27B does not fit" : "no GPU";
     }

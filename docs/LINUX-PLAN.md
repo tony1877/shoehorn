@@ -321,6 +321,7 @@ and its prompt describes it as the Windows one does.
 
 1. Consumer AMD speed testing (RDNA3/RDNA4): local hardware or another cloud.
 2. Intel Arc through Vulkan: out of scope unless asked.
-3. Whether the 12 GB profile's quality is acceptable: measured in Phase 4 (KLD 0.0048 vs Q8, 96.9% same top-1; r3 0.0031). Owner's decision.
+3. ~~Whether the 12 GB profile's quality is acceptable~~: offered (owner's decision, 2026-10-12): KLD 0.0048 vs Q8, 96.9% same
+   top-1, 6.1 tok/s on an RTX A4000. The Models page preselects the 3-bit base on 12 GB cards.
 
 Estimate: about 6-8 weeks for Phases 0-6; Phase 7 runs alongside.

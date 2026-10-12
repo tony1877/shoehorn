@@ -245,7 +245,14 @@ async function pollState() {
   const f = state.fit;
   $("fitNote").textContent = !f ? "" : f.base ? `This GPU (${f.vram_gb.toFixed(0)} GB): ${f.profile} profile, base ${f.base}, residual ${f.residual}.`
                                               : `This GPU: ${f.profile}.`;
+  // the pack form starts at the base this GPU's profile needs (12 GB cards: a 3-bit base); once, so a choice sticks
+  if (f && !fitApplied) {
+    fitApplied = true;
+    const want = /iq3_xxs/.test(f.base || "") ? "iq3_xxs" : "iq4_xs";
+    if ($("pkBase").value !== want) { $("pkBase").value = want; $("pkBase").dispatchEvent(new Event("change")); }
+  }
 }
+let fitApplied = false;
 document.addEventListener("click", async e => {
   const b = e.target.closest("button"); if (!b) return;
   try {
