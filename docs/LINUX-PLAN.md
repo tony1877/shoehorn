@@ -165,7 +165,9 @@ Pod check (2026-10-11, L4, `scripts/runpod/phase2.sh`): `serve` with r3 answers 
 NVML gives GPU temperature, power, VRAM and PCIe rate; NVMe temperatures with drive names and k10temp CPU sensors
 (Tctl, CCDs) come from hwmon; a download job runs and is cancelled (no curl left); a pack job with a bad source is
 refused with a message; the Settings restart re-execs into a new process with the new flag and reloads the model.
-Not covered on a pod: a pack that runs to completion through the Models page (the RunPod pack job ran `pack` directly).
+A pack through the Models page (`POST /models/pack`, Linux CPU build in WSL, r3 settings) unloaded the model, packed
+in 10 minutes and registered the result; all 866 base and 409 residual tensors match the Windows r3, and the stale
+`eightfer.*` keys are gone.
 
 Progress (2026-10-11): every `sysinfo` function has a POSIX implementation (item 1; AMD sensors still Phase 3), plus
 `board_sensors()` over `/sys/class/hwmon` under LibreHardwareMonitor's kind names, which the server uses when no
@@ -268,7 +270,12 @@ lacks); it needs glibc 2.34 and an installed ROCm 7 (/opt/rocm, RPATH), and its 
 without one (checked on ubuntu:24.04 and almalinux:9). Not yet run on an AMD GPU: no community MI300X on 2026-10-12
 (the job: `scripts/runpod/matrix.sh` with `TARBALL=...-rocm.tar.gz` on `rocm/dev-ubuntu-24.04:7.0`). The `.deb` / `.rpm`
 were rebuilt from the CUDA tarball with the launcher; with no driver they start the CPU build (ubuntu:24.04, fedora:43).
-Open: container images, the AUR.
+`scripts/package-images.sh` builds `shoehorn:cuda` (1.4 GB: ubuntu:24.04 + the CUDA tarball) and `shoehorn:rocm`
+(2.3 GB: ubuntu:24.04 + the ROCm 7.0 runtime libraries from repo.radeon.com + the ROCm tarball); both start without a
+GPU (CPU fallback; the ROCm build reports "no ROCm-capable device" and runs on the CPU). The ROCm `.deb` / `.rpm` exist
+too; the `.rpm`s are built without build-id links, which otherwise clashed with the system's libgomp on AlmaLinux 9.
+All four packages install and run on ubuntu:24.04, almalinux:9 and fedora:43. Open: the AUR, GPU runs of the ROCm
+tarball and images.
 
 ### Phase 6: running it as a service, and docs (2-3 days)
 
