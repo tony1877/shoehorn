@@ -380,3 +380,35 @@ layer l. fuse_fc starts at zero, so training starts at the stock head. Later ste
   step 260), because the h_t path drifted.
 - So, for a better drafter on this model: the MTP head already gets what EAGLE-3's features would add. More data
   helps it only slowly (section 2: x1.08 at 1.3M tokens).
+
+## 9. Tree drafting at the MTP -> base level, with a tree-masked DeltaNet (2026-10-13): dropped
+
+**Idea.** A base pass is memory-bound, so let the MTP head propose a tree of candidates instead of a chain of 3 and
+check them all in one base pass. Evaluate the tree with an ancestor mask instead of copying the recurrent state per
+branch (what made section 5's two-sequence pass 20% slower): tree attention for the attention layers, and the
+chunked gated delta rule with the causal mask replaced by the ancestor mask (decay summed along the path) for the
+DeltaNet layers.
+
+**Offline acceptance** (`experiments/mtp_distill/tree_accept.py`): stock 4-bit head, the 100 held-out conversations of
+section 2, exact multi-draft acceptance (recursive rejection sampling, drafts without replacement, 32 Monte Carlo
+draws per position), best tree per node budget by dynamic programming over a_d(w), assuming each depth is
+independent. Chain of 3: 1.423 drafts kept, which matches `mtp.py`'s kept@3 (0.4748 x 3).
+
+| Drafting | Rows in the base pass | Base pass ms | Tokens per pass | ms per drafted token |
+|---|---|---|---|---|
+| Chain of 3 (today) | 4 | 21.6 | 2.42 | **8.9** |
+| Chain of 6 | 7 | ~25 | 2.62 | 9.5 |
+| Tree, 8 nodes | 9 | ~26 | 2.81 | 9.3 |
+| Tree, 16 nodes | 17 | ~28 | 3.06 | 9.3 |
+| Tree, 24 nodes | 25 | 30.3 | 3.20 | 9.5 |
+| Tree, 32 nodes | 33 | 33.0 | 3.28 | 10.1 |
+
+Base pass times: `build-ref/bin/llama-bench -p N -n 0 -r 10 -fa 1` on `orca27b.base.gguf`, RTX 5080, two runs.
+Acceptance per sibling saturates fast: depth 1 goes 0.738 / 0.829 / 0.864 / 0.881 for 1-4 siblings, depth 3 goes
+0.533 / 0.635 / 0.679 / 0.703.
+
+**Why it fails.** Rows are not free past about 4: 4 -> 8 rows costs +19% (ggml leaves the single-row kernel there),
+then about 0.4 ms per row. Every tree costs more per drafted token than the chain, before counting the MTP head's
+cost per node. With the engine's own figure (1 -> 7 rows +12%), a 6-node tree is at best about 5% cheaper to draft,
+about +3% tok/s: not worth the DeltaNet tree kernel. The verify-level tree (rows nearly free there, since the verify
+waits on PCIe) is untested, but its branches still have to be drafted.
