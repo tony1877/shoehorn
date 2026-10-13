@@ -412,3 +412,20 @@ then about 0.4 ms per row. Every tree costs more per drafted token than the chai
 cost per node. With the engine's own figure (1 -> 7 rows +12%), a 6-node tree is at best about 5% cheaper to draft,
 about +3% tok/s: not worth the DeltaNet tree kernel. The verify-level tree (rows nearly free there, since the verify
 waits on PCIe) is untested, but its branches still have to be drafted.
+
+**Verify-level leaves (2026-10-13): dropped too.** The cheapest verify tree: `tree_cycle` with E8_TREE_M=0 tested as
+leaves only (the base's runner-up at the least confident drafts, no drafting after it, so drafting costs nothing
+more; code change reverted). `gen --spec auto --temp 1 --repeat 6 -n 384`, r3 pack, 5080:
+
+| | Off | 2 leaves | 4 leaves |
+|---|---|---|---|
+| prose tok/s | 15.66 | 16.10 | 17.35 |
+| explain tok/s | 21.68 | 22.13 | 21.12 |
+| code tok/s | 28.20 | 27.05 | 28.80 |
+| verify per cycle | 228-232 ms | 254-258 ms | 254-257 ms |
+| alternatives tested / accepted (prose) | - | 23 / 13 in 136 cycles | 24 / 16 in 130 cycles |
+
+The tok/s spread is seed noise: drawing the alternatives moves the random stream, so the runs sample different text.
+What the leaves actually add is the rescued tokens: 10-16 per 2,304 generated, about 0.6%, because the rejection
+lands on a branch point in only ~17% of cycles. The extra sequences cost the verify about 25 ms (+11%), so the net is
+a loss of a few percent.
