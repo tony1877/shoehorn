@@ -46,6 +46,9 @@ Regression checks are `node --test tests/windows-harness.test.cjs` and
 requires Jinja2. The native `tests/tool_recovery.cpp` checks monotonic
 argument recovery without a model. Agent checks include the file-preview
 browser scenario and keyless `investigation-checkpoint` session replay.
+On an idle server, `python tests/server_policy.py --api-key-file PATH` also
+checks final and streamed answer bounds and both thinking-policy regressions
+against the loaded model. It reports no credentials or generated text.
 
 The configured fast-prefill path is approximate. Its fidelity measurements
 are recorded in [decode limits](../../docs/DECODE-LIMITS.md); speculative
