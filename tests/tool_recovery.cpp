@@ -1,9 +1,18 @@
 #include "server/tool_recovery.h"
 #include "server/output_policy.h"
+#include "server/generation_guard.h"
 #include <cassert>
 #include <iostream>
 
 int main() {
+    std::string repetitive;
+    for (int i = 0; i < 1000; ++i) repetitive += "                   \\\"disgusting\\\", \\\"disgusting\\\", \\\"disgusting\\\", \\\"disgusting\\\",\\n";
+    assert(e8::cli::generation_repeats(repetitive));
+    assert(!e8::cli::generation_repeats(repetitive.substr(0, 8191)));
+    std::string code;
+    for (int i = 0; i < 1000; ++i) code += "const value_" + std::to_string(i) + " = compute(" + std::to_string(i) + ");\n";
+    assert(!e8::cli::generation_repeats(code));
+    assert(!e8::cli::generation_repeats(repetitive + code));
     common_chat_tool tool;
     tool.name = "write";
     tool.parameters = R"({"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"}}})";

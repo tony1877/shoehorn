@@ -1,5 +1,6 @@
 #include "tool_recovery.h"
 #include "output_policy.h"
+#include "generation_guard.h"
 // `shoehorn serve`: OpenAI-compatible HTTP server (DESIGN.md M6).
 //
 //   shoehorn serve <model.gguf> [--res r.gguf] [--host 127.0.0.1] [--port 8090] [--alias NAME]
@@ -1077,6 +1078,9 @@ loaded:
     auto gen_id = [&]() { return random_id(S.rng, "call_"); };
     bool done   = false;
     bool recovery_stream = false;
+    bool generation_loop = false;
+    const bool detect_repetition = body.value("detect_repetition", true);
+    size_t next_generation_check = 8192;
     size_t used = 0;  // tokens of `out` consumed into `text`
     size_t sent = 0;  // completion streaming: bytes of `text` sent
     size_t hold = 0;  // completion streaming: a stop string may still be forming in the last hold bytes
@@ -1116,6 +1120,14 @@ loaded:
             if (R.n_gen >= max_tokens) {
                 R.finish = "length";
                 done     = true;
+            }
+        }
+        if (detect_repetition && text.size() >= next_generation_check) {
+            next_generation_check = text.size() + 512;
+            if (generation_repeats(text)) {
+                generation_loop = true;
+                done = true;
+                return; // Never publish a completed/truncated tool call.
             }
         }
         if (cancelled && cancelled()) {
@@ -1447,6 +1459,13 @@ loaded:
             next();
             consume();
         }
+    }
+    if (generation_loop) {
+        SL.state_tokens.clear();
+        SL.ck_tokens.clear();
+        err = "Generation stopped: sustained repeated output. The unfinished response must not be executed; regenerate a concise implementation. Set detect_repetition=false only for deliberately repetitive output.";
+        fprintf(stderr, "generation repetition stopped after %d tokens\n", R.n_gen);
+        return false;
     }
     if (!done) R.finish = "length";
     // the model state now holds prompt + every produced token except the last (sampled, not evaluated)
