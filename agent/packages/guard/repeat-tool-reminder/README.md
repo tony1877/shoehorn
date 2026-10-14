@@ -46,6 +46,8 @@ When you want to change when reminders fire or which tools they cover, mount the
     resultInclude: [pwsh, bash]  # compare only these tools' results
     resultWindow: 12             # ...within the agent's last 12 such calls
     resultPreviewChars: 500      # cap on the result shown in the detailed reminder
+    investigationThresholds: [] # advisory counts since a successful reset tool
+    investigationResetTools: [write, edit, str_replace_editor]
     reminderSuffix: ''           # text appended to every reminder
 ```
 
@@ -59,6 +61,8 @@ When you want to change when reminders fire or which tools they cover, mount the
 | `resultInclude` | `[]` | Only these tracked tools' results are compared; empty means every tracked tool |
 | `resultWindow` | `12` | How many of the agent's recent result-compared calls are searched for an equal result |
 | `resultPreviewChars` | `500` | How many characters of the repeated result the detailed same-result reminder shows |
+| `investigationThresholds` | `[]` | Advisory checkpoint counts across changing calls; empty disables it |
+| `investigationResetTools` | `[write, edit, str_replace_editor]` | Successful tracked tools that reset investigation counts; user input also resets |
 | `reminderSuffix` | `''` | Text appended to every reminder, e.g. a chat-template tag that raises reasoning effort |
 
 Invalid configuration fails at startup with a clear error — an empty `thresholds` list, a repeat count below 2, a duplicate, or a `resultWindow` smaller than the highest `resultThresholds` entry — never a silent change of behavior. The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-repeat-tool-reminder) documents every accepted value.

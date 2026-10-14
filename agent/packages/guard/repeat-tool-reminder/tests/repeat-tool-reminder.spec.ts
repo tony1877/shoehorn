@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import { createUserMessage, ToolCallId  } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
@@ -12,6 +13,28 @@ import type { Config } from '@deepseek-ai/dsh-repeat-tool-reminder'
 import { MockAdapter, textResponse, toolCallResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
 
 const testToolSignal = new AbortController().signal
+
+it('reminds across changing investigation calls and resets on successful configured tools', async () => {
+  const ctx = await harness({ thresholds: [99], investigationThresholds: [2], investigationResetTools: ['other'] })
+  const adapter = new MockAdapter([
+    toolCallResponse('c1', 'probe', { q: 'one' }),
+    toolCallResponse('c2', 'probe', { q: 'two' }),
+    toolCallResponse('c3', 'other', {}),
+    toolCallResponse('c4', 'probe', { q: 'three' }),
+    toolCallResponse('c5', 'probe', { q: 'four' }),
+    textResponse('done'),
+  ])
+  ctx.llm.registerAdapter(['mock'], adapter)
+  const agent = await ctx.agentLoop.create(SessionId('investigation'), { provider: 'mock', model: 'mock' })
+  agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+  await waitForIdle(ctx, agent)
+  expect(reminders(agent).map(item => item.text)).toMatchInlineSnapshot(`
+    [
+      "You have made 2 tool calls since a successful file mutation. Consolidate the facts already verified, identify the unresolved question, and check an authoritative reference or a runnable assertion before continuing. This is an advisory checkpoint, not evidence that the investigation is wrong.",
+      "You have made 2 tool calls since a successful file mutation. Consolidate the facts already verified, identify the unresolved question, and check an authoritative reference or a runnable assertion before continuing. This is an advisory checkpoint, not evidence that the investigation is wrong.",
+    ]
+  `)
+})
 
 /**
  * Behavior suite for the repeat-tool-call guard: chain semantics (identical /
@@ -473,7 +496,9 @@ describe('same-result detection', () => {
       name: 'shot',
       description: 's',
       parameters: { data: { type: 'string' } },
-      async execute(args) { return [{ type: 'image', data: args.data ?? '', mimeType: 'image/png' }] },
+      async execute(args) { return [{ type: 'image', attachment: {
+        attachmentId: AttachmentId(args.data ?? ''), mediaType: 'image/png', bytes: 1, width: 1, height: 1,
+      } }] },
     }))
     ctx.llm.registerAdapter(['mock'], new MockAdapter([
       toolCallResponse('c1', 'shot', { data: 'AQ==' }),
@@ -541,12 +566,14 @@ describe('config validation fails loud', () => {
 
   it('rejects resultThresholds entries below 2 or duplicated, and accepts an empty list', async () => {
     await expect((await spine()).plugin(RepeatToolGuard, { resultThresholds: [1] })).rejects.toThrow(/resultThresholds entry 1/)
-    await expect((await spine()).plugin(RepeatToolGuard, { resultThresholds: [3, 3] })).rejects.toThrow(/`resultThresholds` must not contain duplicates/)
+    await expect((await spine()).plugin(RepeatToolGuard, { resultThresholds: [3, 3] }))
+      .rejects.toThrow(/`resultThresholds` must not contain duplicates/)
     await expect((await spine()).plugin(RepeatToolGuard, { resultThresholds: [] })).resolves.toBeDefined()
   })
 
   it('rejects a resultWindow smaller than the highest resultThresholds entry', async () => {
-    await expect((await spine()).plugin(RepeatToolGuard, { resultThresholds: [3, 8], resultWindow: 5 })).rejects.toThrow(/could never be reached/)
+    await expect((await spine()).plugin(RepeatToolGuard, { resultThresholds: [3, 8], resultWindow: 5 }))
+      .rejects.toThrow(/could never be reached/)
   })
 
   it('rejects a non-positive resultWindow or resultPreviewChars', async () => {

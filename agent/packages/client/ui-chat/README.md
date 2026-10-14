@@ -43,6 +43,8 @@ Settings → General exposes a persisted `Normal` / `Compact` conversation-displ
 
 -----
 
+Streaming `write`, `edit` and `str_replace_editor` arguments expose a decoded, display-only file preview before execution. The preview retains the latest 16,384 UTF-16 code units, holds incomplete JSON escapes, and disappears when the completed tool row takes over. It never writes a partial file.
+
 <a id="scroll-ownership"></a>
 ## Scroll ownership
 

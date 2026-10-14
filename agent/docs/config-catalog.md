@@ -1728,6 +1728,10 @@ export interface Config {
    * conversation.
    */
   reminderSuffix?: string
+  /** Advisory counts of tracked calls since a successful reset tool; empty disables it. */
+  investigationThresholds?: number[]
+  /** Tool names whose successful result resets the investigation count. */
+  investigationResetTools?: string[]
 }
 ```
 
@@ -2691,10 +2695,21 @@ export interface Config {
   maxOutputChars?: number
   /** Model-facing tool description; deployments may describe their environment. */
   description?: string
+  /**
+   * Auto-background: a command still running after this many milliseconds
+   * keeps running as a background job in its own shell (the owner's next call
+   * gets a fresh shell) instead of being killed at `timeoutMs`. `0` (default)
+   * keeps the kill-and-reset behaviour. Needs a job runtime (`ctx.jobs` plus
+   * `@deepseek-ai/dsh-tool-jobs` in the composition); without one calls run
+   * as before.
+   */
+  autoBackgroundAfterMs?: number
+  /** Upper bound on the foreground wait a call's own `timeoutMs` may request (default 600000). */
+  maxForegroundMs?: number
 }
 ```
 
-Source: [`packages/shell/tool-bash-persistent/src/index.ts:432`](../packages/shell/tool-bash-persistent/src/index.ts)
+Source: [`packages/shell/tool-bash-persistent/src/index.ts:767`](../packages/shell/tool-bash-persistent/src/index.ts)
 
 <a id="deepseek-aidsh-tool-fs"></a>
 

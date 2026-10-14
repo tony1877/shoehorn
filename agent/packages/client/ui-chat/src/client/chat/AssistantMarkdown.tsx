@@ -6,6 +6,7 @@ import type { ChatNodeOwnerProps, ChatViewSlotProps } from '../contract/slots.ts
 import type { AssistantBlock } from '../contract/snapshot.ts'
 import { markdownLabels } from '../markdown-labels.ts'
 import { ReasoningRow } from './ReasoningRow.tsx'
+import { FileGenerationPreview } from './FileGenerationPreview.tsx'
 import { useSearchableHidden } from './searchable-hidden.ts'
 import css from './AssistantMarkdown.module.css'
 
@@ -95,6 +96,7 @@ export const AssistantMarkdown = memo(function AssistantMarkdown({
       }
       // Grouped into tool rows by ChatView; hasVisible above skips an empty shell.
       case 'tool-call':
+        if (streaming) rendered.push(<FileGenerationPreview key={i} name={block.name} raw={block.argsRaw} {...labels.code} />)
         break
       default:
         rendered.push(

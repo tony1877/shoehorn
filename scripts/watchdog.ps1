@@ -23,7 +23,11 @@ Say "watching ports $($Ports -join ', '); start script $Start"
 
 $downSince = $null
 while ($true) {
-    $down = @($Ports | Where-Object { -not (Get-NetTCPConnection -LocalPort $_ -State Listen -ErrorAction SilentlyContinue) })
+    $down = @($Ports | Where-Object {
+        $connections = @(Get-NetTCPConnection -LocalPort $_ -State Listen -ErrorAction SilentlyContinue)
+        if ($_ -eq 3080) { $connections = @($connections | Where-Object LocalAddress -eq '127.0.0.1') }
+        -not $connections.Count
+    })
     $paused = (Test-Path -LiteralPath $pause) -and ((Get-Date) - (Get-Item -LiteralPath $pause).LastWriteTime).TotalHours -lt 1
     if (-not $down.Count -or $paused) {
         $downSince = $null

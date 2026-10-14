@@ -60,6 +60,10 @@ export interface Config {
    * conversation.
    */
   reminderSuffix?: string
+  /** Advisory counts of tracked calls since a successful reset tool; empty disables it. */
+  investigationThresholds?: number[]
+  /** Tool names whose successful result resets the investigation count. */
+  investigationResetTools?: string[]
 }
 
 export const Config: z<Config> = z.object({
@@ -72,6 +76,8 @@ export const Config: z<Config> = z.object({
   resultWindow: z.number().default(12),
   resultPreviewChars: z.number().default(500),
   reminderSuffix: z.string().default(''),
+  investigationThresholds: z.array(z.number()).default([]),
+  investigationResetTools: z.array(z.string()).default(['write', 'edit', 'str_replace_editor']),
 })
 
 /**
@@ -242,6 +248,9 @@ export function apply(ctx: Context, config: Config): void {
   const resultWindow = validatePositive(config.resultWindow as number, 'resultWindow')
   const resultPreviewChars = validatePositive(config.resultPreviewChars as number, 'resultPreviewChars')
   const reminderSuffix = config.reminderSuffix as string
+  const investigationThresholds = new Set(validateThresholds(config.investigationThresholds as number[], 'investigationThresholds', true))
+  const investigationResetTools = new Set(config.investigationResetTools as string[])
+  const investigationCounts = new WeakMap<Agent, number>()
   const highestResultThreshold = resultThresholds.at(-1)
   if (highestResultThreshold !== undefined && highestResultThreshold > resultWindow) {
     throw new Error(`repeat-tool-reminder: resultWindow ${resultWindow} is smaller than resultThresholds entry ${highestResultThreshold}, which could never be reached`)
@@ -322,9 +331,16 @@ export function apply(ctx: Context, config: Config): void {
     // to key on; only agent-loop calls participate.
     if (!exec.agent) return undefined
     if (!tracked(exec.name)) return undefined
+    const successful = !result.isError
+    if (successful && investigationResetTools.has(exec.name)) investigationCounts.delete(exec.agent)
+    else investigationCounts.set(exec.agent, (investigationCounts.get(exec.agent) ?? 0) + 1)
     const byArguments = observeArguments(exec.agent, exec)
     const byResult = observeResult(exec.agent, exec, result)
-    return byArguments ?? byResult
+    const count = investigationCounts.get(exec.agent) ?? 0
+    const investigation = investigationThresholds.has(count)
+      ? reminderMessage(`You have made ${count} tool calls since a successful file mutation. Consolidate the facts already verified, identify the unresolved question, and check an authoritative reference or a runnable assertion before continuing. This is an advisory checkpoint, not evidence that the investigation is wrong.`, `Investigation checkpoint × ${count}`)
+      : undefined
+    return byArguments ?? byResult ?? investigation
   }
 
   // Observe-and-enrich, never veto: count first (state advances regardless of
@@ -351,6 +367,7 @@ export function apply(ctx: Context, config: Config): void {
     if (messages.some(message => message.source.kind === 'user')) {
       chains.delete(agent)
       histories.delete(agent)
+      investigationCounts.delete(agent)
     }
     return next()
   })

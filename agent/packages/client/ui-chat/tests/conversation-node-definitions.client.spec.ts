@@ -183,6 +183,29 @@ function toolResult(callId: string, text: string, isError = false) {
 }
 
 describe('built-in conversation node Definitions', () => {
+  it('publishes a file-only argument stream before the completed tool call', () => {
+    const value = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'step/start', { turn: 1, step: 1 }),
+      at(3, 'assistant/chunk', { turn: 1, step: 1,
+        chunk: { type: 'tool-call-delta', index: 0, id: 'file-1', name: 'write', argumentsDelta: '{"file_path":"a.py","content":"print(1)' },
+      }),
+    ])
+    const current = snapshot(value)
+    const assistant = node(current, 'assistant-step')
+    expect(assistant?.visibility).toBe('visible')
+    expect(current.legacy.partial?.blocks).toMatchInlineSnapshot(`
+      [
+        {
+          "argsRaw": "{\"file_path\":\"a.py\",\"content\":\"print(1)",
+          "callId": "file-1",
+          "kind": "tool-call",
+          "name": "write",
+        },
+      ]
+    `)
+    expect(node(current, 'tool-call')).toBeUndefined()
+  })
   it('rejects an unrelated event passed directly to the request-prompt start', () => {
     const input = at(1, 'turn/start', { turn: 1 })
     const invalidStart = {

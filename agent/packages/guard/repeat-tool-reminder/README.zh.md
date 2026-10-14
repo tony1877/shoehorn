@@ -46,6 +46,8 @@ kind: "package-reference"
     resultInclude: [pwsh, bash]  # compare only these tools' results
     resultWindow: 12             # ...within the agent's last 12 such calls
     resultPreviewChars: 500      # cap on the result shown in the detailed reminder
+    investigationThresholds: [] # advisory counts since a successful reset tool
+    investigationResetTools: [write, edit, str_replace_editor]
     reminderSuffix: ''           # text appended to every reminder
 ```
 
@@ -59,6 +61,8 @@ kind: "package-reference"
 | `resultInclude` | `[]` | 只比较这些被跟踪工具的结果；空表示所有被跟踪工具 |
 | `resultWindow` | `12` | 在该 agent 最近多少次参与比较的调用中查找相同结果 |
 | `resultPreviewChars` | `500` | 详细的相同结果提醒中显示多少字符的重复结果 |
+| `investigationThresholds` | `[]` | 跨不同调用的建议检查点次数；空列表关闭此功能 |
+| `investigationResetTools` | `[write, edit, str_replace_editor]` | 成功且被跟踪的工具重置调查计数；用户输入也会重置 |
 | `reminderSuffix` | `''` | 追加到每条提醒末尾的文本，例如提高推理强度的聊天模板标记 |
 
 无效配置会在启动时以清晰错误失败——空的 `thresholds` 列表、小于 2 的重复次数、重复值，或小于 `resultThresholds` 最大值的 `resultWindow`——绝不会静默改变行为。生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-repeat-tool-reminder)记录每个受支持的值。

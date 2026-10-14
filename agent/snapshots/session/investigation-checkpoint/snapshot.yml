@@ -1,0 +1,8 @@
+version: 1
+scenario: investigation-checkpoint
+profile: headless
+composition: investigation-checkpoint
+recording: authored
+header:
+  class: default
+  pin: true

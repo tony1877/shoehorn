@@ -1,0 +1,6 @@
+
+- id: repeat-tool-reminder
+  config:
+    thresholds: [99]
+    investigationThresholds: [2]
+    investigationResetTools: [write, edit]

@@ -1,3 +1,5 @@
+#include "tool_recovery.h"
+#include "output_policy.h"
 // `shoehorn serve`: OpenAI-compatible HTTP server (DESIGN.md M6).
 //
 //   shoehorn serve <model.gguf> [--res r.gguf] [--host 127.0.0.1] [--port 8090] [--alias NAME]
@@ -87,68 +89,6 @@ using json = nlohmann::ordered_json;
 // ends mid-sentence. When the strict parse of the final text finds no call although the text has a <tool_call>, this
 // reads <tool_call><function=NAME><parameter=P>VALUE</parameter>...</function></tool_call> blocks in any order,
 // typing each value by the tool's JSON schema (strings as written, anything else parsed as JSON).
-void lenient_tool_calls(const std::string & text, const std::vector<common_chat_tool> & tools, common_chat_msg & msg) {
-    if (!msg.tool_calls.empty()) return;
-    size_t p = text.find("<tool_call>");
-    if (p == std::string::npos) return;
-    const size_t first = p;
-    auto trim1 = [](std::string v) {
-        if (!v.empty() && v.front() == '\n') v.erase(0, 1);
-        if (!v.empty() && v.back() == '\n') v.pop_back();
-        return v;
-    };
-    while (p != std::string::npos) {
-        const size_t end  = text.find("</tool_call>", p);
-        const std::string blk = text.substr(p, end == std::string::npos ? std::string::npos : end - p);
-        const size_t fn   = blk.find("<function=");
-        if (fn == std::string::npos) break;
-        const size_t fe   = blk.find('>', fn);
-        if (fe == std::string::npos) break;
-        const std::string name = blk.substr(fn + 10, fe - fn - 10);
-        json schema = json::object();
-        for (const auto & t : tools) {
-            if (t.name == name) {
-                try {
-                    schema = json::parse(t.parameters).value("properties", json::object());
-                } catch (...) {}
-            }
-        }
-        json   args = json::object();
-        size_t q    = fe;
-        while ((q = blk.find("<parameter=", q)) != std::string::npos) {
-            const size_t ne = blk.find('>', q);
-            const size_t ve = blk.find("</parameter>", ne);
-            if (ne == std::string::npos || ve == std::string::npos) break;
-            const std::string pn = blk.substr(q + 11, ne - q - 11);
-            const std::string v  = trim1(blk.substr(ne + 1, ve - ne - 1));
-            const std::string ty = schema.contains(pn) && schema[pn].contains("type") && schema[pn]["type"].is_string()
-                                       ? schema[pn]["type"].get<std::string>() : "string";
-            if (ty == "string") {
-                args[pn] = v;
-            } else {
-                try {
-                    args[pn] = json::parse(v);
-                } catch (...) {
-                    args[pn] = v;
-                }
-            }
-            q = ve + 12;
-        }
-        common_chat_tool_call tc;
-        tc.name      = name;
-        tc.arguments = args.dump();
-        msg.tool_calls.push_back(tc);
-        p = end == std::string::npos ? std::string::npos : text.find("<tool_call>", end);
-    }
-    if (!msg.tool_calls.empty()) {
-        const size_t c = msg.content.find("<tool_call>");
-        if (c != std::string::npos) msg.content.erase(c);
-        while (!msg.content.empty() && (msg.content.back() == '\n' || msg.content.back() == ' ')) msg.content.pop_back();
-        fprintf(stderr, "tool call recovered by the lenient parser (strict grammar rejected it): %s\n", msg.tool_calls[0].name.c_str());
-    }
-    (void) first;
-}
-
 // Reasoning stuck in a loop: a chunk of the last 400 characters seen twice before, or most of the last 40 lines
 // repeating earlier lines. Real reasoning (new content) never trips it.
 bool reasoning_loops(const std::string & text) {
@@ -216,7 +156,7 @@ struct Server {
     bool                             echo = true;  // echo drafting (copies from the context)
     // agent turns: earlier assistant turns' reasoning is not resent; no thinking right after a routine tool result
     // (errors, failures and tracebacks in the results still get a reasoning pass)
-    bool                             drop_reasoning = true, think_after_tool = false;
+    bool                             drop_reasoning = true, think_after_tool = true;
     int                              think_budget = 32768;  // hard cap on reasoning tokens (0 = off); loops are cut earlier
     // first-come-first-served turn taking: each request takes a ticket and runs when `serving` reaches it
     std::mutex                       mu;
@@ -689,6 +629,8 @@ loaded:
     sp.presence_penalty  = body.value("presence_penalty", dflt.presence_penalty);
     sp.frequency_penalty = body.value("frequency_penalty", dflt.frequency_penalty);
     int max_tokens = body.value("max_completion_tokens", body.value("max_tokens", chat ? -1 : 16));
+    const int max_content_chars = body.value("max_content_chars", 0);
+    if (max_content_chars < 0) { err = "max_content_chars must be nonnegative"; return false; }
     std::vector<std::string> stops;
     if (body.contains("stop")) {
         if (body["stop"].is_string()) stops.push_back(body["stop"].get<std::string>());
@@ -803,7 +745,7 @@ loaded:
             // agent steps. The budget below enforces the effort instead.
             if (re == "minimal" || re == "low") req_think_budget = 2048;
             else if (re == "medium") req_think_budget = 8192;
-            else if (re == "high") req_think_budget = 24576;
+            else if (re == "high" || re == "xhigh" || re == "max") req_think_budget = 24576;
         }
     }
     const common_chat_params cp = common_chat_templates_apply(S.tmpl, in);
@@ -1134,6 +1076,7 @@ loaded:
     std::vector<std::string> ids_cache;
     auto gen_id = [&]() { return random_id(S.rng, "call_"); };
     bool done   = false;
+    bool recovery_stream = false;
     size_t used = 0;  // tokens of `out` consumed into `text`
     size_t sent = 0;  // completion streaming: bytes of `text` sent
     size_t hold = 0;  // completion streaming: a stop string may still be forming in the last hold bytes
@@ -1179,6 +1122,17 @@ loaded:
             R.finish = "cancelled";
             done     = true;
         }
+        if (chat && !on_delta && max_content_chars > 0 && text.find("<tool_call>") == std::string::npos) {
+            try {
+                auto content = common_chat_parse(text, true, pp);
+                if (bound_answer(content, static_cast<size_t>(max_content_chars))) {
+                    R.finish = "length";
+                    done = true;
+                }
+            } catch (const std::exception &) {
+                // Partial grammar may require more tokens before content exists.
+            }
+        }
         if (on_delta && !chat) {
             const size_t upto = done ? text.size() : (text.size() > hold ? text.size() - hold : 0);
             if (upto > sent) {
@@ -1193,8 +1147,20 @@ loaded:
             }
         } else if (on_delta) {
             try {
-                common_chat_msg cur = common_chat_parse(text, !done, pp);
-                if (done) lenient_tool_calls(text, req_tools, cur);
+                common_chat_msg cur;
+                if (recovery_stream) {
+                    cur.reasoning_content = prev.reasoning_content;
+                    cur.content = prev.content;
+                } else {
+                    cur = common_chat_parse(text, !done, pp);
+                }
+                const bool strict_empty = cur.tool_calls.empty();
+                lenient_tool_calls(text, req_tools, cur, !done);
+                if (strict_empty && !cur.tool_calls.empty()) recovery_stream = true;
+                if (bound_answer(cur, static_cast<size_t>(max_content_chars))) {
+                    R.finish = "length";
+                    done = true;
+                }
                 cur.set_tool_call_ids(ids_cache, gen_id);
                 const auto diffs = common_chat_msg_diff::compute_diffs(prev, cur);
                 const auto now_t = std::chrono::steady_clock::now();
@@ -1490,6 +1456,7 @@ loaded:
     if (chat) {  // final parse (also needed by the timing log below)
         R.msg = common_chat_parse(text, false, pp);
         lenient_tool_calls(text, req_tools, R.msg);
+        if (bound_answer(R.msg, static_cast<size_t>(max_content_chars))) R.finish = "length";
     }
 
     S.last_used = std::chrono::steady_clock::now();

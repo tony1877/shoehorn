@@ -65,19 +65,20 @@ function compactBlocks(blocks: readonly (AssistantBlock | undefined)[]): Assista
 }
 
 function blockIsVisible(block: AssistantBlock | undefined): boolean {
-  if (block === undefined || block.kind === 'tool-call') return false
+  if (block === undefined) return false
+  if (block.kind === 'tool-call') return block.name === 'write' || block.name === 'edit' || block.name === 'str_replace_editor'
   if (block.kind === 'text' || block.kind === 'reasoning') return block.text.trim() !== ''
   return true
 }
 
 function countVisibleBlocks(blocks: readonly AssistantBlock[]): number {
   let count = 0
-  for (const block of blocks) if (blockIsVisible(block)) count++
+  for (const block of blocks) if (block.kind !== 'tool-call' && blockIsVisible(block)) count++
   return count
 }
 
 function hasVisibleContent(blocks: readonly AssistantBlock[]): boolean {
-  return blocks.some(blockIsVisible)
+  return blocks.some(block => block.kind !== 'tool-call' && blockIsVisible(block))
 }
 
 function hasInterruptionEvidence(blocks: readonly AssistantBlock[]): boolean {

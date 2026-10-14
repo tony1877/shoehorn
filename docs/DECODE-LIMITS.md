@@ -1,8 +1,8 @@
 # Decode speed: where the time goes and what is left (2026-10-09)
 
 Measured on the RTX 5080 (16 GB, PCIe 5.0 x16) with the 27B orca pair (IQ4_XS base 13.9 GB in VRAM, Q4_K residual
-14.4 GB in pinned RAM), production settings. Every option below was measured before deciding; none of them changes
-outputs.
+14.4 GB in pinned RAM), production settings. The options below are measured; speculative decoding preserves the
+target distribution, while base-only fast prefill is an approximation with the measured fidelity trade-off below.
 
 ## One check (speculative cycle)
 
