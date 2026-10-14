@@ -154,8 +154,8 @@ struct Server {
     bool                             spec_auto = true;
     int                              mtp = 6;  // most MTP proposals per base pass while drafting (adaptive; 0 = off)
     bool                             echo = true;  // echo drafting (copies from the context)
-    // agent turns: earlier assistant turns' reasoning is not resent; no thinking right after a routine tool result
-    // (errors, failures and tracebacks in the results still get a reasoning pass)
+    // Earlier assistant reasoning is not resent; subsequent tool-result turns
+    // retain the thinking channel unless the request explicitly disables it.
     bool                             drop_reasoning = true, think_after_tool = true;
     int                              think_budget = 32768;  // hard cap on reasoning tokens (0 = off); loops are cut earlier
     // first-come-first-served turn taking: each request takes a ticket and runs when `serving` reaches it
@@ -1516,8 +1516,7 @@ loaded:
         R.text = text;
         return true;
     }
-    R.msg = common_chat_parse(text, false, pp);
-    lenient_tool_calls(text, req_tools, R.msg);
+    // Reuse the final parse above: parsing again would undo the bounded content.
     R.msg.set_tool_call_ids(ids_cache, gen_id);
     if (!R.msg.tool_calls.empty() && R.finish == "stop") R.finish = "tool_calls";
     if (const char * dir = std::getenv("E8_LOG_RAW")) {
