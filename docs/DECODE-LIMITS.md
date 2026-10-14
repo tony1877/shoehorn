@@ -34,7 +34,8 @@ Tokens per base pass: code 4.5, prose 1.15 (MTP proposals kept: code 77%, prose 
   259 -> 251 ms, in proportion to the bytes no longer crossing PCIe. All of it needs ~32 GB of VRAM.
 - A better draft model for prose than the built-in MTP head (multi-candidate drafting needs exact multi-draft
   rejection sampling to stay lossless; not done).
-# Sustained output repetition
+
+## Sustained output repetition
 
 The server stops sustained adjacent output repetition in reasoning, answers,
 and unfinished tool arguments. It requires at least 8 KiB of repeated suffix
@@ -46,4 +47,3 @@ cannot execute. The failed request's prefix cache is invalidated.
 For deliberately repetitive output, a request may set `detect_repetition: false`.
 This is a conservative safeguard against model degeneration, not a test of
 whether generated code is correct or useful.
-
