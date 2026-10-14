@@ -44,7 +44,7 @@ def main():
             if payload == b'[DONE]':
                 break
             for choice in json.loads(payload).get('choices', []):
-                content += choice.get('delta', {}).get('content', '')
+                content += choice.get('delta', {}).get('content') or ''
                 finish = choice.get('finish_reason') or finish
     assert len(content.encode()) == 16, 'Streaming response exceeded the answer bound'
     assert finish == 'length'
