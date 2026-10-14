@@ -30,7 +30,9 @@ foreach($name in $destinations.Keys){
 }
 $watchdog=Join-Path (Split-Path $PSScriptRoot -Parent) 'watchdog.ps1'
 Copy-Item -LiteralPath 'C:\src\shoehorn\scripts\watchdog.ps1' -Destination (Join-Path $backup 'watchdog.ps1')
-Copy-Item -LiteralPath $watchdog -Destination 'C:\src\shoehorn\scripts\watchdog.ps1' -Force
+if([IO.Path]::GetFullPath($watchdog) -ne 'C:\src\shoehorn\scripts\watchdog.ps1'){
+    Copy-Item -LiteralPath $watchdog -Destination 'C:\src\shoehorn\scripts\watchdog.ps1' -Force
+}
 $env:DSH_HOME=$DshHome
 node (Join-Path $PSScriptRoot 'configure-local.mjs')
 if($LASTEXITCODE -ne 0){throw 'Local configuration failed; backups are available'}
