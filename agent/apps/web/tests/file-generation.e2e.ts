@@ -36,7 +36,8 @@ it('shows generated file content before executing the completed write', async ()
   let browser: Browser | undefined
   try {
     scaffold = await launchWebScaffold({ replayFixture: join(directory, 'override-only.jsonl'), replayOverride: override, paceMs: 75 })
-    browser = await chromium.launch({ channel: process.env.DSH_TEST_BROWSER_CHANNEL })
+    const channel = process.env.DSH_TEST_BROWSER_CHANNEL
+    browser = await chromium.launch(channel === undefined ? {} : { channel })
     let executed = false
     let toolError = ''
     scaffold.ctx.on('session/event', (_session, event) => {
