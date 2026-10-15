@@ -59,6 +59,8 @@
 #include "ggml-backend.h"
 #include "common.h"
 #include "llama.h"
+#include "mtmd-helper.h"
+#include "mtmd.h"
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
@@ -73,6 +75,7 @@
 #include <condition_variable>
 #include <deque>
 #include <filesystem>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <random>
@@ -115,9 +118,11 @@ bool reasoning_loops(const std::string & text) {
 // a model this server can load: tokenizer and chat templates stay loaded, the weights only while it is active
 struct Entry {
     std::string               alias, path, res;
+    std::string               mmproj;  // vision encoder (llama.cpp mmproj GGUF): images in chat messages; "" = none
     llama_model *             vocab_model = nullptr;
     const llama_vocab *       vocab       = nullptr;
     common_chat_templates_ptr tmpls;
+    mtmd_context *            mtmd = nullptr;  // the encoder, created on the first image (CPU, about 1 GB of RAM)
 };
 
 // A download or a pack started from the Models page; runs on its own thread, its output goes to `log`.
@@ -592,6 +597,117 @@ bool names_alias(const std::string & alias, const std::string & want) {
            want.substr(0, want.size() - old.size()) + now == alias;
 }
 
+// ---- images in chat messages (vision)
+// An image is a run of placeholder tokens in the prompt, one per image embedding. Their ids come from a hash of the
+// image's pixels, so prompt reuse, which compares token ids, only reuses a prefix whose images are the same. The embeddings are computed when the run is read (not when reused).
+struct ImgSpan {
+    size_t             start = 0;  // first placeholder in the prompt
+    int                n = 0, npos = 0;  // embeddings; rotary positions the image takes (M-RoPE: max(h, w))
+    mtmd_input_chunk * chunk = nullptr;
+};
+struct ImgSpans {
+    std::vector<ImgSpan> v;
+    ~ImgSpans() { for (auto & x : v) mtmd_input_chunk_free(x.chunk); }
+    // the model's rope shift at prompt position p (images wholly before it)
+    int shift_at(size_t p) const {
+        int s = 0;
+        for (const auto & x : v) if (x.start + (size_t) x.n <= p) s += x.n - x.npos;
+        return s;
+    }
+};
+
+bool b64_decode(const std::string & in, std::vector<unsigned char> & out) {
+    static int8_t t[256];
+    static bool   init = false;
+    if (!init) {
+        std::fill(t, t + 256, (int8_t) -1);
+        const char * a = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        for (int i = 0; i < 64; i++) t[(unsigned char) a[i]] = (int8_t) i;
+        t[(unsigned char) '-'] = 62;  // base64url
+        t[(unsigned char) '_'] = 63;
+        init = true;
+    }
+    out.clear();
+    out.reserve(in.size() * 3 / 4);
+    int acc = 0, bits = 0;
+    for (unsigned char c : in) {
+        if (c == '=' || c == '\n' || c == '\r' || c == ' ') continue;
+        if (t[c] < 0) return false;
+        acc = (acc << 6) | t[c];
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back((unsigned char) ((acc >> bits) & 0xFF));
+        }
+    }
+    return !out.empty();
+}
+
+// the encoder of entry e (created on first use)
+mtmd_context * entry_mtmd(Entry & e, std::string & err) {
+    if (e.mtmd) return e.mtmd;
+    if (e.mmproj.empty()) {
+        err = "this model has no vision encoder (set \"mmproj\" for it in the models list, or serve --mmproj FILE)";
+        return nullptr;
+    }
+    mtmd_context_params cp = mtmd_context_params_default();
+    cp.use_gpu             = false;  // next to the base the encoder does not fit in a 16 GB GPU; 2-4 s per image on the CPU
+    cp.print_timings       = false;
+    e.mtmd                 = mtmd_init_from_file(e.mmproj.c_str(), e.vocab_model, cp);
+    if (!e.mtmd || !mtmd_support_vision(e.mtmd)) {
+        err = "cannot load the vision encoder " + e.mmproj;
+        if (e.mtmd) mtmd_free(e.mtmd);
+        e.mtmd = nullptr;
+        return nullptr;
+    }
+    fprintf(stderr, "vision encoder loaded: %s\n", e.mmproj.c_str());
+    return e.mtmd;
+}
+
+// Image parts of chat messages ({"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}, the
+// Anthropic-style {"type": "image", "source": {"type": "base64", "data": ...}}, or {"type": "input_image",
+// "image_url": "data:..."}) become media markers in place; their bitmaps are returned in prompt order.
+bool take_images(json & msgs, Entry & e, std::vector<mtmd_bitmap *> & out, std::string & err) {
+    if (!msgs.is_array()) return true;
+    for (auto & m : msgs) {
+        if (!m.is_object() || !m.contains("content") || !m["content"].is_array()) continue;
+        for (auto & part : m["content"]) {
+            if (!part.is_object()) continue;
+            const std::string type = part.value("type", "");
+            std::string       url;
+            if (type == "image_url" || type == "input_image") {
+                const json & u = part.contains("image_url") ? part["image_url"] : json();
+                url = u.is_string() ? u.get<std::string>() : u.is_object() ? u.value("url", "") : "";
+            } else if (type == "image" && part.contains("source") && part["source"].is_object()) {
+                url = "data:;base64," + part["source"].value("data", "");
+            } else {
+                continue;
+            }
+            const size_t comma = url.find(',');
+            if (url.rfind("data:", 0) != 0 || comma == std::string::npos || url.find(";base64", 0) > comma) {
+                err = "images must be data: URLs with base64 content";
+                return false;
+            }
+            std::vector<unsigned char> bytes;
+            if (!b64_decode(url.substr(comma + 1), bytes)) {
+                err = "an image's base64 data is invalid";
+                return false;
+            }
+            mtmd_context * mc = entry_mtmd(e, err);
+            if (!mc) return false;
+            mtmd_helper_bitmap_wrapper w = mtmd_helper_bitmap_init_from_buf(mc, bytes.data(), bytes.size(), false,
+                                                                             mtmd_helper_init_opt_default());
+            if (!w.bitmap) {
+                err = "cannot decode an image (formats: png, jpeg, bmp, gif)";
+                return false;
+            }
+            out.push_back(w.bitmap);
+            part = json{ { "type", "media_marker" }, { "text", mtmd_default_marker() } };
+        }
+    }
+    return true;
+}
+
 bool run_request(Server & S, Turn & turn, const json & body, Result & R, const std::function<bool(const json &)> & on_delta,
                  const std::function<bool()> & cancelled, std::string & err) {
     int idx = 0;  // the entry this request names (the main model when it names none of ours)
@@ -635,6 +751,11 @@ loaded:
     }
 
     std::vector<int32_t>      prompt;
+    ImgSpans                  imgs;     // images in the prompt (placeholder runs)
+    struct Bitmaps {
+        std::vector<mtmd_bitmap *> v;
+        ~Bitmaps() { for (auto * b : v) mtmd_bitmap_free(b); }
+    } bitmaps;
     size_t                    n_head = 0;  // the prompt-reuse checkpoint goes after this many tokens
     common_chat_parser_params pp;
     std::vector<common_chat_tool> req_tools;
@@ -683,6 +804,11 @@ loaded:
             const std::string s = c.is_string() ? c.get<std::string>() : c.dump();
             for (const char * k : kTrouble) tool_trouble = tool_trouble || s.find(k) != std::string::npos;
         }
+    }
+    if (!take_images(msgs, S.entries[(size_t) idx], bitmaps.v, err)) return false;
+    if (!bitmaps.v.empty() && !S.q35) {
+        err = "this model does not take images";
+        return false;
     }
     in.messages = common_chat_msgs_parse_oaicompat(common_json::parse(msgs.dump()));
     if (body.contains("tools") && !body["tools"].is_null()) {
@@ -783,7 +909,60 @@ loaded:
         std::string h_on, t_on;
         if (split(common_chat_templates_apply(S.tmpl, in_on), h_on, t_on)) head = h_on;
     }
-    prompt = common_tokenize(S.vocab, head, /*add_special=*/m.add_bos(), /*parse_special=*/true);
+    if (bitmaps.v.empty()) {
+        prompt = common_tokenize(S.vocab, head, /*add_special=*/m.add_bos(), /*parse_special=*/true);
+    } else {
+        // the encoder's tokenizer splits the text at the media markers; an image becomes a run of placeholders
+        mtmd_context *      mc = S.entries[(size_t) idx].mtmd;
+        mtmd_input_chunks * ch = mtmd_input_chunks_init();
+        mtmd_input_text     tx{ head.c_str(), head.size(), m.add_bos(), true };
+        const int32_t       rc = mtmd_tokenize(mc, ch, &tx, (const mtmd_bitmap **) bitmaps.v.data(), bitmaps.v.size());
+        if (rc != 0) {
+            mtmd_input_chunks_free(ch);
+            err = rc == 1 ? "the number of images does not match the prompt's image markers" : "cannot preprocess an image";
+            return false;
+        }
+        // placeholder alphabet: the tokenizer's unused tokens when it has enough, else every token (ids only
+        // compared; the model reads the embeddings, never these ids)
+        static std::map<const llama_vocab *, std::vector<int32_t>> alphabets;
+        auto & alpha = alphabets[S.vocab];
+        if (alpha.empty()) {
+            const int32_t nt = std::min<int32_t>(llama_vocab_n_tokens(S.vocab), (int32_t) m.n_vocab());
+            for (int32_t t = 0; t < nt; t++) {
+                if (llama_vocab_get_attr(S.vocab, t) & LLAMA_TOKEN_ATTR_UNUSED) alpha.push_back(t);
+            }
+            if (alpha.size() < 256) {
+                alpha.clear();
+                for (int32_t t = 0; t < nt; t++) alpha.push_back(t);
+            }
+        }
+        for (size_t c = 0; c < mtmd_input_chunks_size(ch); c++) {
+            const mtmd_input_chunk * k = mtmd_input_chunks_get(ch, c);
+            if (mtmd_input_chunk_get_type(k) == MTMD_INPUT_CHUNK_TYPE_TEXT) {
+                size_t              nt = 0;
+                const llama_token * t  = mtmd_input_chunk_get_tokens_text(k, &nt);
+                prompt.insert(prompt.end(), t, t + nt);
+                continue;
+            }
+            ImgSpan sp;
+            sp.start = prompt.size();
+            sp.n     = (int) mtmd_input_chunk_get_n_tokens(k);
+            sp.npos  = (int) mtmd_input_chunk_get_n_pos(k);
+            sp.chunk = mtmd_input_chunk_copy(k);
+            // placeholder ids from a hash of the image's pixels (the k-th image chunk is the k-th bitmap)
+            const mtmd_bitmap *   bm  = bitmaps.v[imgs.v.size()];
+            const unsigned char * px  = mtmd_bitmap_get_data(bm);
+            uint64_t              hsh = 1469598103934665603ull ^ ((uint64_t) mtmd_bitmap_get_nx(bm) << 32 | mtmd_bitmap_get_ny(bm));
+            for (size_t q = 0, nb = mtmd_bitmap_get_n_bytes(bm); q < nb; q++) hsh = (hsh ^ px[q]) * 1099511628211ull;
+            for (int i = 0; i < sp.n; i++) {
+                uint64_t x = hsh + 0x9E3779B97F4A7C15ull * (uint64_t) (i + 1);
+                x = (x ^ (x >> 31)) * 0xBF58476D1CE4E5B9ull;
+                prompt.push_back(alpha[(size_t) ((x ^ (x >> 29)) % alpha.size())]);
+            }
+            imgs.v.push_back(sp);
+        }
+        mtmd_input_chunks_free(ch);
+    }
     n_head = prompt.size();
     if (!tail.empty()) {
         const std::vector<int32_t> t = common_tokenize(S.vocab, tail, false, true);
@@ -997,10 +1176,65 @@ loaded:
         Server & S;
         ~LiveEnd() { S.live_busy = false; S.live_reading = false; }
     } live_end{ S };
+    // text runs through prefill(); an image run is encoded (CPU) and read as embeddings at its M-RoPE positions
+    auto eval_image = [&](const ImgSpan & sp) {
+        mtmd_context * mc = S.entries[(size_t) idx].mtmd;
+        const auto     te = std::chrono::steady_clock::now();
+        if (!mc || mtmd_encode_chunk(mc, sp.chunk) != 0) {
+            err = "encoding an image failed";
+            return false;
+        }
+        const float *             embd = mtmd_get_output_embd(mc);
+        const mtmd_image_tokens * it   = mtmd_input_chunk_get_tokens_image(sp.chunk);
+        const int64_t             ne   = S.q35->hp().n_embd;
+        const int                 ub   = S.q35->max_batch(), p0 = m.n_past() - S.q35->rope_shift();
+        for (int i = 0; i < sp.n; i += ub) {
+            const int            k = std::min(sp.n - i, ub);
+            std::vector<int32_t> pos((size_t) k * 4);
+            for (int j = 0; j < k; j++) {
+                const mtmd_decoder_pos d = mtmd_image_tokens_get_decoder_pos(it, p0, (size_t) (i + j));
+                pos[(size_t) j]           = (int32_t) d.t;
+                pos[(size_t) (k + j)]     = (int32_t) d.y;
+                pos[(size_t) (2 * k + j)] = (int32_t) d.x;
+                pos[(size_t) (3 * k + j)] = (int32_t) d.z;
+            }
+            model::EvalOpts eo;
+            eo.last_only = true;
+            eo.embd      = embd + (size_t) i * ne;
+            eo.pos       = pos.data();
+            if (!S.q35->eval(nullptr, k, eo, nullptr, nullptr, err)) return false;
+        }
+        S.q35->set_rope_shift(S.q35->rope_shift() + sp.n - sp.npos);
+        fprintf(stderr, "image: %d tokens read (encoded and read in %.1f s)\n", sp.n,
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - te).count());
+        return true;
+    };
     auto eval_range = [&](size_t a, size_t b) {
         S.live_read_base = (int) a;
         model::traffic::prefill_done = 0;
-        if (b > a && !m.prefill(prompt.data() + a, (int) (b - a), last.data(), err)) {
+        if (S.q35) S.q35->set_rope_shift(imgs.shift_at(a));
+        bool ok = true;
+        for (size_t p = a; ok && p < b;) {
+            const ImgSpan * in_img = nullptr;  // the image run at p, or the next one before b
+            size_t          next   = b;
+            for (const auto & x : imgs.v) {
+                if (x.start <= p && p < x.start + (size_t) x.n) in_img = &x;
+                else if (x.start > p && x.start < next) next = x.start;
+            }
+            if (in_img) {
+                if (in_img->start != p || in_img->start + (size_t) in_img->n > b) {
+                    err = "prompt reuse split an image";
+                    ok  = false;
+                    break;
+                }
+                ok = eval_image(*in_img);
+                p += (size_t) in_img->n;
+            } else {
+                ok = m.prefill(prompt.data() + p, (int) (next - p), last.data(), err);
+                p  = next;
+            }
+        }
+        if (!ok) {
             SL.state_tokens.clear();
             SL.ck_tokens.clear();
             return false;
@@ -1663,6 +1897,7 @@ int serve(const std::vector<std::string> & args_in) {
     bool   res_gpu_given = false;  // without --res-gpu-gb the GPU fit profile decides
     std::string router_url;
     std::vector<Entry> extra;
+    std::string main_mmproj;  // --mmproj: the main model's vision encoder
     double      cache_gb = -1;
     auto        S = std::make_unique<Server>();
     S->cmdline       = cmdline;  // (S->port is set once the flags are read)
@@ -1690,6 +1925,7 @@ int serve(const std::vector<std::string> & args_in) {
             extra.push_back(std::move(e));
         }
         else if (a == "--api-key-file") key_file = val();
+        else if (a == "--mmproj") main_mmproj = val();
         else if (a == "--chat-template-file") tmpl_file = val();
         else if (a == "--ctx") n_ctx = std::atoi(val().c_str());
         else if (a == "--gpu-kv") gpu_kv = std::atoi(val().c_str());
@@ -1840,6 +2076,17 @@ int serve(const std::vector<std::string> & args_in) {
         e.alias = m.value("alias", std::string());
         e.path  = m.value("path", std::string());
         e.res   = m.value("res", std::string());
+        e.mmproj = m.value("mmproj", std::string());
+        if (e.mmproj.empty()) {  // a single mmproj*.gguf next to the model
+            std::error_code ec;
+            std::vector<std::string> found;
+            for (const auto & f : std::filesystem::directory_iterator(std::filesystem::path(e.path).parent_path(), ec)) {
+                const std::string n = f.path().filename().string();
+                if (n.rfind("mmproj", 0) == 0 && f.path().extension() == ".gguf") found.push_back(f.path().string());
+            }
+            if (found.size() == 1) e.mmproj = found[0];
+        }
+        if (S->entries.empty() && !main_mmproj.empty()) e.mmproj = main_mmproj;
         std::string err;
         if (e.alias.empty() || std::any_of(S->entries.begin(), S->entries.end(), [&](const Entry & x) { return x.alias == e.alias; }))
             continue;
