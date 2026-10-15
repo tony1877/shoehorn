@@ -93,8 +93,11 @@ export function requestImageHandleText(
   const preview = `Image ${imageIdentity(ref)}; request preview ${version.width}x${version.height}px.`
   return access === undefined
     ? `${preview} It may be resized or re-encoded; source dimensions, format, and byte size may differ.`
-    : preview + normalizedAccessText(ref, access)
+    : preview + IN_REQUEST_TEXT + normalizedAccessText(ref, access)
 }
+
+/** Told beside an image that is in the request, so the model does not read its path back with `read_image`. */
+const IN_REQUEST_TEXT = ' The image is included here and already visible; do not read it again with read_image.'
 
 /**
  * Stable per-image placeholder for a request-limit omission.

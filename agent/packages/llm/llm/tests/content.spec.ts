@@ -216,6 +216,7 @@ describe('model-facing image access', () => {
     }
     expect(requestImageHandleText(attachment, version, access)).toBe(
       `Image "source \\"map\\".png" (${attachment.attachmentId}); request preview 923x692px.`
+      + ' The image is included here and already visible; do not read it again with read_image.'
       + ' Normalized copy (read-only; may be resized or re-encoded): "/tmp/.dsh/attachments/v1/objects/bb/object" (2048x1536px, image/png).'
       + ' Source dimensions, format, and byte size may differ.'
       + ' Copy to a writable path ending in .png before editing.',
