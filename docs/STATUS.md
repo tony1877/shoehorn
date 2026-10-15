@@ -11,7 +11,7 @@ One page across the project; details live in the linked documents.
 | GPU fit profiles | 24 GB+ (residual partly in VRAM), 16 GB (IQ4_XS base), 12 GB (IQ3_XXS, KLD 0.0048 vs Q8), 8 GB (IQ2_XXS, KLD 0.0093, 6.9 GB VRAM) | `gpu_fit()` in `src/server/server.cpp` |
 | Models page | Every model removable, order kept, `serve` without a model argument, pack form picks the profile's base | `src/server/models.html` |
 | Speed research | Measured and dropped: zero-copy GEMM, CPU residual slice, draft alternatives, coupled sampling, prose imatrix, small drafters, EAGLE-3 inputs, tree drafting, verify-level leaves. Kept: Q3_K residual (+7.5%) | [SPEEDUP-PLAN.md](SPEEDUP-PLAN.md), [DECODE-LIMITS.md](DECODE-LIMITS.md) |
-| Vision | Images in chat requests (base64 or http(s) URLs), encoder on the GPU on 24 GB+ cards (0.03 s per image) else the CPU (2 s), prompt reuse image-aware, Models page encoder setting and mmproj download, dsh `read_image` and dropped images working, Linux build checked | [VISION.md](VISION.md) |
+| Vision | Images in chat requests (base64 or http(s) URLs), encoder on the GPU on 24 GB+ cards (0.03 s per image) else the CPU (2 s), prompt reuse image-aware, Models page encoder setting and mmproj download, dsh `read_image` and dropped or pasted images working (no attach button: drop or paste), Linux build checked | [VISION.md](VISION.md) |
 | Server review fixes | Answer-cap check every 256 bytes; `tool_recovery` test runs in Release (`ctest -R tool_recovery`) | `tests/tool_recovery.cpp` |
 
 ## Left
@@ -28,7 +28,6 @@ One page across the project; details live in the linked documents.
 ### Vision follow-ups
 
 - The GPU encoder on a real 24 GB card: checked on the 5080 only with layers moved to the CPU (`SHOEHORN_ENCODER=gpu`).
-- dsh's web UI has no attach button: images go in by drop (checked end to end) or paste (handled by the editor, not checked).
 - `tests/vision_smoke.py` runs by hand against a live server; not in CI (needs a GPU and the model).
 - Flash-Next (`qwen4exp`) takes no images.
 

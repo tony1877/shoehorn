@@ -67,4 +67,4 @@ Anyone with the API key can make the server fetch a URL, including addresses on 
   `read_image` reads an invoice correctly.
 - 2026-10-15, follow-ups: smoke test passes with the encoder on the CPU and on the GPU; http and https URLs and
   Anthropic `url` sources read correctly, a 404 / refused connection / ftp URL give an error; an image dropped into
-  dsh's web chat is read correctly; the Models page selects a repository's mmproj, and add / pack set it on the model.
+  dsh's web chat is read correctly, and so is one pasted into its chat box (a badge reading "Vision, still open"); the Models page selects a repository's mmproj, and add / pack set it on the model.
