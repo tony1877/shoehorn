@@ -133,6 +133,9 @@ int main(int argc, char ** argv) {
     if (args[1] == "dump") {
         return e8::cli::dump(args);
     }
+    if (args[1] == "vision") {
+        return e8::cli::vision(args);
+    }
     if (args[1] == "mtpdump") {
         return e8::cli::mtpdump(args);
     }

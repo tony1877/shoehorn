@@ -96,6 +96,10 @@ struct EvalOpts {
     // > 1 (tree verify): the n tokens are n_seqs sequences of n / n_seqs, each continuing the committed state on its
     // own (dry + record only; KV within the VRAM ring). commit(keep, err, seq) then keeps one of them.
     int  n_seqs    = 1;
+    // Images (vision): `embd` (n * n_embd floats) replaces the token embeddings (tokens may then be null), and `pos`
+    // (4 * n: sections t, y, x, 0, as llama.cpp's M-RoPE batches) the rotary positions. Plain decode only.
+    const float *   embd = nullptr;
+    const int32_t * pos  = nullptr;
 };
 
 // one sequence of a joint verify (Qwen35::eval_multi): `n` tokens continuing slot `slot`'s committed state
@@ -301,6 +305,12 @@ public:
         return true;
     }
     void set_fast_prefill(int keep) { fast_keep_ = keep > 0 ? keep : 0; }
+    // Vision: text after an image continues at rotary position (index - rope_shift): an image of n tokens on an
+    // h x w grid takes max(h, w) positions, not n (Qwen-VL M-RoPE). The KV stays indexed by sequence position, so
+    // commit / rollback are unaffected; the caller sets the shift for the point it continues from (prefix reuse).
+    // Applies to the active sequence's eval() and mtp_step() only.
+    void set_rope_shift(int s) { rope_shift_ = s; }
+    int  rope_shift() const { return rope_shift_; }
     void checkpoint_save() override;
     void checkpoint_restore() override;
 
@@ -446,6 +456,7 @@ private:
         size_t                     bytes = 0;
         int                        committed = 0;       // positions [0, committed) have memory in every head
         int                        n_past = 0, host_valid = 0, exact_upto = 0, ck_n_past = 0;
+        int                        rope_shift = 0;      // see set_rope_shift
         uint64_t                   epoch = 0, used = 0;
         bool                       pinned = false;
         // its part of the VRAM ring and of the MTP ring (views into k_cache_ / mtp_k_ of slot 0's allocation)
@@ -477,10 +488,12 @@ private:
     struct SideSeq {  // the parked side sequence (swap_side)
         KvSlot               kv;  // its RAM KV region and bookkeeping
         int                  n_past = 0, host_valid = 0, exact_upto = 0, ck_n_past = 0, far_rows = 0, far_ws = 0, sum_upto = 0;
+        int                  rope_shift = 0;
         std::vector<int>     slot_pos, mtp_slot_pos;
         std::vector<uint8_t> blob;  // VRAM state and checkpoint bytes
     };
     bool                       side_on_ = false;
+    int                        rope_shift_ = 0;
     int                        fast_keep_ = 0;  // fast prefill: tokens at the end of a prompt read with the residual
     SideSeq                    side_;
     int                        cur_slot_ = 0;
@@ -495,6 +508,7 @@ private:
     Qwen35 *                   owner_ = nullptr;       // a slot drafter: the model whose slots it drafts for
     struct Member {                                     // lockstep drafting: one slot's draft
         int slot = 0, n_past = 0, hid_row = -1, off = 0, n = 0, np = 0;  // np: its rows with padding
+        int rope_shift = 0;
     };
     std::map<std::pair<int, int>, std::vector<uint8_t>> draft_metas_;   // draft_eval graph scratch per shape
     std::vector<Member>                     members_;

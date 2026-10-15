@@ -899,6 +899,7 @@ void Qwen35::sync_from(const Qwen35 & src) {
         }
     }
     n_past_       = src.n_past_;
+    rope_shift_   = src.rope_shift_;
     slot_pos_     = src.slot_pos_;
     mtp_slot_pos_ = src.mtp_slot_pos_;
     host_valid_   = src.host_valid_;
@@ -937,6 +938,7 @@ void Qwen35::reset() {
         }
     }
     n_past_       = 0;
+    rope_shift_   = 0;
     saved_n_past_ = saved_n_past1_ = 0;
     recorded_n_   = 0;
     hid_row_      = -1;
@@ -957,6 +959,7 @@ void Qwen35::drop_slot(KvSlot & s, bool forget) {
         s.committed = 0;
     }
     s.n_past = s.host_valid = s.exact_upto = s.ck_n_past = 0;
+    s.rope_shift = 0;
     s.sum_upto = s.sum_saved = 0;
     s.far_rows = s.far_ws = 0;
     s.slot_pos.clear();
@@ -1036,6 +1039,7 @@ void Qwen35::park_active() {
         ggml_backend_tensor_copy(ssm_state_[il], o.ssm[il]);
     }
     o.n_past     = n_past_;
+    o.rope_shift = rope_shift_;
     o.host_valid = host_valid_;
     o.exact_upto = exact_upto_;
     o.ck_n_past  = ck_n_past_;
@@ -1098,6 +1102,7 @@ bool Qwen35::select_slot(int s, std::string & err) {
         }
     }
     n_past_       = t.n_past;
+    rope_shift_   = t.rope_shift;
     host_valid_   = t.host_valid;
     exact_upto_   = t.exact_upto;
     ck_n_past_    = t.ck_n_past;
@@ -1176,6 +1181,7 @@ bool Qwen35::swap_side(std::string & err) {
     // park the active sequence
     SideSeq a;
     a.n_past     = n_past_;
+    a.rope_shift = rope_shift_;
     a.host_valid = host_valid_;
     a.exact_upto = exact_upto_;
     a.ck_n_past  = ck_n_past_;
@@ -1209,6 +1215,7 @@ bool Qwen35::swap_side(std::string & err) {
         return true;
     }
     n_past_     = b.n_past;
+    rope_shift_ = b.rope_shift;
     host_valid_ = b.host_valid;
     exact_upto_ = b.exact_upto;
     ck_n_past_  = b.ck_n_past;
@@ -2248,7 +2255,7 @@ bool Qwen35::mtp_step(int32_t tok, int pos, int hid_row, float * logits, int32_t
     std::vector<float> emb;
     embed(&tok, 1, emb);
     ggml_backend_tensor_set(inp_e, emb.data(), 0, emb.size() * sizeof(float));
-    const int32_t p4[4] = { pos, pos, pos, 0 };
+    const int32_t p4[4] = { pos - rope_shift_, pos - rope_shift_, pos - rope_shift_, 0 };
     ggml_backend_tensor_set(inp_p, p4, 0, sizeof p4);
     const int64_t slot = pos % Wm_;
     mtp_slot_pos_[(size_t) slot] = pos;
@@ -2299,6 +2306,10 @@ bool Qwen35::eval(const int32_t * tokens, int n, const EvalOpts & opts, float * 
     // copies of all of it in VRAM; in pieces of kSparseMaxN it takes the sparse path instead (same quality at batch
     // 16-128: 32K text PPL 2.2903-2.2920 vs 2.2937 exact), so that VRAM is not reserved.
     static const bool sparse_env = !(std::getenv("E8_SPARSE") && std::atoi(std::getenv("E8_SPARSE")) == 0);
+    if ((opts.embd || opts.pos) && (ns > 1 || opts.record)) {
+        err = "eval: image input is for plain decoding only";
+        return false;
+    }
     if (W_ < n_ctx_ && sparse_env && !pmid_.empty() && !opts.window_ok && !opts.record && n > kSparseBatch &&
         n_past_ + n > W_) {
         for (int i = 0; i < n; i += kSparseBatch) {
@@ -2306,7 +2317,15 @@ bool Qwen35::eval(const int32_t * tokens, int n, const EvalOpts & opts, float * 
             const bool fin = i + m == n;
             float *   lo   = opts.last_only ? (fin ? logits : nullptr) : (logits ? logits + (size_t) i * hp_.n_vocab : nullptr);
             int32_t * io   = opts.last_only ? (fin ? ids : nullptr) : (ids ? ids + i : nullptr);
-            if (!eval(tokens + i, m, opts, lo, io, err)) return false;
+            EvalOpts  oi   = opts;
+            std::vector<int32_t> pi;
+            if (opts.embd) oi.embd = opts.embd + (size_t) i * hp_.n_embd;
+            if (opts.pos) {  // this piece's rows of each section
+                pi.resize((size_t) m * 4);
+                for (int c = 0; c < 4; c++) std::copy_n(opts.pos + (size_t) c * n + i, m, pi.begin() + (size_t) c * m);
+                oi.pos = pi.data();
+            }
+            if (!eval(tokens ? tokens + i : nullptr, m, oi, lo, io, err)) return false;
         }
         return true;
     }
@@ -2390,21 +2409,30 @@ bool Qwen35::eval(const int32_t * tokens, int n, const EvalOpts & opts, float * 
                 gpu_ ? ggml_backend_sched_get_buffer_size(sched_, gpu_) / 1e9 : 0.0, ggml_backend_sched_get_n_splits(sched_), fr / 1e9);
     }
     {
-        for (int i = 0; i < n; i++) {
-            if (tokens[i] < 0 || tokens[i] >= hp_.n_vocab) {
-                ggml_free(ctx);
-                err = "eval: token id out of range";
-                return false;
+        if (opts.embd) {
+            ggml_backend_tensor_set(inp_tok, opts.embd, 0, (size_t) n * hp_.n_embd * sizeof(float));
+        } else {
+            for (int i = 0; i < n; i++) {
+                if (tokens[i] < 0 || tokens[i] >= hp_.n_vocab) {
+                    ggml_free(ctx);
+                    err = "eval: token id out of range";
+                    return false;
+                }
             }
+            std::vector<float> emb;
+            embed(tokens, n, emb);
+            ggml_backend_tensor_set(inp_tok, emb.data(), 0, emb.size() * sizeof(float));
         }
-        std::vector<float> emb;
-        embed(tokens, n, emb);
-        ggml_backend_tensor_set(inp_tok, emb.data(), 0, emb.size() * sizeof(float));
     }
-    // text-only M-RoPE positions: three identical sections, the fourth zero (llama.cpp llm_graph_input_pos)
+    // text-only M-RoPE positions: three identical sections, the fourth zero (llama.cpp llm_graph_input_pos); after an
+    // image the rotary position runs rope_shift_ behind the sequence position
     std::vector<int32_t> pos((size_t) n * 4, 0);
-    for (int i = 0; i < n; i++) {
-        pos[(size_t) i] = pos[(size_t) n + i] = pos[(size_t) 2 * n + i] = n_past_ + i % L;
+    if (opts.pos) {
+        std::copy_n(opts.pos, (size_t) n * 4, pos.begin());
+    } else {
+        for (int i = 0; i < n; i++) {
+            pos[(size_t) i] = pos[(size_t) n + i] = pos[(size_t) 2 * n + i] = n_past_ + i % L - rope_shift_;
+        }
     }
     // an input no node uses (e.g. positions in a debug graph that stops before the first attention layer) is not
     // allocated by the scheduler
@@ -2456,7 +2484,7 @@ bool Qwen35::eval(const int32_t * tokens, int n, const EvalOpts & opts, float * 
         std::vector<int32_t> mp((size_t) (nm - 1) * 4, 0);
         std::vector<int64_t> mr((size_t) (nm - 1));
         for (int i = 0; i < nm - 1; i++) {
-            mp[(size_t) i] = mp[(size_t) (nm - 1) + i] = mp[(size_t) 2 * (nm - 1) + i] = n_past_ + i;
+            for (int c = 0; c < 4; c++) mp[(size_t) c * (nm - 1) + i] = pos[(size_t) c * n + i];  // the trunk's rows
             mr[(size_t) i] = (n_past_ + i) % Wm_;
             mtp_slot_pos_[(size_t) mr[(size_t) i]] = n_past_ + i;
         }
@@ -2781,7 +2809,7 @@ bool Qwen35::eval_multi(const std::vector<MultiSeq> & seqs, int topk, float * lo
         std::vector<int64_t> kvr((size_t) x.n), hr((size_t) x.n);
         for (int i = 0; i < x.n; i++) {
             const int qp = x.p + i;
-            pos[(size_t) (x.off + i)] = pos[(size_t) (N + x.off + i)] = pos[(size_t) (2 * N + x.off + i)] = qp;
+            pos[(size_t) (x.off + i)] = pos[(size_t) (N + x.off + i)] = pos[(size_t) (2 * N + x.off + i)] = qp - x.sl->rope_shift;
             kvr[(size_t) i] = Kd_ + qp % W_;
             hr[(size_t) i]  = qp;
         }
@@ -3072,6 +3100,7 @@ bool Qwen35::draft_begin(const std::vector<int> & slots, std::string & err) {
         Member m;
         m.slot   = s;
         m.n_past = sl.n_past;
+        m.rope_shift = sl.rope_shift;
         if (mtp_on_ && !sl.hid.empty()) {  // the committed hidden row: rows from the end (draft_eval writes from 0)
             m.hid_row = opt_.n_ubatch - 1 - (int) b;
             ggml_backend_tensor_set(mtp_hid_, sl.hid.data(), mtp_hid_->nb[1] * (size_t) m.hid_row, sl.hid.size() * sizeof(float));
@@ -3278,7 +3307,7 @@ bool Qwen35::draft_eval(const std::vector<std::vector<int32_t>> & ins, int topk,
         std::vector<int64_t> kr((size_t) m.np);
         for (int i = 0; i < m.np; i++) {
             const int qp = m.n_past + i;
-            pos[(size_t) (m.off + i)] = pos[(size_t) (N + m.off + i)] = pos[(size_t) (2 * N + m.off + i)] = qp;
+            pos[(size_t) (m.off + i)] = pos[(size_t) (N + m.off + i)] = pos[(size_t) (2 * N + m.off + i)] = qp - m.rope_shift;
             kr[(size_t) i]                          = Kd_ + qp % W_;
             sl.slot_pos[(size_t) (qp % W_)]         = qp;
         }
@@ -3301,7 +3330,7 @@ bool Qwen35::draft_eval(const std::vector<std::vector<int32_t>> & ins, int topk,
             std::vector<int32_t> mp((size_t) nm * 4, 0);
             std::vector<int64_t> mr((size_t) nm);
             for (int i = 0; i < nm; i++) {
-                mp[(size_t) i] = mp[(size_t) (nm + i)] = mp[(size_t) (2 * nm + i)] = m.n_past + i;
+                mp[(size_t) i] = mp[(size_t) (nm + i)] = mp[(size_t) (2 * nm + i)] = m.n_past + i - m.rope_shift;
                 mr[(size_t) i]                         = (m.n_past + i) % Wm_;
                 sl.mtp_slot_pos[(size_t) mr[(size_t) i]] = m.n_past + i;
             }
@@ -3401,6 +3430,7 @@ bool Qwen35::draft_mtp(int b, int32_t tok, int j, float * logits, int32_t * id, 
     mtp_k_ = sl.mk;
     mtp_v_ = sl.mv;
     std::swap(mtp_slot_pos_, sl.mtp_slot_pos);
+    rope_shift_   = m.rope_shift;  // (this drafter runs one member at a time)
     const bool ok = mtp_step(tok, m.n_past - 1 + j, j == 0 ? m.hid_row : -1, logits, id, err, topk);
     std::swap(mtp_slot_pos_, sl.mtp_slot_pos);
     mtp_k_ = keep_k;
@@ -3521,7 +3551,7 @@ bool Qwen35::draft_mtp_multi(const std::vector<MtpItem> & items, int topk, bool 
         KvSlot &        sl = owner_->slots_[(size_t) m.slot];
         const int       p  = m.n_past - 1 + it.j;
         tok[(size_t) i]    = it.tok;
-        pos[(size_t) i] = pos[(size_t) (M + i)] = pos[(size_t) (2 * M + i)] = p;
+        pos[(size_t) i] = pos[(size_t) (M + i)] = pos[(size_t) (2 * M + i)] = p - m.rope_shift;
         const int64_t kv = p % Wm_;
         sl.mtp_slot_pos[(size_t) kv] = p;
         ggml_backend_tensor_set(kvi[(size_t) i], &kv, 0, sizeof kv);

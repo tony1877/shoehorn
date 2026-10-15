@@ -46,6 +46,8 @@ endforeach()
 set(LLAMA_BUILD_COMMON ON CACHE BOOL "" FORCE)
 set(GGML_LLAMAFILE OFF CACHE BOOL "" FORCE)  # llama.cpp turns it on; it does not build under MSVC with AVX512_BF16
 add_subdirectory(${E8_LLAMA_DIR} ${CMAKE_BINARY_DIR}/llama.cpp EXCLUDE_FROM_ALL)
+# mtmd: llama.cpp's vision encoders (image decoding, preprocessing, the encoder graph) for image input
+add_subdirectory(${E8_LLAMA_DIR}/tools/mtmd ${CMAKE_BINARY_DIR}/mtmd EXCLUDE_FROM_ALL)
 set(CMAKE_CXX_STANDARD 20)
 
 if (MSVC)
@@ -80,6 +82,7 @@ add_executable(shoehorn
     src/cli/multitest.cpp
     src/cli/decode.cpp
     src/cli/mtpdump.cpp
+    src/cli/vision.cpp
     src/server/server.cpp
     src/cli/ppl.cpp
     src/cli/selftest.cpp
@@ -92,7 +95,7 @@ add_executable(shoehorn
 )
 target_include_directories(shoehorn PRIVATE src ${E8_LLAMA_DIR}/vendor/cpp-httplib ${E8_LLAMA_DIR}/vendor)
 target_compile_definitions(shoehorn PRIVATE SHOEHORN_VERSION="${PROJECT_VERSION}")
-target_link_libraries(shoehorn PRIVATE e8_io e8_model ggml llama-common llama cpp-httplib)
+target_link_libraries(shoehorn PRIVATE e8_io e8_model ggml llama-common llama mtmd cpp-httplib)
 if (WIN32)
     target_link_libraries(shoehorn PRIVATE shell32)  # CommandLineToArgvW
 endif()
