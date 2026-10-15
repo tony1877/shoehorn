@@ -1,0 +1,52 @@
+# Status: what is done and what is left (2026-10-15)
+
+One page across the project; details live in the linked documents.
+
+## Done
+
+| Area | State | Details |
+|---|---|---|
+| Linux port | Every phase done: CUDA and ROCm builds, KLD parity with Windows (~4-5e-4 on sm_86/89/120 and MI300X), tarballs, `.deb` / `.rpm`, container images, systemd units, sensors, 9-distribution matrix | [LINUX-PLAN.md](LINUX-PLAN.md), [LINUX-TODO.md](LINUX-TODO.md), [linux.md](linux.md) |
+| Release | v0.1.0 on GitHub (Windows zip, Linux CUDA / ROCm tarballs, `.deb`, `.rpm`), MIT license | GitHub releases |
+| GPU fit profiles | 24 GB+ (residual partly in VRAM), 16 GB (IQ4_XS base), 12 GB (IQ3_XXS, KLD 0.0048 vs Q8), 8 GB (IQ2_XXS, KLD 0.0093, 6.9 GB VRAM) | `gpu_fit()` in `src/server/server.cpp` |
+| Models page | Every model removable, order kept, `serve` without a model argument, pack form picks the profile's base | `src/server/models.html` |
+| Speed research | Measured and dropped: zero-copy GEMM, CPU residual slice, draft alternatives, coupled sampling, prose imatrix, small drafters, EAGLE-3 inputs, tree drafting, verify-level leaves. Kept: Q3_K residual (+7.5%) | [SPEEDUP-PLAN.md](SPEEDUP-PLAN.md), [DECODE-LIMITS.md](DECODE-LIMITS.md) |
+| Vision | Images in chat requests (base64), encoder on the CPU, prompt reuse image-aware, Models page encoder setting, dsh `read_image` working, Linux build checked | [VISION.md](VISION.md) |
+| Server review fixes | Answer-cap check every 256 bytes; `tool_recovery` test runs in Release (`ctest -R tool_recovery`) | `tests/tool_recovery.cpp` |
+
+## Left
+
+### Blocked on something outside this PC
+
+- **AUR packages** (`packaging/aur/shoehorn-{cuda,rocm}-bin`, tested with makepkg / pacman): AUR registration is
+  closed. When it reopens: create the account, add `C:\Users\aless\.ssh\id_ed25519.pub`, push both.
+- **ROCm tarball and image on a GPU**: `scripts/runpod/matrix.sh` with `TARBALL=...-rocm.tar.gz` on a community
+  MI300X when one is in stock.
+- **Hardware not available**: consumer AMD (RX 7900 / 9070), Intel Arc, a bare-metal Linux reboot test with real
+  sensors (planned on the 8 GB laptop).
+
+### Vision follow-ups
+
+- http(s) image URLs (only base64 data URLs today).
+- Encoder on the GPU when VRAM allows (24 GB+ cards); today always the CPU (2-5 s per image).
+- dsh's attach-image button in the chat box: untested (its `read_image` tool works).
+- The Models page's downloads could fetch a repository's `mmproj-*.gguf` with the model.
+- `tests/vision_smoke.py` runs by hand against a live server; not in CI (needs a GPU and the model).
+- Flash-Next (`qwen4exp`) takes no images.
+
+### Speed (small gains only; no large software lever is left on this hardware)
+
+- Full-layer KV staging at 200K context: modelled +8%, not built ([SPEED2X.md](SPEED2X.md)).
+- Export the self-distilled MTP head (`E:\shoehorn\mtp\mtp_chain.pt`, x1.08 offline acceptance) and A/B it: estimated
+  +4-7% on prose ([SPEEDUP-PLAN.md](SPEEDUP-PLAN.md) section 2).
+
+### Review items left open (decisions for the owner)
+
+- `think_after_tool` now defaults to on: every tool-result turn reasons, so agent loops are slower than before.
+- The streaming lenient tool-call parser takes over whenever the strict partial parse lags, not only for calls the
+  strict grammar rejects.
+
+### Small
+
+- The Models page shows the RTX 5080 as "17 GB" (VRAM rounding).
+- Next release (v0.2.0) with vision is not tagged yet.
