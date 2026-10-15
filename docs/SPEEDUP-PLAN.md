@@ -83,7 +83,7 @@ It also gives back:
 4. **Turn pipelining back on** (`gen --pipe`, the shadow model) and confirm the verify no longer slows while drafting.
    Then make it the default if tok/s improves.
 
-## 2. Self-distilled MTP drafter (in progress, resume here)
+## 2. Self-distilled MTP drafter (dropped 2026-10-15: no end-to-end gain)
 
 **Why this is the one left for prose.** Measured through the server (prose, temp 1.0, top_k 20, top_p 0.95):
 - drafting is 60% of each cycle (404 ms against 259 ms of verify);
@@ -187,6 +187,27 @@ judged by the base's distribution.
 - Ready if needed: `export.py` (a copy of the base with `blk.64.*` replaced, as Q8_0 since gguf-py cannot write
   IQ4_XS; `--deq-pt` measures what the quantization costs offline) and `bench_prose.py` (8 prose requests through
   the server, reading MTP kept and tok/s from the timing log). The trained layer: `E:\shoehorn\mtp\mtp_chain.pt` (bf16).
+
+**Exported and A/B tested (2026-10-15): dropped.** The 3-step chain layer from the 1.5M-token run, exported with
+`export.py` as copies of the base (`E:\shoehorn\mtp\orca27b-mtpd.base.gguf` Q8_0, `orca27b-mtpd4.base.gguf` Q4_0), each
+paired with the stock residual.
+- Offline, held-out kept@3: bf16 0.5148, Q8_0 0.5148 (no loss), Q4_0 0.5074; stock 4-bit head 0.4748.
+- Server, `bench_prose.py` (8 prose requests per round, production flags, test server on 8099, rounds interleaved):
+
+  | | tok/s per round | MTP kept |
+  |---|---|---|
+  | stock | 21.80, 21.05, 22.27, 22.44 (mean 21.89) | 0.399-0.415 |
+  | Q8_0 head | 22.48, 22.69 (mean 22.59, +3.2%) | 0.428, 0.430 |
+  | Q4_0 head | 21.53, 22.42 | 0.413, 0.406 (no gain) |
+
+- `gen --repeat` on a held-out prose prompt (500 tokens at temp 1.0, 36 runs per head, interleaved rounds): stock
+  24.55 tok/s, Q8_0 head 23.75 (-3%). Identical rounds differ by up to ±4% (single runs span 17.8-28.6 tok/s), so
+  neither A/B separates the heads from noise.
+- Cost: the Q8_0 head is 0.23 GB bigger, and at the production context (262K) the VRAM KV window falls from
+  15-20K tokens to 6.9K, so agent turns past 7K tokens take the slower RAM-KV path sooner. The Q4_0 head keeps the
+  window (15.1K) but loses the gain.
+- So the +4-7% estimate does not hold up end to end: MTP kept rises by about 0.02 (as offline), but tok/s does not
+  move beyond noise, and the only variant that keeps the gain costs KV window. Not shipped; files left on E:.
 
 ## 3. Fused base pass (megakernel-lite)
 
@@ -429,3 +450,23 @@ The tok/s spread is seed noise: drawing the alternatives moves the random stream
 What the leaves actually add is the rescued tokens: 10-16 per 2,304 generated, about 0.6%, because the rejection
 lands on a branch point in only ~17% of cycles. The extra sequences cost the verify about 25 ms (+11%), so the net is
 a loss of a few percent.
+
+## 10. Full-layer KV staging at 200K (SPEED2X L5, modelled +8%): not applicable, dropped (2026-10-15)
+
+SPEED2X modelled a dense design: every verify streams the whole RAM KV through a staging buffer (2 of 4 KV heads of
+one layer; full-layer staging +0.21 GB, 112 -> 37 ms per verify, 16.1 -> 17.4 tok/s at 200K). The engine never took
+that path: since 7e74178960 a verify with the KV in RAM attends exactly over the last 4096 tokens plus the 128 best
+64-key pages, gathered on the CPU (`gather_op`), so nothing streams the whole KV and there is no staging buffer to widen.
+
+Measured (`gen`, 200K-token prose prompt, `--ctx 204800 --kv q8_0`, RTX 5080): verify 329.8 ms per cycle against
+257 ms at short context, so long context adds about 73 ms per verify (11% of a 733 ms cycle). That is the most any
+KV-side change can win back at 200K, and nothing at short context. Where it goes (single runs, 6-10 cycles each):
+
+| | verify ms |
+|---|---|
+| default (window 4096, 128 pages) | 366.9 |
+| `E8_SPARSE_WINDOW=1024` | 364.8 |
+| `E8_SPARSE_PAGES=32` | 327.3 |
+
+The window costs nothing measurable (so taking it from the VRAM ring instead of RAM would not help); the cost
+follows the number of selected pages, which is the attention-quality knob. No change made.

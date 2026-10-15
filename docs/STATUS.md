@@ -34,9 +34,10 @@ One page across the project; details live in the linked documents.
 
 ### Speed (small gains only; no large software lever is left on this hardware)
 
-- Full-layer KV staging at 200K context: modelled +8%, not built ([SPEED2X.md](SPEED2X.md)).
-- Export the self-distilled MTP head (`E:\shoehorn\mtp\mtp_chain.pt`, x1.08 offline acceptance) and A/B it: estimated
-  +4-7% on prose ([SPEEDUP-PLAN.md](SPEEDUP-PLAN.md) section 2).
+- Full-layer KV staging at 200K: dropped, the engine uses sparse attention, not the streamed design it was modelled on; long context costs 73 ms per verify at 200K, mostly the selected pages ([SPEEDUP-PLAN.md](SPEEDUP-PLAN.md) section 10).
+- Self-distilled MTP head: exported and A/B tested, dropped. MTP kept rises by 0.02 but tok/s stays within noise, and
+  the Q8_0 head shrinks the KV window to 6.9K tokens ([SPEEDUP-PLAN.md](SPEEDUP-PLAN.md) section 2).
+- No speed item is left open.
 
 ### Review items left open (decisions for the owner)
 
