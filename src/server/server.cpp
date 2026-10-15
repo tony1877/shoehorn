@@ -2,14 +2,16 @@
 //
 //   shoehorn serve <model.gguf> [--res r.gguf] [--host 127.0.0.1] [--port 8090] [--alias NAME]
 //                  [--api-key-file F] [--chat-template-file F] [--ctx N] [--kv f16|q8_0|q4_0] [--kv-v TYPE] [--kv-lock] [--slots N] [--kv-pool-gb G] [--spec auto|K]
-//                  [--gpu-layers N] [--expert-cache-gb G] [--threads N] [--mtp N]
+//                  [--gpu-layers N] [--expert-cache-gb G] [--threads N] [--mtp N] [--mmproj enc.gguf]
 //
 // Endpoints: GET /health, GET /v1/models, POST /v1/chat/completions and POST /v1/completions (stream or not),
 // POST /unload (free the model; the next request loads it again). Several models (--also ALIAS=PATH[,RES]): the request's
 // "model" picks one; it is loaded on demand and the previous one freed (one model in memory at a time). Chat
 // templating (Jinja, tools, chat_template_kwargs such as enable_thinking) and output parsing (reasoning_content,
 // tool_calls) come from llama.cpp's common library, so requests and responses look like llama-server's. Sampling:
-// temperature, top_p, top_k, min_p, seed, presence_penalty, frequency_penalty, stop, max_tokens.
+// temperature, top_p, top_k, min_p, seed, presence_penalty, frequency_penalty, stop, max_tokens. Images in chat
+// messages (base64 data URLs) with a vision encoder: --mmproj, "mmproj" in the models list, or a single mmproj*.gguf
+// next to the model (docs/VISION.md).
 //
 // Concurrency: the model is used by one request at a time, in turns taken first come first served (Turn). A request
 // holds the model for its prompt, then gives it up after every decode cycle, so requests on different sequence slots
@@ -2004,6 +2006,7 @@ int serve(const std::vector<std::string> & args_in) {
                         "         [--hw-monitor URL (LibreHardwareMonitor web server, for CPU / RAM temperatures;\n"
                         "          default http://127.0.0.1:8085, \"\" = off)]\n"
                         "         [--models-file PATH (models added from the Models page, default ~/.shoehorn/models.json)]\n"
+                        "         [--mmproj enc.gguf (vision encoder of the main model: images in chat messages)]\n"
                         "         [--temperature 1.0] [--top-p 0.95] [--top-k 20] [--min-p 0] [--presence-penalty 0] (request defaults)\n"
                         "         [--fast-prefill N (read all but the last N prompt tokens without the residual: ~2x prefill)]\n"
                         "         [--tool-temp 0.6 (temperature inside <tool_call> blocks; 0 = the request's)]\n"
