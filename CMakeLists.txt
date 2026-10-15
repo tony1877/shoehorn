@@ -97,6 +97,13 @@ if (WIN32)
     target_link_libraries(shoehorn PRIVATE shell32)  # CommandLineToArgvW
 endif()
 
+# header-only server helpers (tool-call recovery, answer cap, repetition guard): ctest -R tool_recovery
+enable_testing()
+add_executable(test_tool_recovery tests/tool_recovery.cpp)
+target_include_directories(test_tool_recovery PRIVATE src)
+target_link_libraries(test_tool_recovery PRIVATE llama-common)
+add_test(NAME tool_recovery COMMAND test_tool_recovery)
+
 # shoehorn serve /dashboard, /sensors and /models: the pages are embedded in the binary (regenerated when the HTML changes).
 # MSVC caps one string literal at ~16 KB: adjacent raw literals of 8000 characters
 function(e8_embed_html name)

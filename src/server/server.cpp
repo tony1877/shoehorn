@@ -1,6 +1,3 @@
-#include "tool_recovery.h"
-#include "output_policy.h"
-#include "generation_guard.h"
 // `shoehorn serve`: OpenAI-compatible HTTP server (DESIGN.md M6).
 //
 //   shoehorn serve <model.gguf> [--res r.gguf] [--host 127.0.0.1] [--port 8090] [--alias NAME]
@@ -48,6 +45,9 @@
 // prompt. A new prompt that extends either one only evaluates the new tokens (recurrent state cannot be cut back to an
 // arbitrary prefix, so anything else starts over).
 
+#include "tool_recovery.h"
+#include "output_policy.h"
+#include "generation_guard.h"
 #include "cli/commands.h"
 #include "model/causal_lm.h"
 #include "model/qwen35.h"
@@ -85,11 +85,6 @@ namespace {
 
 using json = nlohmann::ordered_json;
 
-// llama.cpp's Qwen XML tool-call grammar rejects a call whose optional parameters come before a required one (the
-// model often writes str_replace_editor's file_text before path) and the call then vanishes: the turn looks like it
-// ends mid-sentence. When the strict parse of the final text finds no call although the text has a <tool_call>, this
-// reads <tool_call><function=NAME><parameter=P>VALUE</parameter>...</function></tool_call> blocks in any order,
-// typing each value by the tool's JSON schema (strings as written, anything else parsed as JSON).
 // Reasoning stuck in a loop: a chunk of the last 400 characters seen twice before, or most of the last 40 lines
 // repeating earlier lines. Real reasoning (new content) never trips it.
 bool reasoning_loops(const std::string & text) {
@@ -1081,6 +1076,7 @@ loaded:
     bool generation_loop = false;
     const bool detect_repetition = body.value("detect_repetition", true);
     size_t next_generation_check = 8192;
+    size_t next_bound_check      = (size_t) std::max(max_content_chars, 0);  // no answer can exceed the cap before
     size_t used = 0;  // tokens of `out` consumed into `text`
     size_t sent = 0;  // completion streaming: bytes of `text` sent
     size_t hold = 0;  // completion streaming: a stop string may still be forming in the last hold bytes
@@ -1134,7 +1130,10 @@ loaded:
             R.finish = "cancelled";
             done     = true;
         }
-        if (chat && !on_delta && max_content_chars > 0 && text.find("<tool_call>") == std::string::npos) {
+        // (parsed every 256 bytes, not every token: a full parse per token is quadratic on long answers)
+        if (chat && !on_delta && max_content_chars > 0 && text.size() >= next_bound_check &&
+            text.find("<tool_call>") == std::string::npos) {
+            next_bound_check = text.size() + 256;
             try {
                 auto content = common_chat_parse(text, true, pp);
                 if (bound_answer(content, static_cast<size_t>(max_content_chars))) {

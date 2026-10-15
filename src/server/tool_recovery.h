@@ -6,6 +6,12 @@
 
 namespace e8::cli {
 using json = nlohmann::ordered_json;
+// llama.cpp's Qwen XML tool-call grammar rejects a call whose optional parameters come before a required one (the
+// model often writes str_replace_editor's file_text before path) and the call then vanishes: the turn looks like it
+// ends mid-sentence. When the strict parse of the final text finds no call although the text has a <tool_call>, this
+// reads <tool_call><function=NAME><parameter=P>VALUE</parameter>...</function></tool_call> blocks in any order,
+// typing each value by the tool's JSON schema (strings as written, anything else parsed as JSON).
+// With partial = true (streaming) an unfinished call is returned with its JSON left open, so the arguments only grow.
 inline void lenient_tool_calls(const std::string & text, const std::vector<common_chat_tool> & tools, common_chat_msg & msg, bool partial = false) {
     if (!msg.tool_calls.empty()) return;
     size_t p = text.find("<tool_call>");
