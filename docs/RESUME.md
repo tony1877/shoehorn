@@ -23,7 +23,7 @@ llama.cpp/ggml-based inference server for the Qwen3.8 27B. It runs a 4-bit base 
   line of `~\.dsh\llama-api-key.txt`.
 - **Model list:** `~\.shoehorn\models.json`. The 27B entries have `"mmproj"` set to
   `E:/shoehorn/vision/mmproj-Qwen3.8-27B-Uncensored-f16.gguf`. Packs are in `E:\shoehorn\`.
-- **dsh:** web UI on 127.0.0.1:3080. The token URL is in the "dsh web:" line of `~\.dsh\dsh-web.log`. Its settings
+- **dsh:** web UI on 127.0.0.1:3080. The token URL is in `~\.dsh\dsh.log` (written by C:\Tools\bin\start-dsh.ps1; `dsh-web.log` is stale). Its settings
   are in `~\.dsh\settings.yaml`; the 27B models there have `input: [text, image]`.
 - **Harness:** exec bridge on port 9999 (`C:\Tools\bin\brg.ps1`), LAN proxy on 3080, SearXNG on 8888.
 - **Building:**
