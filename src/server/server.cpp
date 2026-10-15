@@ -10,7 +10,7 @@
 // templating (Jinja, tools, chat_template_kwargs such as enable_thinking) and output parsing (reasoning_content,
 // tool_calls) come from llama.cpp's common library, so requests and responses look like llama-server's. Sampling:
 // temperature, top_p, top_k, min_p, seed, presence_penalty, frequency_penalty, stop, max_tokens. Images in chat
-// messages (base64 data URLs) with a vision encoder: --mmproj, "mmproj" in the models list, or a single mmproj*.gguf
+// messages (base64 data URLs or http(s) URLs) with a vision encoder: --mmproj, "mmproj" in the models list, or a single mmproj*.gguf
 // next to the model (docs/VISION.md).
 //
 // Concurrency: the model is used by one request at a time, in turns taken first come first served (Turn). A request
@@ -124,7 +124,8 @@ struct Entry {
     llama_model *             vocab_model = nullptr;
     const llama_vocab *       vocab       = nullptr;
     common_chat_templates_ptr tmpls;
-    mtmd_context *            mtmd = nullptr;  // the encoder, created on the first image (CPU, about 1 GB of RAM)
+    mtmd_context *            mtmd = nullptr;  // the encoder, created on the first image (about 1 GB of RAM or VRAM)
+    bool                      mtmd_gpu = false;  // the encoder is in VRAM: freed with the model (unload_model)
 };
 
 // A download or a pack started from the Models page; runs on its own thread, its output goes to `log`.
@@ -387,6 +388,12 @@ void unload_model(Server & S) {
     S.model.reset();
     S.active = -1;
     S.slots.clear();
+    for (auto & e : S.entries)  // an encoder in VRAM goes with the model; the next image loads it again
+        if (e.mtmd && e.mtmd_gpu) {
+            mtmd_free(e.mtmd);
+            e.mtmd     = nullptr;
+            e.mtmd_gpu = false;
+        }
     fprintf(stderr, "model unloaded\n");
 }
 
@@ -415,11 +422,13 @@ void save_models(Server & S) {
 
 // adds a model while serving: its vocabulary first, then the entry under an exclusive turn (requests read entries
 // without a lock, so entries has room reserved and only grows); listed in the model file
-bool add_entry(Server & S, const std::string & alias, const std::string & path, const std::string & res, std::string & err) {
+bool add_entry(Server & S, const std::string & alias, const std::string & path, const std::string & res, std::string & err,
+               const std::string & mmproj = "") {
     Entry e;
-    e.alias = alias;
-    e.path  = path;
-    e.res   = res;
+    e.alias  = alias;
+    e.path   = path;
+    e.res    = res;
+    e.mmproj = mmproj;
     if (!load_vocab(e, S.tmpl_file, err)) return false;
     {
         Turn turn(S, true);
@@ -435,7 +444,9 @@ bool add_entry(Server & S, const std::string & alias, const std::string & path, 
     }
     std::lock_guard<std::mutex> lk(S.jobs_mu);
     if (!S.models_cfg["models"].is_array()) S.models_cfg["models"] = json::array();
-    S.models_cfg["models"].push_back({ { "alias", alias }, { "path", path }, { "res", res } });
+    json m = { { "alias", alias }, { "path", path }, { "res", res } };
+    if (!mmproj.empty()) m["mmproj"] = mmproj;
+    S.models_cfg["models"].push_back(m);
     if (S.models_cfg.contains("removed") && S.models_cfg["removed"].is_array()) {  // added again: no longer removed
         json & rm = S.models_cfg["removed"];
         for (size_t k = 0; k < rm.size(); k++)
@@ -645,6 +656,39 @@ bool b64_decode(const std::string & in, std::vector<unsigned char> & out) {
     return !out.empty();
 }
 
+// GPU fit profiles (docs/LINUX-PLAN.md, Phase 4): what the 27B pack should look like on this GPU, from its total VRAM
+// (24 GB+, 16 GB, 12 GB: 3-bit base, 8 GB: 2-bit base).
+// The default for --res-gpu-gb follows it (residual in VRAM from 24 GB cards up); the Models page shows it.
+struct GpuFit {
+    double      vram_gb = 0;
+    std::string profile, base, residual;
+    bool        res_in_vram = false;
+};
+static GpuFit gpu_fit() {
+    GpuFit f;
+    if (ggml_backend_dev_t g = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU)) {
+        size_t fr = 0, tot = 0;
+        ggml_backend_dev_memory(g, &fr, &tot);
+        f.vram_gb = tot / 1e9;
+    }
+    if (f.vram_gb >= 22) {
+        f = { f.vram_gb, "24 GB+", "iq4_xs", "q4_K, part or all of it in VRAM (--res-gpu-gb auto)", true };
+    } else if (f.vram_gb >= 15) {
+        f = { f.vram_gb, "16 GB", "iq4_xs", "q4_K or q3_K, streamed from RAM", false };
+    } else if (f.vram_gb >= 11) {
+        f = { f.vram_gb, "12 GB", "iq3_xxs (a 3-bit base: KLD 0.0048 against Q8, ~60% of the 16 GB speed)", "q4_K, streamed from RAM", false };
+    } else if (f.vram_gb >= 7) {  // 8 GB cards report a little under 8
+        f = { f.vram_gb, "8 GB", "iq2_xxs (a 2-bit base, 6.9 GB: KLD 0.0093 against Q8, ~60% of the 16 GB speed; keep the context small)",
+              "q4_K, streamed from RAM (32 GB of RAM)", false };
+    } else {
+        f.profile = f.vram_gb > 0 ? "under 8 GB: the 27B does not fit" : "no GPU";
+    }
+    return f;
+}
+
+// VRAM the encoder needs beyond its weights (activations of a large image)
+constexpr double kEncoderComputeGb = 1.0;
+
 // the encoder of entry e (created on first use)
 mtmd_context * entry_mtmd(Entry & e, std::string & err) {
     if (e.mtmd) return e.mtmd;
@@ -652,23 +696,75 @@ mtmd_context * entry_mtmd(Entry & e, std::string & err) {
         err = "this model has no vision encoder (set \"mmproj\" for it in the models list, or serve --mmproj FILE)";
         return nullptr;
     }
+    // On the GPU when the encoder fits in the free VRAM with room for its compute buffers (24 GB+ cards: the
+    // residual's auto budget leaves it that room, see serve); otherwise on the CPU (2-5 s per image), as on 16 GB
+    std::error_code ec;
+    const double    need = std::filesystem::file_size(e.mmproj, ec) / 1e9 + kEncoderComputeGb;
+    size_t          fr = 0, tot = 0;
+    if (ggml_backend_dev_t g = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU)) ggml_backend_dev_memory(g, &fr, &tot);
     mtmd_context_params cp = mtmd_context_params_default();
-    cp.use_gpu             = false;  // next to the base the encoder does not fit in a 16 GB GPU; 2-4 s per image on the CPU
+    // (ggml aborts when a buffer does not fit, so the free-VRAM check always applies). SHOEHORN_ENCODER=gpu / cpu:
+    // any card when the encoder fits / never (tests)
+    const std::string force = std::getenv("SHOEHORN_ENCODER") ? std::getenv("SHOEHORN_ENCODER") : "";
+    cp.use_gpu = !ec && force != "cpu" && (force == "gpu" || gpu_fit().res_in_vram) && fr / 1e9 >= need + 0.5;
     cp.print_timings       = false;
     e.mtmd                 = mtmd_init_from_file(e.mmproj.c_str(), e.vocab_model, cp);
+    e.mtmd_gpu             = cp.use_gpu && e.mtmd;
     if (!e.mtmd || !mtmd_support_vision(e.mtmd)) {
         err = "cannot load the vision encoder " + e.mmproj;
         if (e.mtmd) mtmd_free(e.mtmd);
         e.mtmd = nullptr;
         return nullptr;
     }
-    fprintf(stderr, "vision encoder loaded: %s\n", e.mmproj.c_str());
+    fprintf(stderr, "vision encoder loaded (%s, %.1f GB VRAM free): %s\n", e.mtmd_gpu ? "GPU" : "CPU", fr / 1e9, e.mmproj.c_str());
     return e.mtmd;
+}
+
+// An http(s) image: fetched with curl (as the Models page's downloads), at most kImageMaxBytes in kImageTimeoutS
+constexpr long kImageMaxBytes = 20 * 1000 * 1000, kImageTimeoutS = 20;
+#if defined(_WIN32)
+static constexpr const char * kCurlExe = "curl.exe";  // Windows 10+ ships it in System32
+#else
+static constexpr const char * kCurlExe = "curl";
+#endif
+bool fetch_image(const std::string & url, std::vector<unsigned char> & out, std::string & err) {
+    static std::atomic<int> seq{ 0 };
+    const auto tmp = std::filesystem::temp_directory_path() /
+                     ("shoehorn-img-" + std::to_string(sys::self_pid()) + "-" + std::to_string(seq++));
+    const std::string body = tmp.string() + ".bin", log = tmp.string() + ".log";
+    const std::atomic<bool> never{ false };
+    std::string             perr;
+    const int rc = sys::run_process({ kCurlExe, "-sS", "-L", "--fail", "-A", "shoehorn/" SHOEHORN_VERSION " (image fetch)", "--max-redirs", "5", "--proto", "=http,https",
+                                      "--proto-redir", "=http,https", "--max-time", std::to_string(kImageTimeoutS),
+                                      "--max-filesize", std::to_string(kImageMaxBytes), "-o", body, url },
+                                    log, never, perr);
+    std::error_code ec;
+    if (rc == 0) {
+        const auto sz = std::filesystem::file_size(body, ec);
+        if (ec || sz == 0) err = "the image at " + url + " is empty";
+        else if (sz > (uintmax_t) kImageMaxBytes) err = "the image at " + url + " is over 20 MB";
+        else {
+            std::ifstream f(body, std::ios::binary);
+            out.assign(std::istreambuf_iterator<char>(f), {});
+        }
+    } else if (rc == -1) {
+        err = "cannot fetch image URLs: " + perr;
+    } else {
+        std::ifstream f(log, std::ios::binary);
+        std::string   msg((std::istreambuf_iterator<char>(f)), {});
+        while (!msg.empty() && (msg.back() == '\n' || msg.back() == '\r')) msg.pop_back();
+        err = "cannot fetch the image at " + url + (rc == 28 ? std::string(": timed out") : rc == 63 ? std::string(": over 20 MB")
+                                                   : ": " + (msg.empty() ? "curl exited with " + std::to_string(rc) : msg));
+    }
+    std::filesystem::remove(body, ec);
+    std::filesystem::remove(log, ec);
+    return err.empty();
 }
 
 // Image parts of chat messages ({"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}, the
 // Anthropic-style {"type": "image", "source": {"type": "base64", "data": ...}}, or {"type": "input_image",
-// "image_url": "data:..."}) become media markers in place; their bitmaps are returned in prompt order.
+// "image_url": "data:..."}; http(s) URLs are fetched) become media markers in place; their bitmaps are returned in
+// prompt order.
 bool take_images(json & msgs, Entry & e, std::vector<mtmd_bitmap *> & out, std::string & err) {
     if (!msgs.is_array()) return true;
     for (auto & m : msgs) {
@@ -681,19 +777,24 @@ bool take_images(json & msgs, Entry & e, std::vector<mtmd_bitmap *> & out, std::
                 const json & u = part.contains("image_url") ? part["image_url"] : json();
                 url = u.is_string() ? u.get<std::string>() : u.is_object() ? u.value("url", "") : "";
             } else if (type == "image" && part.contains("source") && part["source"].is_object()) {
-                url = "data:;base64," + part["source"].value("data", "");
+                const json & src = part["source"];
+                url = src.value("type", "") == "url" ? src.value("url", "") : "data:;base64," + src.value("data", "");
             } else {
                 continue;
             }
-            const size_t comma = url.find(',');
-            if (url.rfind("data:", 0) != 0 || comma == std::string::npos || url.find(";base64", 0) > comma) {
-                err = "images must be data: URLs with base64 content";
-                return false;
-            }
             std::vector<unsigned char> bytes;
-            if (!b64_decode(url.substr(comma + 1), bytes)) {
-                err = "an image's base64 data is invalid";
-                return false;
+            if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0) {
+                if (!fetch_image(url, bytes, err)) return false;
+            } else {
+                const size_t comma = url.find(',');
+                if (url.rfind("data:", 0) != 0 || comma == std::string::npos || url.find(";base64", 0) > comma) {
+                    err = "images must be http(s) URLs or data: URLs with base64 content";
+                    return false;
+                }
+                if (!b64_decode(url.substr(comma + 1), bytes)) {
+                    err = "an image's base64 data is invalid";
+                    return false;
+                }
             }
             mtmd_context * mc = entry_mtmd(e, err);
             if (!mc) return false;
@@ -1178,7 +1279,7 @@ loaded:
         Server & S;
         ~LiveEnd() { S.live_busy = false; S.live_reading = false; }
     } live_end{ S };
-    // text runs through prefill(); an image run is encoded (CPU) and read as embeddings at its M-RoPE positions
+    // text runs through prefill(); an image run is encoded (GPU or CPU) and read as embeddings at its M-RoPE positions
     auto eval_image = [&](const ImgSpan & sp) {
         mtmd_context * mc = S.entries[(size_t) idx].mtmd;
         const auto     te = std::chrono::steady_clock::now();
@@ -1186,6 +1287,7 @@ loaded:
             err = "encoding an image failed";
             return false;
         }
+        const double              t_enc = std::chrono::duration<double>(std::chrono::steady_clock::now() - te).count();
         const float *             embd = mtmd_get_output_embd(mc);
         const mtmd_image_tokens * it   = mtmd_input_chunk_get_tokens_image(sp.chunk);
         const int64_t             ne   = S.q35->hp().n_embd;
@@ -1207,8 +1309,8 @@ loaded:
             if (!S.q35->eval(nullptr, k, eo, nullptr, nullptr, err)) return false;
         }
         S.q35->set_rope_shift(S.q35->rope_shift() + sp.n - sp.npos);
-        fprintf(stderr, "image: %d tokens read (encoded and read in %.1f s)\n", sp.n,
-                std::chrono::duration<double>(std::chrono::steady_clock::now() - te).count());
+        fprintf(stderr, "image: %d tokens read (encoded in %.2f s on the %s, encoded and read in %.1f s)\n", sp.n, t_enc,
+                S.entries[(size_t) idx].mtmd_gpu ? "GPU" : "CPU", std::chrono::duration<double>(std::chrono::steady_clock::now() - te).count());
         return true;
     };
     auto eval_range = [&](size_t a, size_t b) {
@@ -1827,36 +1929,6 @@ const SettingOpt kSettings[] = {
     { "--presence-penalty", "0", "Sampling defaults", "Presence penalty for requests that set none.", "" },
 };
 
-// GPU fit profiles (docs/LINUX-PLAN.md, Phase 4): what the 27B pack should look like on this GPU, from its total VRAM
-// (24 GB+, 16 GB, 12 GB: 3-bit base, 8 GB: 2-bit base).
-// The default for --res-gpu-gb follows it (residual in VRAM from 24 GB cards up); the Models page shows it.
-struct GpuFit {
-    double      vram_gb = 0;
-    std::string profile, base, residual;
-    bool        res_in_vram = false;
-};
-static GpuFit gpu_fit() {
-    GpuFit f;
-    if (ggml_backend_dev_t g = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU)) {
-        size_t fr = 0, tot = 0;
-        ggml_backend_dev_memory(g, &fr, &tot);
-        f.vram_gb = tot / 1e9;
-    }
-    if (f.vram_gb >= 22) {
-        f = { f.vram_gb, "24 GB+", "iq4_xs", "q4_K, part or all of it in VRAM (--res-gpu-gb auto)", true };
-    } else if (f.vram_gb >= 15) {
-        f = { f.vram_gb, "16 GB", "iq4_xs", "q4_K or q3_K, streamed from RAM", false };
-    } else if (f.vram_gb >= 11) {
-        f = { f.vram_gb, "12 GB", "iq3_xxs (a 3-bit base: KLD 0.0048 against Q8, ~60% of the 16 GB speed)", "q4_K, streamed from RAM", false };
-    } else if (f.vram_gb >= 7) {  // 8 GB cards report a little under 8
-        f = { f.vram_gb, "8 GB", "iq2_xxs (a 2-bit base, 6.9 GB: KLD 0.0093 against Q8, ~60% of the 16 GB speed; keep the context small)",
-              "q4_K, streamed from RAM (32 GB of RAM)", false };
-    } else {
-        f.profile = f.vram_gb > 0 ? "under 8 GB: the 27B does not fit" : "no GPU";
-    }
-    return f;
-}
-
 int serve(const std::vector<std::string> & args_in) {
     // The Settings page's flags (~/.shoehorn/settings.json, or --settings PATH) go after the command line's, so they
     // win (the last occurrence of a flag counts). --wait-pid N: a restart, wait for the old process to free the port.
@@ -2183,6 +2255,11 @@ int serve(const std::vector<std::string> & args_in) {
         const auto t0 = std::chrono::steady_clock::now();
         model::LoadOptions lo = o;
         lo.residual_path      = sp->entries[(size_t) idx].res;
+        if (lo.res_gpu_gb < 0 && !sp->entries[(size_t) idx].mmproj.empty()) {  // auto budget: room for the encoder
+            std::error_code ec;
+            const auto      sz = std::filesystem::file_size(sp->entries[(size_t) idx].mmproj, ec);
+            if (!ec) lo.res_gpu_reserve_gb += sz / 1e9 + kEncoderComputeGb + 0.5;
+        }
         sp->model             = model::load_causal_lm(sp->entries[(size_t) idx].path, lo, e);
         if (!sp->model) {
             e = "load failed: " + e;
@@ -2527,12 +2604,14 @@ int serve(const std::vector<std::string> & args_in) {
     http.Post("/models/add", [&](const httplib::Request & req, httplib::Response & resp) {  // a GGUF already on disk
         if (!may_change(req, resp)) return;
         const json        b     = body_of(req);
-        const std::string alias = b.value("alias", std::string()), path = b.value("path", std::string()), res = b.value("res", std::string());
+        const std::string alias = b.value("alias", std::string()), path = b.value("path", std::string()), res = b.value("res", std::string()),
+                          mmproj = b.value("mmproj", std::string());
         std::error_code   ec;
         if (alias.empty() || !std::filesystem::is_regular_file(path, ec)) return fail(resp, "need a name and an existing .gguf file");
         if (!res.empty() && !std::filesystem::is_regular_file(res, ec)) return fail(resp, "the residual file does not exist");
+        if (!mmproj.empty() && !std::filesystem::is_regular_file(mmproj, ec)) return fail(resp, "the encoder file does not exist");
         std::string err;
-        if (!add_entry(*S, alias, path, res, err)) return fail(resp, err);
+        if (!add_entry(*S, alias, path, res, err, mmproj)) return fail(resp, err);
         resp.set_content(json{ { "success", true } }.dump(), "application/json");
     });
     // a model's vision encoder (mmproj GGUF; "" = none): images in its chat messages (docs/VISION.md)
@@ -2823,13 +2902,8 @@ int serve(const std::vector<std::string> & args_in) {
         save_models(*S);
         resp.set_content(json{ { "success", true } }.dump(), "application/json");
     });
-    // Hugging Face download: each file with curl.exe (resumable), into DIR\<owner>__<repo>\; HF_TOKEN in the server's
+    // Hugging Face download: each file with curl (resumable), into DIR\<owner>__<repo>\; HF_TOKEN in the server's
     // environment opens gated repos
-#if defined(_WIN32)
-    static constexpr const char * kCurl = "curl.exe";  // Windows 10+ ships it in System32
-#else
-    static constexpr const char * kCurl = "curl";
-#endif
     http.Post("/models/pull", [&](const httplib::Request & req, httplib::Response & resp) {
         if (!may_change(req, resp)) return;
         const json        b    = body_of(req);
@@ -2858,7 +2932,7 @@ int serve(const std::vector<std::string> & args_in) {
                 const std::string out = (std::filesystem::path(dest) / std::filesystem::path(f.first)).string();
                 std::error_code   ec;
                 std::filesystem::create_directories(std::filesystem::path(out).parent_path(), ec);
-                std::vector<std::string> a = { kCurl, "-L", "--fail", "-sS", "-C", "-", "--retry", "3", "-o", out,
+                std::vector<std::string> a = { kCurlExe, "-L", "--fail", "-sS", "-C", "-", "--retry", "3", "-o", out,
                                                "https://huggingface.co/" + repo + "/resolve/main/" + f.first };
                 if (tok && *tok) a.insert(a.begin() + 1, { "-H", std::string("Authorization: Bearer ") + tok });
                 std::string err;
@@ -2869,7 +2943,15 @@ int serve(const std::vector<std::string> & args_in) {
                     return;
                 }
             }
-            j->finish("done", "", { { "dir", dest } });
+            json r = { { "dir", dest } };
+            for (const auto & f : files) {  // a vision encoder among the files: the Models page sets it on the new model
+                const auto n = std::filesystem::path(f.first).filename().string();
+                if (n.rfind("mmproj", 0) == 0 && std::filesystem::path(n).extension() == ".gguf") {
+                    r["mmproj"] = (std::filesystem::path(dest) / std::filesystem::path(f.first)).string();
+                    break;
+                }
+            }
+            j->finish("done", "", r);
         }).detach();
         resp.set_content(json{ { "success", true }, { "id", j->id }, { "dir", dest } }.dump(), "application/json");
     });
@@ -2879,12 +2961,13 @@ int serve(const std::vector<std::string> & args_in) {
         const json        b = body_of(req);
         const std::string src = b.value("src", std::string()), tmpl = b.value("template", std::string()), out = b.value("out", std::string()),
                           alias = b.value("alias", std::string()), base = b.value("base", std::string("iq4_xs")), res = b.value("res", std::string("q4_K")),
-                          imat = b.value("imatrix", std::string());
+                          imat = b.value("imatrix", std::string()), mmproj = b.value("mmproj", std::string());
         std::error_code ec;
         if (!std::filesystem::is_directory(src, ec)) return fail(resp, "the source folder does not exist");
         if (!std::filesystem::is_regular_file(tmpl, ec)) return fail(resp, "the template GGUF does not exist");
         if (out.empty() || alias.empty()) return fail(resp, "need an output name and a model name");
         if (!imat.empty() && !std::filesystem::is_regular_file(imat, ec)) return fail(resp, "the imatrix file does not exist");
+        if (!mmproj.empty() && !std::filesystem::is_regular_file(mmproj, ec)) return fail(resp, "the encoder file does not exist");
         const std::string exe = sys::self_exe();
         if (exe.empty()) return fail(resp, "cannot find shoehorn.exe", 500);
         const bool unload_first = b.value("unload", true);
@@ -2896,7 +2979,7 @@ int serve(const std::vector<std::string> & args_in) {
             save_models(*S);
         }
         Server * sp = S.get();
-        std::thread([j, sp, exe, src, tmpl, out, alias, base, res, imat, unload_first] {
+        std::thread([j, sp, exe, src, tmpl, out, alias, base, res, imat, mmproj, unload_first] {
             if (unload_first) {  // packing reads tens of GB: give it the RAM the residual holds
                 Turn turn(*sp, true);
                 unload_model(*sp);
@@ -2927,8 +3010,8 @@ int serve(const std::vector<std::string> & args_in) {
                 j->finish(rc == -2 ? "cancelled" : "failed", rc == -1 ? err : rc == -2 ? "" : "pack exited with " + std::to_string(rc));
             } else {
                 const std::string bp = out + ".base.gguf", rp = res == "none" ? std::string() : out + ".res.gguf";
-                if (!add_entry(*sp, alias, bp, rp, err)) j->finish("failed", "packed, but adding the model failed: " + err);
-                else j->finish("done", "", { { "alias", alias }, { "path", bp }, { "res", rp } });
+                if (!add_entry(*sp, alias, bp, rp, err, mmproj)) j->finish("failed", "packed, but adding the model failed: " + err);
+                else j->finish("done", "", { { "alias", alias }, { "path", bp }, { "res", rp }, { "mmproj", mmproj } });
             }
         }).detach();
         resp.set_content(json{ { "success", true }, { "id", j->id } }.dump(), "application/json");

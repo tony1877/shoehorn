@@ -157,6 +157,7 @@ pre { margin: 6px 0 0; max-height: 180px; overflow: auto; background: var(--bg);
       <div class="wide note" id="pkFit">Pick a source folder to see how big the pair will be.</div>
       <label>Model name (what clients ask for)<input id="pkAlias" placeholder="from the source, e.g. qwen3.8-27b-shoehorn"></label>
       <label>imatrix (optional, improves the base)<input id="pkImat" data-pick="file:*.gguf;*.dat" placeholder="E:\gguf\imatrix.gguf"></label>
+      <label class="wide">Vision encoder (optional: mmproj GGUF of the same model, for images)<input id="pkMmproj" data-pick="file:*.gguf" placeholder="E:\gguf\mmproj-model-f16.gguf"></label>
       <label class="wide" style="display:flex;gap:8px;align-items:center;color:var(--ink)"><input type="checkbox" id="pkUnload" checked style="width:auto"> Unload the model while packing (packing reads tens of GB)</label>
     </div>
     <div class="actions"><button class="pri" id="packGo">Pack</button><span class="err" id="packErr"></span></div>
@@ -226,7 +227,7 @@ async function pollState() {
     const what = j.kind === "pull" ? `${GB(j.bytes || 0)} of ${j.total ? GB(j.total) : "?"}` : j.total_n ? `${j.done_n} of ${j.total_n} tensors` : "starting";
     const st = { running: "acc", done: "good", failed: "bad", cancelled: "warn" }[j.status] || "";
     const extra = j.status === "done" && j.kind === "pull" && j.result?.dir
-      ? `<button data-packsrc="${esc(j.result.dir)}">Pack this</button><button data-addgguf="${esc(j.result.dir)}">Add a GGUF from it</button>` : "";
+      ? `<button data-packsrc="${esc(j.result.dir)}" data-mm="${esc(j.result.mmproj || "")}">Pack this</button><button data-addgguf="${esc(j.result.dir)}" data-mm="${esc(j.result.mmproj || "")}">Add a GGUF from it</button>` : "";
     return `<div class="job"><div class="top"><span class="tag">${j.kind === "pull" ? "download" : "pack"}</span><span class="t" title="${esc(j.title)}">${esc(j.title)}</span>
         <span class="tag ${st}">${j.status}</span><span class="mono note">${j.status === "running" ? what : ""}</span>
         ${j.status === "running" ? `<button data-cancel="${j.id}" ${can ? "" : "disabled"}>Cancel</button>` : extra}</div>
@@ -262,8 +263,8 @@ document.addEventListener("click", async e => {
     else if (b.dataset.remove) { if (confirm(`Remove ${b.dataset.remove} from the list? The files stay on disk.`)) await api("/models/remove", { alias: b.dataset.remove }); }
     else if (b.dataset.mmproj) { const p = prompt(`Vision encoder (mmproj .gguf) for ${b.dataset.mmproj}; empty to remove:`, b.dataset.cur); if (p !== null) await api("/models/mmproj", { alias: b.dataset.mmproj, mmproj: p.trim() }); }
     else if (b.dataset.cancel) await api("/models/cancel", { id: +b.dataset.cancel });
-    else if (b.dataset.packsrc) { $("pkSrc").value = b.dataset.packsrc; inspectSrc(); namesFromSrc(); $("packPanel").scrollIntoView({ behavior: "smooth" }); }
-    else if (b.dataset.addgguf) { $("addBox").open = true; $("addPath").value = b.dataset.addgguf + "\\"; $("addPath").focus(); }
+    else if (b.dataset.packsrc) { $("pkSrc").value = b.dataset.packsrc; if (b.dataset.mm) $("pkMmproj").value = b.dataset.mm; inspectSrc(); namesFromSrc(); $("packPanel").scrollIntoView({ behavior: "smooth" }); }
+    else if (b.dataset.addgguf) { $("addBox").open = true; $("addPath").value = b.dataset.addgguf + "\\"; if (b.dataset.mm) $("addMmproj").value = b.dataset.mm; $("addPath").focus(); }
     else return;
   } catch (err) { $("modelsErr").textContent = err.message; }
   busy.load = null; pollState();
@@ -272,8 +273,7 @@ $("addGo").onclick = async () => {
   $("addErr").textContent = "";
   try {
     const alias = $("addAlias").value.trim(), mm = $("addMmproj").value.trim();
-    await api("/models/add", { alias, path: $("addPath").value.trim(), res: $("addRes").value.trim() });
-    if (mm) await api("/models/mmproj", { alias, mmproj: mm });
+    await api("/models/add", { alias, path: $("addPath").value.trim(), res: $("addRes").value.trim(), mmproj: mm });
     $("addAlias").value = $("addPath").value = $("addRes").value = $("addMmproj").value = ""; pollState();
   }
   catch (err) { $("addErr").textContent = err.message; }
@@ -312,12 +312,15 @@ $("results").addEventListener("click", async e => {
   $("pick").hidden = false; $("pickTitle").textContent = repo; $("pickNote").textContent = "listing files..."; $("pickFiles").innerHTML = ""; $("pullErr").textContent = "";
   try {
     const tree = (await (await fetch(`${HF}/api/models/${repo}/tree/main?recursive=true`)).json()).filter(f => f.type === "file");
-    // GGUF repos: pick the files (a quant, plus an mmproj only if you want it); safetensors: weights, configs, tokenizer
+    // GGUF repos: pick a quant; the vision encoder (mmproj-*.gguf: images, docs/VISION.md) is selected, its f16 when
+    // there are several, and set on the model added or packed from the download. safetensors: weights, configs, tokenizer
     const need = f => !gguf && (/\.safetensors$/.test(f.path) || /\.json$/.test(f.path) || /^(tokenizer|vocab|merges)/.test(f.path.split("/").pop()));
     const list = tree.filter(f => gguf ? /\.gguf$/i.test(f.path) : need(f) || /\.(md|txt|py|jinja)$/.test(f.path));
+    const enc = list.filter(f => /^mmproj.*\.gguf$/i.test(f.path.split("/").pop()));
+    const encPick = enc.find(f => /f16/i.test(f.path) && !/bf16/i.test(f.path)) || enc.find(f => /bf16/i.test(f.path)) || enc[0];
     pick = { repo, files: list };
-    $("pickFiles").innerHTML = list.map((f, i) => `<label><input type="checkbox" data-i="${i}" ${need(f) ? "checked" : ""}>${esc(f.path)}<span class="s">${GB(f.lfs?.size ?? f.size)}</span></label>`).join("");
-    $("pickNote").textContent = gguf ? "choose the GGUF file(s) to download" : "the weights, configs and tokenizer are selected";
+    $("pickFiles").innerHTML = list.map((f, i) => `<label><input type="checkbox" data-i="${i}" ${need(f) || f === encPick ? "checked" : ""}>${esc(f.path)}${enc.includes(f) ? ` <span class="tag">vision encoder</span>` : ""}<span class="s">${GB(f.lfs?.size ?? f.size)}</span></label>`).join("");
+    $("pickNote").textContent = gguf ? `choose the GGUF file(s) to download${encPick ? "; the vision encoder is selected (images)" : ""}` : "the weights, configs and tokenizer are selected";
     sumPick();
   } catch (err) { $("pickNote").textContent = "cannot list files: " + err.message; }
 });
@@ -418,7 +421,8 @@ $("packGo").onclick = async () => {
   const sep = dir.includes("/") && !dir.includes("\\") ? "/" : "\\";
   try {
     await api("/models/pack", { src: $("pkSrc").value.trim(), template: $("pkTmpl").value.trim(), out: dir.replace(/[\\/]+$/, "") + sep + name,
-      base: $("pkBase").value, res: $("pkRes").value, alias: $("pkAlias").value.trim() || name, imatrix: $("pkImat").value.trim(), unload: $("pkUnload").checked });
+      base: $("pkBase").value, res: $("pkRes").value, alias: $("pkAlias").value.trim() || name, imatrix: $("pkImat").value.trim(),
+      mmproj: $("pkMmproj").value.trim(), unload: $("pkUnload").checked });
     pollState();
   } catch (err) { $("packErr").textContent = err.message; }
 };

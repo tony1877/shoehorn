@@ -13,12 +13,15 @@ The server finds a model's encoder in this order:
 3. a single `mmproj*.gguf` in the model's folder.
 
 Without an encoder a request with an image fails with an error that says so. The encoder loads on the first image
-and stays in RAM (about 1 GB). dsh needs `input: [text, image]` on the model's entry in `~/.dsh/settings.yaml`; its
-`read_image` tool and image attachments then send images.
+and stays loaded (about 1 GB, in VRAM or RAM, see below). The Models page sets an encoder per model (Vision button,
+or the field in the add and pack forms); downloading a GGUF repository selects its `mmproj-*.gguf` (the f16 one when
+there are several) and fills it in when you add or pack a model from the download. dsh needs `input: [text, image]` on the model's entry in `~/.dsh/settings.yaml`; its
+`read_image` tool and image attachments then send images. In dsh's web UI an image is attached by dropping it on the
+page or pasting it into the chat box (there is no attach button).
 
 ## Requests
 
-OpenAI chat format, images as base64 data URLs (png, jpeg, bmp, gif):
+OpenAI chat format, images as base64 data URLs or http(s) URLs (png, jpeg, bmp, gif):
 
 ```json
 {"role": "user", "content": [
@@ -27,12 +30,20 @@ OpenAI chat format, images as base64 data URLs (png, jpeg, bmp, gif):
 ```
 
 `{"type": "input_image", "image_url": "data:..."}` and Anthropic's `{"type": "image", "source": {"type": "base64",
-"data": ...}}` work too. http(s) URLs are not fetched.
+"data": ...}}` (or `{"type": "url", "url": ...}`) work too. The server fetches http(s) URLs itself with curl (as the
+Models page's downloads; up to 5 redirects, 20 MB, 20 s); a fetch that fails fails the request with curl's reason.
+Anyone with the API key can make the server fetch a URL, including addresses on its own network.
 
 ## How it works
 
-- **Encoder.** llama.cpp's mtmd library decodes, resizes and encodes the image on the CPU (it does not fit in VRAM
-  next to a 16 GB base): 2-3 s for a 640x400 image (260 embeddings), about 5 s for 800x600 (475), on the 9800X3D.
+- **Encoder.** llama.cpp's mtmd library decodes, resizes and encodes the image. On the GPU when the card has the
+  24 GB+ profile and the encoder (its file plus 1 GB of activations, plus 0.5 GB spare) fits in the free VRAM; the
+  automatic residual budget (`--res-gpu-gb auto`) leaves that room when the model has an encoder. Otherwise on the CPU,
+  as on 16 GB cards, where it does not fit next to the base. An encoder in VRAM is freed when the model unloads.
+  `SHOEHORN_ENCODER=gpu` tries the GPU on any card (still only when it fits: ggml aborts on a failed allocation),
+  `cpu` never. 640x400 image (260 embeddings): 1.95 s on the CPU (9800X3D), 0.03 s on the GPU (RTX 5080, a test with
+  12 layers on the CPU to free VRAM; 0.4 s for the first image); about 5 s for 800x600 (475) on the CPU. The log's
+  `image:` line gives the time and where it ran.
 - **Prompt.** An image is a run of placeholder tokens in the prompt, one per embedding, between the template's
   `<|vision_start|>` and `<|vision_end|>`. Their ids come from a hash of the image's pixels, so prompt reuse (which
   compares token ids) reuses a prefix only when its images are the same. A follow-up turn about the same image reuses
@@ -54,3 +65,6 @@ OpenAI chat format, images as base64 data URLs (png, jpeg, bmp, gif):
   same place (neither may reuse the first one's state), two images in one message, streaming.
 - 2026-10-15, 5080, orca 27B (Q4_K residual): all pass; an image plus tools gives a correct tool call; dsh's
   `read_image` reads an invoice correctly.
+- 2026-10-15, follow-ups: smoke test passes with the encoder on the CPU and on the GPU; http and https URLs and
+  Anthropic `url` sources read correctly, a 404 / refused connection / ftp URL give an error; an image dropped into
+  dsh's web chat is read correctly; the Models page selects a repository's mmproj, and add / pack set it on the model.
