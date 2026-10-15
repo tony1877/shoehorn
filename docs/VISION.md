@@ -34,6 +34,25 @@ OpenAI chat format, images as base64 data URLs or http(s) URLs (png, jpeg, bmp, 
 Models page's downloads; up to 5 redirects, 20 MB, 20 s); a fetch that fails fails the request with curl's reason.
 Anyone with the API key can make the server fetch a URL, including addresses on its own network.
 
+## Encoding on another machine
+
+On a 16 GB card the encoder runs on the CPU, which is slow for big images (a 1657x1085 screenshot: 1728 embeddings,
+22 s). Another machine's GPU can encode instead; the encoder needs about 2 GB of VRAM.
+
+1. On the serving machine, write a metadata-only copy of the base GGUF (10 MB; the encoder only reads the text model's
+   metadata): `shoehorn encode-server --model base.gguf --save-meta base.meta.gguf`.
+2. Copy it and the encoder file (mmproj) to the other machine, and start there:
+   `shoehorn encode-server --mmproj mmproj-f16.gguf --model base.meta.gguf --host 10.77.0.2 --port 8091
+   --api-key-file key.txt`. It encodes on its GPU when the encoder fits in the free VRAM (with 1.5 GB to spare), else on
+   its CPU (`--cpu` forces that).
+3. Start the server with `--encoder-url http://10.77.0.2:8091`. It sends each image's decoded pixels (width x height x 3
+   bytes) and gets back the embeddings. The answer must have this end's token count and width, so a different encoder
+   file is refused rather than misread. The server's API key goes along when it has one; the encoder checks it when
+   started with `--api-key-file`.
+
+When the remote encoder fails (off, unreachable, refused), the image is encoded locally as before and the remote is not
+tried again for 60 s. The log's `image:` line says "on the remote encoder" when it encoded there.
+
 ## How it works
 
 - **Encoder.** llama.cpp's mtmd library decodes, resizes and encodes the image. On the GPU when the card has the
@@ -65,6 +84,9 @@ Anyone with the API key can make the server fetch a URL, including addresses on 
   same place (neither may reuse the first one's state), two images in one message, streaming.
 - 2026-10-15, 5080, orca 27B (Q4_K residual): all pass; an image plus tools gives a correct tool call; dsh's
   `read_image` reads an invoice correctly.
+- 2026-10-15, remote encoder: the smoke test passes with every image encoded by an `encode-server` (on this machine's
+  CPU, loaded from a metadata-only GGUF); with the encode server stopped, the next image falls back to the local
+  encoder after the 2 s connection timeout and is read correctly. Not yet run on another machine's GPU.
 - 2026-10-15, follow-ups: smoke test passes with the encoder on the CPU and on the GPU; http and https URLs and
   Anthropic `url` sources read correctly, a 404 / refused connection / ftp URL give an error; an image dropped into
   dsh's web chat is read correctly, and so is one pasted into its chat box (a badge reading "Vision, still open"); the Models page selects a repository's mmproj, and add / pack set it on the model.

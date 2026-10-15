@@ -30,6 +30,7 @@ static void usage() {
            "  pack                 safetensors -> base + residual GGUF pair\n"
            "  gen                  generate from token ids (speed tests)\n"
            "  vision               answer one prompt about images (--mmproj, --image)\n"
+           "  encode-server        a remote vision encoder for serve --encoder-url (another GPU)\n"
            "  info                 a GGUF's metadata\n"
            "  ppl                  perplexity / KLD on token ids\n"
            "  selftest             consistency checks of a model's decode paths\n"
@@ -145,6 +146,9 @@ int main(int argc, char ** argv) {
     }
     if (args[1] == "vision") {
         return e8::cli::vision(args);
+    }
+    if (args[1] == "encode-server") {
+        return e8::cli::encode_server(args);
     }
     if (args[1] == "mtpdump") {
         return e8::cli::mtpdump(args);

@@ -71,6 +71,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <functional>
 #include <atomic>
@@ -220,6 +221,10 @@ struct Server {
     std::function<bool(int, std::string &)> load;  // loads entry i (lazy mode)
     std::string                      router_url;  // llama-server router to unload / forward to (empty = none)
     std::string                      timing_log;  // JSON lines of per-request timings (no content), when set
+    // --encoder-url: a remote vision encoder (`shoehorn encode-server` on another machine's GPU); images go there
+    // first, and to the local encoder when it fails (then not again for kRemoteEncoderBackoffS)
+    std::string                           encoder_url;
+    std::chrono::steady_clock::time_point encoder_down_until{};
     // dashboard (/dashboard, /stats): the last requests' timing lines and what is generating now
     std::mutex                       stats_mu;
     std::deque<json>                 recent;
@@ -617,6 +622,7 @@ struct ImgSpan {
     size_t             start = 0;  // first placeholder in the prompt
     int                n = 0, npos = 0;  // embeddings; rotary positions the image takes (M-RoPE: max(h, w))
     mtmd_input_chunk * chunk = nullptr;
+    const mtmd_bitmap * bm   = nullptr;  // its decoded pixels (owned by the request; sent to a remote encoder)
 };
 struct ImgSpans {
     std::vector<ImgSpan> v;
@@ -808,6 +814,43 @@ bool take_images(json & msgs, Entry & e, std::vector<mtmd_bitmap *> & out, std::
             part = json{ { "type", "media_marker" }, { "text", mtmd_default_marker() } };
         }
     }
+    return true;
+}
+
+// A remote encoder (`shoehorn encode-server`, docs/VISION.md) encodes one image: the decoded RGB pixels go there,
+// n x n_embd float32 come back. Checked against this end's own tokenization (same token count and width), so a
+// different encoder or preprocessing never feeds the model wrong embeddings.
+constexpr int kRemoteEncoderBackoffS = 60;
+bool remote_encode(const Server & S, const ImgSpan & sp, int n_embd, std::vector<float> & out, std::string & why) {
+    if (!sp.bm) {
+        why = "no pixels";
+        return false;
+    }
+    const uint32_t nx = mtmd_bitmap_get_nx(sp.bm), ny = mtmd_bitmap_get_ny(sp.bm);
+    httplib::Client c(S.encoder_url);
+    c.set_connection_timeout(2, 0);
+    c.set_read_timeout(120, 0);
+    c.set_write_timeout(30, 0);
+    httplib::Headers hd = { { "X-Width", std::to_string(nx) }, { "X-Height", std::to_string(ny) } };
+    if (!S.api_key.empty()) hd.insert({ "Authorization", "Bearer " + S.api_key });
+    auto r = c.Post("/encode", hd, (const char *) mtmd_bitmap_get_data(sp.bm), mtmd_bitmap_get_n_bytes(sp.bm),
+                    "application/octet-stream");
+    if (!r) {
+        why = httplib::to_string(r.error());
+        return false;
+    }
+    if (r->status != 200) {
+        why = "HTTP " + std::to_string(r->status);
+        return false;
+    }
+    const int n = std::atoi(r->get_header_value("X-Tokens").c_str()), e = std::atoi(r->get_header_value("X-Embd").c_str());
+    if (n != sp.n || e != n_embd || r->body.size() != (size_t) n * (size_t) e * sizeof(float)) {
+        why = "it returned " + std::to_string(n) + " x " + std::to_string(e) + " embeddings, expected " + std::to_string(sp.n) +
+              " x " + std::to_string(n_embd) + " (a different encoder file?)";
+        return false;
+    }
+    out.resize((size_t) n * (size_t) e);
+    std::memcpy(out.data(), r->body.data(), r->body.size());
     return true;
 }
 
@@ -1054,6 +1097,7 @@ loaded:
             sp.chunk = mtmd_input_chunk_copy(k);
             // placeholder ids from a hash of the image's pixels (the k-th image chunk is the k-th bitmap)
             const mtmd_bitmap *   bm  = bitmaps.v[imgs.v.size()];
+            sp.bm                     = bm;
             const unsigned char * px  = mtmd_bitmap_get_data(bm);
             uint64_t              hsh = 1469598103934665603ull ^ ((uint64_t) mtmd_bitmap_get_nx(bm) << 32 | mtmd_bitmap_get_ny(bm));
             for (size_t q = 0, nb = mtmd_bitmap_get_n_bytes(bm); q < nb; q++) hsh = (hsh ^ px[q]) * 1099511628211ull;
@@ -1281,14 +1325,27 @@ loaded:
     } live_end{ S };
     // text runs through prefill(); an image run is encoded (GPU or CPU) and read as embeddings at its M-RoPE positions
     auto eval_image = [&](const ImgSpan & sp) {
-        mtmd_context * mc = S.entries[(size_t) idx].mtmd;
-        const auto     te = std::chrono::steady_clock::now();
-        if (!mc || mtmd_encode_chunk(mc, sp.chunk) != 0) {
+        mtmd_context *     mc = S.entries[(size_t) idx].mtmd;
+        const auto         te = std::chrono::steady_clock::now();
+        std::vector<float> remote;
+        const char *       where = S.entries[(size_t) idx].mtmd_gpu ? "GPU" : "CPU";
+        if (!S.encoder_url.empty() && te >= S.encoder_down_until) {
+            std::string why;
+            if (remote_encode(S, sp, (int) S.q35->hp().n_embd, remote, why)) {
+                where = "remote encoder";
+            } else {
+                remote.clear();
+                S.encoder_down_until = te + std::chrono::seconds(kRemoteEncoderBackoffS);
+                fprintf(stderr, "remote encoder %s: %s; encoding here (remote not tried again for %d s)\n",
+                        S.encoder_url.c_str(), why.c_str(), kRemoteEncoderBackoffS);
+            }
+        }
+        if (remote.empty() && (!mc || mtmd_encode_chunk(mc, sp.chunk) != 0)) {
             err = "encoding an image failed";
             return false;
         }
         const double              t_enc = std::chrono::duration<double>(std::chrono::steady_clock::now() - te).count();
-        const float *             embd = mtmd_get_output_embd(mc);
+        const float *             embd = remote.empty() ? mtmd_get_output_embd(mc) : remote.data();
         const mtmd_image_tokens * it   = mtmd_input_chunk_get_tokens_image(sp.chunk);
         const int64_t             ne   = S.q35->hp().n_embd;
         const int                 ub   = S.q35->max_batch(), p0 = m.n_past() - S.q35->rope_shift();
@@ -1310,7 +1367,7 @@ loaded:
         }
         S.q35->set_rope_shift(S.q35->rope_shift() + sp.n - sp.npos);
         fprintf(stderr, "image: %d tokens read (encoded in %.2f s on the %s, encoded and read in %.1f s)\n", sp.n, t_enc,
-                S.entries[(size_t) idx].mtmd_gpu ? "GPU" : "CPU", std::chrono::duration<double>(std::chrono::steady_clock::now() - te).count());
+                where, std::chrono::duration<double>(std::chrono::steady_clock::now() - te).count());
         return true;
     };
     auto eval_range = [&](size_t a, size_t b) {
@@ -2037,6 +2094,7 @@ int serve(const std::vector<std::string> & args_in) {
         else if (a == "--hw-monitor") S->hw_url = val();
         else if (a == "--models-file") S->models_file = val();
         else if (a == "--timing-log") S->timing_log = val();
+        else if (a == "--encoder-url") S->encoder_url = val();
         else if (a == "--tool-temp") S->tool_temp = (float) std::atof(val().c_str());
         else if (a == "--spec") {
             const std::string v = val();
@@ -2079,6 +2137,7 @@ int serve(const std::vector<std::string> & args_in) {
                         "          default http://127.0.0.1:8085, \"\" = off)]\n"
                         "         [--models-file PATH (models added from the Models page, default ~/.shoehorn/models.json)]\n"
                         "         [--mmproj enc.gguf (vision encoder of the main model: images in chat messages)]\n"
+                        "         [--encoder-url http://HOST:PORT (a remote `shoehorn encode-server`; local encoder on failure)]\n"
                         "         [--temperature 1.0] [--top-p 0.95] [--top-k 20] [--min-p 0] [--presence-penalty 0] (request defaults)\n"
                         "         [--fast-prefill N (read all but the last N prompt tokens without the residual: ~2x prefill)]\n"
                         "         [--tool-temp 0.6 (temperature inside <tool_call> blocks; 0 = the request's)]\n"
