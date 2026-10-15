@@ -1,6 +1,6 @@
 pkgbase = shoehorn-rocm-bin
 	pkgdesc = Local inference engine for Qwen3.x with a split-precision residual (ROCm build: AMD RDNA3/RDNA4, MI300/MI350; with a CPU fallback)
-	pkgver = 0.1.0
+	pkgver = 0.2.0
 	pkgrel = 1
 	url = https://github.com/tony1877/shoehorn
 	arch = x86_64
@@ -16,7 +16,7 @@ pkgbase = shoehorn-rocm-bin
 	conflicts = shoehorn-cuda-bin
 	options = !strip
 	options = !debug
-	source = https://github.com/tony1877/shoehorn/releases/download/v0.1.0/shoehorn-0.1.0-linux-x86_64-rocm.tar.gz
-	sha256sums = 2925b919ebbfbcd718671fa835567bf4c33483b2ec8c75dfd140d071db4e3b00
+	source = https://github.com/tony1877/shoehorn/releases/download/v0.2.0/shoehorn-0.2.0-linux-x86_64-rocm.tar.gz
+	sha256sums = 8be054f86ccaa9578b14140f0c7e6dd9d51e5331ea494adcb149f04168da9786
 
 pkgname = shoehorn-rocm-bin

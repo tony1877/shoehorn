@@ -1,6 +1,6 @@
 pkgbase = shoehorn-cuda-bin
 	pkgdesc = Local inference engine for Qwen3.x with a split-precision residual (CUDA build: NVIDIA RTX 30xx/40xx/50xx; with a CPU fallback)
-	pkgver = 0.1.0
+	pkgver = 0.2.0
 	pkgrel = 1
 	url = https://github.com/tony1877/shoehorn
 	arch = x86_64
@@ -13,7 +13,7 @@ pkgbase = shoehorn-cuda-bin
 	conflicts = shoehorn-rocm-bin
 	options = !strip
 	options = !debug
-	source = https://github.com/tony1877/shoehorn/releases/download/v0.1.0/shoehorn-0.1.0-linux-x86_64-cuda.tar.gz
-	sha256sums = 0bbc29154fb7e52170870c02722b865082c3292ef2456745ac0e0959564a57a3
+	source = https://github.com/tony1877/shoehorn/releases/download/v0.2.0/shoehorn-0.2.0-linux-x86_64-cuda.tar.gz
+	sha256sums = a64b6d470b5250b05f55dcf6de708394ce596eb817dc11a03bbea542f8301307
 
 pkgname = shoehorn-cuda-bin

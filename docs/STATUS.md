@@ -7,7 +7,7 @@ One page across the project; details live in the linked documents.
 | Area | State | Details |
 |---|---|---|
 | Linux port | Every phase done: CUDA and ROCm builds, KLD parity with Windows (~4-5e-4 on sm_86/89/120 and MI300X), tarballs, `.deb` / `.rpm`, container images, systemd units, sensors, 9-distribution matrix | [LINUX-PLAN.md](LINUX-PLAN.md), [LINUX-TODO.md](LINUX-TODO.md), [linux.md](linux.md) |
-| Release | v0.1.0 on GitHub (Windows zip, Linux CUDA / ROCm tarballs, `.deb`, `.rpm`), MIT license | GitHub releases |
+| Release | v0.1.0 on GitHub (Linux CUDA / ROCm tarballs, `.deb`, `.rpm`), MIT license. v0.2.0 (vision, Windows zip via `scripts/package-windows.ps1`) built and tested, not published yet | [releases/v0.2.0.md](releases/v0.2.0.md) |
 | GPU fit profiles | 24 GB+ (residual partly in VRAM), 16 GB (IQ4_XS base), 12 GB (IQ3_XXS, KLD 0.0048 vs Q8), 8 GB (IQ2_XXS, KLD 0.0093, 6.9 GB VRAM) | `gpu_fit()` in `src/server/server.cpp` |
 | Models page | Every model removable, order kept, `serve` without a model argument, pack form picks the profile's base | `src/server/models.html` |
 | Speed research | Measured and dropped: zero-copy GEMM, CPU residual slice, draft alternatives, coupled sampling, prose imatrix, small drafters, EAGLE-3 inputs, tree drafting, verify-level leaves. Kept: Q3_K residual (+7.5%) | [SPEEDUP-PLAN.md](SPEEDUP-PLAN.md), [DECODE-LIMITS.md](DECODE-LIMITS.md) |
@@ -47,4 +47,4 @@ One page across the project; details live in the linked documents.
 ### Small
 
 - The Models page shows the RTX 5080 as "17 GB" (VRAM rounding).
-- Next release (v0.2.0) with vision is not tagged yet.
+- v0.2.0: packages in `dist/`, notes in [releases/v0.2.0.md](releases/v0.2.0.md); publishing waits for the owner. AUR files already point at 0.2.0.

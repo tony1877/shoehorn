@@ -1,7 +1,7 @@
 # Maintainer: tony1877 <https://github.com/tony1877>
 # Built from packaging/aur/ in https://github.com/tony1877/shoehorn; the binaries are the release's portable tarball.
 pkgname=shoehorn-rocm-bin
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Local inference engine for Qwen3.x with a split-precision residual (ROCm build: AMD RDNA3/RDNA4, MI300/MI350; with a CPU fallback)"
 arch=('x86_64')
@@ -13,7 +13,7 @@ conflicts=('shoehorn' 'shoehorn-cuda-bin')
 options=('!strip' '!debug')
 _dir="shoehorn-${pkgver}-linux-x86_64-rocm"
 source=("https://github.com/tony1877/shoehorn/releases/download/v${pkgver}/${_dir}.tar.gz")
-sha256sums=('2925b919ebbfbcd718671fa835567bf4c33483b2ec8c75dfd140d071db4e3b00')
+sha256sums=('8be054f86ccaa9578b14140f0c7e6dd9d51e5331ea494adcb149f04168da9786')
 
 package() {
     install -d "$pkgdir/opt/shoehorn" "$pkgdir/usr/bin"

@@ -2,7 +2,7 @@
 # RunPod job (docs/LINUX-PLAN.md, Phase 7) on a plain distribution image: the portable tarball and the pack from the HF
 # repo (curl only), then `bench --only gpu,pcie` and `gen` greedy / sampled, as speed_extra.sh. Log: linuxtest/speed/$TAG.log
 REPO=${REPO:-Tony1877/Qwen3.8-27B-Uncensored-shoehorn}
-TARBALL=${TARBALL:-shoehorn-0.1.0-linux-x86_64-cuda.tar.gz}
+TARBALL=${TARBALL:-shoehorn-0.2.0-linux-x86_64-cuda.tar.gz}
 PACK=${PACK:-orca27b-r3}
 LOG=/tmp/speed.log
 get() { curl -fsSL -H "Authorization: Bearer $HF_TOKEN" -o "$2" "https://huggingface.co/$REPO/resolve/main/$1"; }

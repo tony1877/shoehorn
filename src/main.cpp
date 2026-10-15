@@ -25,6 +25,16 @@ static void log_filter(ggml_log_level level, const char * text, void *) {
 
 static void usage() {
     printf("shoehorn %s\n\n"
+           "usage: shoehorn <command> [options]\n"
+           "  serve [model.gguf]   OpenAI-compatible server (port 8090; models page at /models)\n"
+           "  pack                 safetensors -> base + residual GGUF pair\n"
+           "  gen                  generate from token ids (speed tests)\n"
+           "  vision               answer one prompt about images (--mmproj, --image)\n"
+           "  info                 a GGUF's metadata\n"
+           "  ppl                  perplexity / KLD on token ids\n"
+           "  selftest             consistency checks of a model's decode paths\n"
+           "  bench                hardware bandwidth (below)\n"
+           "Each command without arguments prints its options.\n\n"
            "usage: shoehorn bench [options]\n"
            "  --only LIST     run only these sections, comma-separated: cpu,gpu,pcie,disk\n"
            "  --disk PATH     drive/folder (a temp file is written there) or existing big file; repeatable.\n"

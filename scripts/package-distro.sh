@@ -3,12 +3,12 @@
 # /usr/bin/shoehorn links to it, the systemd user units go to /usr/lib/systemd/user. Built in debian / rockylinux
 # containers with the distributions' own tools (dpkg-deb, rpmbuild).
 #
-#   scripts/package-distro.sh dist/shoehorn-0.1.0-linux-x86_64-cuda.tar.gz   # -> dist/*.deb, dist/*.rpm
+#   scripts/package-distro.sh dist/shoehorn-0.2.0-linux-x86_64-cuda.tar.gz   # -> dist/*.deb, dist/*.rpm
 set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 docker=${DOCKER:-docker}
 tgz=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
-name=$(basename "$tgz" .tar.gz)              # shoehorn-0.1.0-linux-x86_64-cuda
+name=$(basename "$tgz" .tar.gz)              # shoehorn-0.2.0-linux-x86_64-cuda
 ver=$(echo "$name" | cut -d- -f2)
 flavor=${name##*-}                           # cuda
 desc="shoehorn: local inference engine for Qwen3.x with a split-precision residual ($flavor build)"

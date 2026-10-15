@@ -7,7 +7,7 @@
 # Env: HF_TOKEN, TAG (e.g. ubuntu-24.04), TARBALL (file name under dist/ in the repo).
 # POSIX sh: some images have no bash.
 REPO=${REPO:-Tony1877/Qwen3.8-27B-Uncensored-shoehorn}
-TARBALL=${TARBALL:-shoehorn-0.1.0-linux-x86_64-cuda.tar.gz}
+TARBALL=${TARBALL:-shoehorn-0.2.0-linux-x86_64-cuda.tar.gz}
 LOG=/tmp/matrix.log
 
 {

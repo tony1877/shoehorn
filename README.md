@@ -32,11 +32,12 @@ Where the decode time goes and what was tried: [`docs/DECODE-LIMITS.md`](docs/DE
 | | Supported | Notes |
 |---|---|---|
 | Models | GGUF architectures `qwen35` (Qwen3.8-27B and fine-tunes) and `qwen4exp` (Flash-Next) | Any other architecture is refused at load. Fine-tunes of these two work. |
-| GPU | NVIDIA, CUDA 12.8+ | Default build targets Blackwell (`120a-real`). Other generations: `-CudaArch 89` (Ada), `86` (Ampere), etc. AMD and Intel GPUs are not supported. |
-| VRAM | 16 GB minimum for the 27B | More VRAM can hold part or all of the residual (`--res-gpu-gb`), which shortens every verify. |
+| GPU | NVIDIA (CUDA 12.8+); AMD on Linux (ROCm 7) | Default Windows build targets Blackwell (`120a-real`). Other generations: `-CudaArch 89` (Ada), `86` (Ampere), etc. AMD is checked on an MI300X only. Intel GPUs are not supported. |
+| VRAM | 16 GB for the 27B as packed above; 12 GB and 8 GB with a 3-bit / 2-bit base | The Models page shows the profile for your card. More VRAM (24 GB+) holds part or all of the residual (`--res-gpu-gb`), which shortens every verify. |
 | RAM | ~32 GB for the 27B | 14.4 GB pinned residual + RAM KV (7-9 GB at 256K). Flash-Next streams experts from NVMe and uses RAM as a cache. |
 | CPU | x86-64 | Default build uses AVX-512 (Zen 4/5, Ice Lake or newer). Any other x86-64 CPU: `-Portable`. |
-| OS | Windows 10/11 | Linux is untested (some code paths exist; the build script is PowerShell). macOS: no. |
+| OS | Windows 10/11, Linux | Linux: tarballs, `.deb`, `.rpm`, containers, see [`docs/linux.md`](docs/linux.md). macOS: no. |
+| Images | Qwen3.8-27B with its vision encoder (mmproj GGUF) | Base64 or http(s) image URLs in chat messages, see [`docs/VISION.md`](docs/VISION.md). |
 | PCIe | any | Verify speed is bound by host-to-GPU bandwidth: PCIe 5.0 x16 ~54 GB/s gives ~265 ms per verify; PCIe 4.0 roughly doubles it. |
 
 **More VRAM.** `--res-gpu-gb G` keeps G GB of the residual in VRAM (layer by layer); only the rest crosses PCIe
@@ -45,6 +46,11 @@ unchanged (greedy text identical). On the 16 GB reference card only ~1 GB fits n
 251 ms, in proportion to the bytes moved. The whole 14.4 GB residual needs a ~32 GB card; that case is not measured.
 
 **Other models.** Other model families need their architecture ported (the layer graph lives in `src/model/`).
+
+## Install
+
+Release builds are on the [releases page](https://github.com/tony1877/shoehorn/releases): a Windows zip (NVIDIA,
+driver 580+; cuBLAS and the VC++ runtime included) and Linux tarballs, `.deb` and `.rpm` (CUDA or ROCm). Or build it:
 
 ## Build (Windows)
 

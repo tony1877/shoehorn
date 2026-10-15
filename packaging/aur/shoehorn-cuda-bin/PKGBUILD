@@ -1,7 +1,7 @@
 # Maintainer: tony1877 <https://github.com/tony1877>
 # Built from packaging/aur/ in https://github.com/tony1877/shoehorn; the binaries are the release's portable tarball.
 pkgname=shoehorn-cuda-bin
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Local inference engine for Qwen3.x with a split-precision residual (CUDA build: NVIDIA RTX 30xx/40xx/50xx; with a CPU fallback)"
 arch=('x86_64')
@@ -14,7 +14,7 @@ conflicts=('shoehorn' 'shoehorn-rocm-bin')
 options=('!strip' '!debug')
 _dir="shoehorn-${pkgver}-linux-x86_64-cuda"
 source=("https://github.com/tony1877/shoehorn/releases/download/v${pkgver}/${_dir}.tar.gz")
-sha256sums=('0bbc29154fb7e52170870c02722b865082c3292ef2456745ac0e0959564a57a3')
+sha256sums=('a64b6d470b5250b05f55dcf6de708394ce596eb817dc11a03bbea542f8301307')
 
 package() {
     install -d "$pkgdir/opt/shoehorn" "$pkgdir/usr/bin"
