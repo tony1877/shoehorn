@@ -103,6 +103,8 @@ loginctl enable-linger "$USER"      # start at boot without logging in
 - A crash or kill restarts the server (`Restart=on-failure`). The Settings page's restart exits with status 75, and
   systemd starts the server again with the saved settings.
 - Settings and the model list live in `~/.shoehorn/` (`settings.json`, `models.json`), as on Windows.
+- Images: put the model's vision encoder (`mmproj-*.gguf`) next to the model, or set `"mmproj"` on its entry in
+  `models.json` ([VISION.md](VISION.md)).
 
 The agent (`dsh.service`) runs `scripts/agent.sh` from the checkout (set `WorkingDirectory`); it needs Node 24 and
 pnpm (`corepack enable`). Enable it like the server: `systemctl --user enable --now dsh`. `scripts/agent.sh` rebuilds

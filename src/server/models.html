@@ -47,7 +47,7 @@ nav a:hover { color: var(--ink); }
 .note { color: var(--muted); font-size: 12px; }
 .err { color: var(--bad); font-size: 12px; }
 .rows { display: grid; }
-.row { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 2fr) 70px 86px 170px;  /* fixed button column: rows line up with one button or two */ gap: 12px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+.row { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 2fr) 70px 130px 236px;  /* fixed tag and button columns: rows line up with two buttons or three */ gap: 12px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
 .row:first-child { border-top: 0; }
 .row .p { color: var(--ink2); font: 11.5px var(--f-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row .nm { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -119,6 +119,7 @@ pre { margin: 6px 0 0; max-height: 180px; overflow: auto; background: var(--bg);
         <label>Name (what clients ask for)<input id="addAlias" placeholder="from the file, e.g. qwen3.8-27b-q4_k_m-shoehorn"></label>
         <label>GGUF file<input id="addPath" data-pick="file:*.gguf" placeholder="E:\models\model.gguf"></label>
         <label class="wide">Residual file (optional, for a packed pair)<input id="addRes" data-pick="file:*.gguf" placeholder="E:\models\model.res.gguf"></label>
+        <label class="wide">Vision encoder (optional: mmproj GGUF, for images)<input id="addMmproj" data-pick="file:*.gguf" placeholder="E:\models\mmproj-model-f16.gguf"></label>
       </div>
       <div class="actions" style="margin-top:10px"><button class="pri" id="addGo">Add</button><span class="err" id="addErr"></span></div>
     </details>
@@ -212,8 +213,8 @@ async function pollState() {
       <span class="nm" title="${esc(m.alias)}">${esc(m.alias)}</span>
       <span class="p" title="${esc(m.path)}${m.res ? "\n" + esc(m.res) : ""}">${esc(m.path)}${m.res ? " + residual" : ""}</span>
       <span class="mono sz" style="color:var(--ink2)">${m.bytes ? GB(m.bytes) : "-"}</span>
-      ${m.loaded ? `<span class="tag good">loaded</span>` : `<span class="tag">on disk</span>`}
-      <span class="actions" style="justify-content:flex-end">${m.removable && !m.loaded ? `<button data-remove="${esc(m.alias)}" title="Remove from this list (the files stay)" ${can ? "" : "disabled"}>Remove</button>` : ""}
+      <span>${m.loaded ? `<span class="tag good">loaded</span>` : `<span class="tag">on disk</span>`}${m.mmproj ? ` <span class="tag" title="${esc(m.mmproj)}">vision</span>` : ""}</span>
+      <span class="actions" style="justify-content:flex-end"><button data-mmproj="${esc(m.alias)}" data-cur="${esc(m.mmproj || "")}" title="Vision encoder (mmproj GGUF) for images; empty to remove" ${can ? "" : "disabled"}>Vision</button>${m.removable && !m.loaded ? `<button data-remove="${esc(m.alias)}" title="Remove from this list (the files stay)" ${can ? "" : "disabled"}>Remove</button>` : ""}
       ${m.loaded ? `<button data-unload ${can && !busy.load ? "" : "disabled"}>Unload</button>`
                  : `<button data-load="${esc(m.alias)}" ${can && !busy.load ? "" : "disabled"}>${busy.load === m.alias ? "Loading..." : "Load"}</button>`}</span>
     </div>`).join(""));
@@ -259,6 +260,7 @@ document.addEventListener("click", async e => {
     if (b.dataset.load) { busy.load = b.dataset.load; pollState(); $("modelsErr").textContent = ""; await api("/models/load", { alias: b.dataset.load }); }
     else if (b.hasAttribute("data-unload")) { busy.load = "-"; await api("/models/unload", {}); }
     else if (b.dataset.remove) { if (confirm(`Remove ${b.dataset.remove} from the list? The files stay on disk.`)) await api("/models/remove", { alias: b.dataset.remove }); }
+    else if (b.dataset.mmproj) { const p = prompt(`Vision encoder (mmproj .gguf) for ${b.dataset.mmproj}; empty to remove:`, b.dataset.cur); if (p !== null) await api("/models/mmproj", { alias: b.dataset.mmproj, mmproj: p.trim() }); }
     else if (b.dataset.cancel) await api("/models/cancel", { id: +b.dataset.cancel });
     else if (b.dataset.packsrc) { $("pkSrc").value = b.dataset.packsrc; inspectSrc(); namesFromSrc(); $("packPanel").scrollIntoView({ behavior: "smooth" }); }
     else if (b.dataset.addgguf) { $("addBox").open = true; $("addPath").value = b.dataset.addgguf + "\\"; $("addPath").focus(); }
@@ -268,7 +270,12 @@ document.addEventListener("click", async e => {
 });
 $("addGo").onclick = async () => {
   $("addErr").textContent = "";
-  try { await api("/models/add", { alias: $("addAlias").value.trim(), path: $("addPath").value.trim(), res: $("addRes").value.trim() }); $("addAlias").value = $("addPath").value = $("addRes").value = ""; pollState(); }
+  try {
+    const alias = $("addAlias").value.trim(), mm = $("addMmproj").value.trim();
+    await api("/models/add", { alias, path: $("addPath").value.trim(), res: $("addRes").value.trim() });
+    if (mm) await api("/models/mmproj", { alias, mmproj: mm });
+    $("addAlias").value = $("addPath").value = $("addRes").value = $("addMmproj").value = ""; pollState();
+  }
   catch (err) { $("addErr").textContent = err.message; }
 };
 $("keySave").onclick = () => { try { localStorage.setItem(KEY, $("key").value.trim()); } catch (e) {} $("key").value = ""; pollState(); };

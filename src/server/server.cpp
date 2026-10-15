@@ -2477,7 +2477,7 @@ int serve(const std::vector<std::string> & args_in) {
             const Entry & e = S->entries[i];
             std::error_code ec;
             const uint64_t  sz = std::filesystem::file_size(e.path, ec) + (e.res.empty() ? 0 : std::filesystem::file_size(e.res, ec));
-            out["models"].push_back({ { "alias", e.alias }, { "path", e.path }, { "res", e.res }, { "bytes", sz },
+            out["models"].push_back({ { "alias", e.alias }, { "path", e.path }, { "res", e.res }, { "mmproj", e.mmproj }, { "bytes", sz },
                                       { "loaded", S->model && S->active == (int) i }, { "removable", S->entries.size() > 1 } });
         }
         {
@@ -2535,6 +2535,32 @@ int serve(const std::vector<std::string> & args_in) {
         if (!add_entry(*S, alias, path, res, err)) return fail(resp, err);
         resp.set_content(json{ { "success", true } }.dump(), "application/json");
     });
+    // a model's vision encoder (mmproj GGUF; "" = none): images in its chat messages (docs/VISION.md)
+    http.Post("/models/mmproj", [&](const httplib::Request & req, httplib::Response & resp) {
+        if (!may_change(req, resp)) return;
+        const json        b      = body_of(req);
+        const std::string alias  = b.value("alias", std::string()), mmproj = b.value("mmproj", std::string());
+        std::error_code   ec;
+        if (!mmproj.empty() && !std::filesystem::is_regular_file(mmproj, ec)) return fail(resp, "the encoder file does not exist");
+        {
+            Turn turn(*S, true);
+            auto it = std::find_if(S->entries.begin(), S->entries.end(), [&](const Entry & e) { return e.alias == alias; });
+            if (it == S->entries.end()) return fail(resp, "no model named " + alias, 404);
+            if (it->mtmd) mtmd_free(it->mtmd);  // the next image loads the new one
+            it->mtmd   = nullptr;
+            it->mmproj = mmproj;
+        }
+        std::lock_guard<std::mutex> lk(S->jobs_mu);
+        json & ms = S->models_cfg["models"];
+        if (ms.is_array())
+            for (auto & m : ms)
+                if (m.value("alias", std::string()) == alias) {
+                    if (mmproj.empty()) m.erase("mmproj");
+                    else m["mmproj"] = mmproj;
+                }
+        save_models(*S);
+        resp.set_content(json{ { "success", true } }.dump(), "application/json");
+    });
     http.Post("/models/remove", [&](const httplib::Request & req, httplib::Response & resp) {  // from the list; files stay
         if (!may_change(req, resp)) return;
         const std::string alias = body_of(req).value("alias", std::string());
@@ -2546,6 +2572,7 @@ int serve(const std::vector<std::string> & args_in) {
             if (S->entries.size() == 1) return fail(resp, "the last model cannot be removed");
             if (S->model && S->active == (int) i) return fail(resp, "unload it first");
             if (S->active > (int) i) S->active--;
+            if (S->entries[i].mtmd) mtmd_free(S->entries[i].mtmd);
             llama_model_free(S->entries[i].vocab_model);
             S->entries.erase(S->entries.begin() + (long long) i);
         }
