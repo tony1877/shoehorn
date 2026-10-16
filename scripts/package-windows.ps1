@@ -1,17 +1,18 @@
 <#
 .SYNOPSIS
-  Windows release zip: dist\shoehorn-<ver>-windows-x86_64-cuda.zip from build\bin\shoehorn.exe (scripts\build.ps1 first).
+  Windows release zip: dist\shoehorn-<ver>-windows-x86_64-cuda.zip from build-release\bin\shoehorn.exe
+  (scripts\build.ps1 -Release first: RTX 30/40/50 and any AVX2 CPU).
   Bundles what the exe loads besides Windows itself: cuBLAS 13 (cublas64_13, cublasLt64_13; the CUDA runtime is linked
   statically) and the VC++ runtime with OpenMP (msvcp140, vcruntime140(_1), vcomp140). The host needs only the NVIDIA
   driver (580+ for CUDA 13).
 #>
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$exe  = Join-Path $root 'build\bin\shoehorn.exe'
-if (-not (Test-Path $exe)) { throw "build first: scripts\build.ps1 ($exe is missing)" }
+$exe  = Join-Path $root 'build-release\bin\shoehorn.exe'
+if (-not (Test-Path $exe)) { throw "build first: scripts\build.ps1 -Release ($exe is missing)" }
 $ver = (Select-String -Path (Join-Path $root 'CMakeLists.txt') -Pattern 'project\(shoehorn VERSION ([0-9.]+)').Matches[0].Groups[1].Value
 $got = (& $exe --version) -replace '^shoehorn ', ''
-if ($got -ne $ver) { throw "build\bin\shoehorn.exe is $got, CMakeLists.txt says ${ver}: rebuild" }
+if ($got -ne $ver) { throw "build-release\bin\shoehorn.exe is $got, CMakeLists.txt says ${ver}: rebuild" }
 
 $cuda = if ($env:CUDA_PATH) { $env:CUDA_PATH } else { 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0' }
 $vs   = & (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe') -products * -version '[17.0,18.0)' -latest -property installationPath

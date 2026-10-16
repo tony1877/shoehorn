@@ -86,7 +86,12 @@ tried again for 60 s. The log's `image:` line says "on the remote encoder" when 
   `read_image` reads an invoice correctly.
 - 2026-10-15, remote encoder: the smoke test passes with every image encoded by an `encode-server` (on this machine's
   CPU, loaded from a metadata-only GGUF); with the encode server stopped, the next image falls back to the local
-  encoder after the 2 s connection timeout and is read correctly. Not yet run on another machine's GPU.
+  encoder after the 2 s connection timeout and is read correctly.
+- 2026-10-16, remote encoder on another machine: `encode-server` on a laptop RTX 4070 (8 GB, Windows 11 25H2), the
+  server on the desktop, linked by gigabit Ethernet (through a monitor's USB hub, about 25-30 MB/s). Smoke test
+  passes. A 640x400 image: 0.09-0.4 s on the laptop, 0.24-0.8 s with the transfer (desktop CPU: 2.0 s); a 1657x1085
+  screenshot (1768 embeddings): 1.65 s on the laptop, 2.7 s with the transfer (5 MB of pixels out, 36 MB of embeddings
+  back), against 22 s on the desktop CPU, and read correctly.
 - 2026-10-15, follow-ups: smoke test passes with the encoder on the CPU and on the GPU; http and https URLs and
   Anthropic `url` sources read correctly, a 404 / refused connection / ftp URL give an error; an image dropped into
   dsh's web chat is read correctly, and so is one pasted into its chat box (a badge reading "Vision, still open"); the Models page selects a repository's mmproj, and add / pack set it on the model.

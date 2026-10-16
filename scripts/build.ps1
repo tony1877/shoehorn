@@ -7,17 +7,21 @@
   .\scripts\build.ps1 -Clean     # wipe .\build first
   .\scripts\build.ps1 -NoCuda    # CPU-only build
   .\scripts\build.ps1 -Portable  # no AVX-512 extensions (CPUs older than Zen 4 / Ice Lake)
+  .\scripts\build.ps1 -Release   # release binary in .\build-release (scripts\package-windows.ps1): RTX 30/40/50
+                                 # (sm_86, 89, 120a) and any AVX2 CPU, as scripts/build.sh --release on Linux
 #>
 param(
     [switch]$Clean,
     [switch]$NoCuda,
     [switch]$Portable,
+    [switch]$Release,
     [string]$CudaArch = '120a-real'  # Blackwell consumer GPUs (RTX 50xx)
 )
 
 $ErrorActionPreference = 'Stop'
 $root  = Split-Path -Parent $PSScriptRoot
-$build = Join-Path $root 'build'
+$build = Join-Path $root $(if ($Release) { 'build-release' } else { 'build' })
+if ($Release -and -not $PSBoundParameters.ContainsKey('CudaArch')) { $CudaArch = '86-real;89-real;120a-real' }
 
 function Fail([string]$msg) {
     Write-Host "ERROR: $msg" -ForegroundColor Red
@@ -94,10 +98,15 @@ $cuda = if ($NoCuda) { 'OFF' } else { 'ON' }
 $on  = if ($Portable) { 'OFF' } else { 'ON' }
 $isa = @("-DGGML_AVX512_VNNI=$on", "-DGGML_AVX512_BF16=$on", "-DGGML_AVX512_VBMI=$on")
 if (-not $Portable) { $isa += '-DGGML_AVX512=ON' }  # -Portable leaves AVX-512F to ggml's own detection
-# scripts\watchdog.ps1 leaves the server alone while this file exists (the build replaces shoehorn.exe)
+if ($Release) {  # any x86-64-v3 CPU (AVX2/FMA: Haswell / Zen 1 on), no AVX-512 (most Intel desktop CPUs lack it)
+    $isa = @('-DGGML_NATIVE=OFF', '-DGGML_AVX=ON', '-DGGML_AVX2=ON', '-DGGML_FMA=ON', '-DGGML_F16C=ON', '-DGGML_BMI2=ON',
+             '-DGGML_AVX512=OFF', '-DGGML_AVX512_VNNI=OFF', '-DGGML_AVX512_BF16=OFF', '-DGGML_AVX512_VBMI=OFF')
+}
+# scripts\watchdog.ps1 leaves the server alone while this file exists (the build replaces shoehorn.exe); a release
+# build has its own folder and leaves the server's binary alone
 $pause = Join-Path $HOME '.shoehorn\watchdog.pause'
 New-Item -ItemType Directory -Force (Split-Path $pause) | Out-Null
-Set-Content -LiteralPath $pause 'build.ps1'
+if (-not $Release) { Set-Content -LiteralPath $pause 'build.ps1' }
 try {
     cmake -S $root -B $build -G Ninja -DCMAKE_BUILD_TYPE=Release "-DSHOEHORN_CUDA=$cuda" "-DCMAKE_CUDA_ARCHITECTURES=$CudaArch" @isa
     if ($LASTEXITCODE -ne 0) { Fail 'cmake configure failed (see above)' }
