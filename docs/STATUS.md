@@ -46,8 +46,18 @@ One page across the project; details live in the linked documents.
 ### Review items left open (decisions for the owner)
 
 - `think_after_tool` now defaults to on: every tool-result turn reasons, so agent loops are slower than before.
-- The streaming lenient tool-call parser takes over whenever the strict partial parse lags, not only for calls the
-  strict grammar rejects.
+
+### Tool calls (2026-10-16, decided by the owner)
+
+- Tool calls are read by shoehorn's XML parser (`src/server/tool_recovery.h`) whenever the text has `<tool_call>`, in
+  place of llama.cpp's grammar: a `</parameter>` ends a value only when the call continues after it, so a file that
+  quotes tool-call markup is written whole (the grammar cut it short and turned the quoted examples into extra
+  calls). Inside an open call the end-of-turn tokens stand for their plain text (`SpecDecoder::set_call_ban`), and a
+  call cut off by the end of the turn is never reported as finished.
+- `tests/tool_stream_matrix.py` (live, 23 kinds of file writes x 2 + a max_tokens cut): before, markup and
+  `<|im_end|>` content lost text or broke the JSON (4 of 46 calls); after, every call is whole and streams. Left: the
+  model will not write `<think>` / `</think>` as text (it leaves them out), and when a file mentions `<|im_end|>` it
+  sometimes writes another marker. `ctest -R tool_recovery` covers the parser cases.
 
 ### Small
 

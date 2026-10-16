@@ -7,6 +7,7 @@
 
 #include "model/qwen35.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <random>
@@ -63,6 +64,14 @@ public:
     void set_mtp(int n) { mtp_n_ = n > 0 ? n : 0; }
     // echo drafting: propose continuations of earlier occurrences of the last tokens (on by default)
     void set_echo(bool on) { echo_ = on; }
+    // Tokens that may not be sampled inside an open tool call (between the `open` and `close` tokens): the
+    // end-of-turn tokens, which there can only mean the model is writing that marker as file text (ending the turn
+    // would cut the call off). Each one's probability goes to `repl[i]`, the first token of the same marker written
+    // as plain text, so the model goes on writing it as characters. Checked per position against the tokens before
+    // it; drafts are still proposed freely and rejected by the verify.
+    void set_call_ban(int32_t open, int32_t close, std::vector<int32_t> ban, std::vector<int32_t> repl) {
+        call_open_ = open, call_close_ = close, call_ban_ = std::move(ban), call_repl_ = std::move(repl);
+    }
     // sampling temperature from the next cycle on (> 0 only: a greedy decoder stays greedy); the drafts already made
     // keep the distribution they were drawn from, so the verify's acceptance stays exact
     void set_temp(float t) {
@@ -151,6 +160,7 @@ private:
     void    emit(std::vector<int32_t> & out, int32_t t) {
         out.push_back(t);
         counts_[t]++;
+        call_state_ = step_call(call_state_, t);
         hist_.push_back(t);
     }
 
@@ -170,6 +180,33 @@ private:
     int32_t            last_ = -1;  // sampled, not yet evaluated
     std::vector<float> logits_;
     TokenCounts        counts_;  // tokens emitted so far (penalties)
+    // set_call_ban: ban_now_ is set before each verify row is used (inside an open call at that position). "Open" is
+    // the last of the open / close tokens seen, not a count: a file that quotes an unbalanced <tool_call> must not
+    // keep the ban on after the real call ends (the turn could not end)
+    int32_t              call_open_ = -1, call_close_ = -1;
+    std::vector<int32_t> call_ban_, call_repl_;
+    bool                 ban_now_ = false;
+    bool                 call_state_ = false;  // after the emitted tokens
+    bool step_call(bool st, int32_t t) const { return t == call_open_ ? true : t == call_close_ ? false : st; }
+    bool ban_if(bool st) const { return st && call_open_ >= 0 && !call_ban_.empty(); }
+    bool banned(int32_t t) const {
+        return ban_now_ && std::find(call_ban_.begin(), call_ban_.end(), t) != call_ban_.end();
+    }
+    // the plain-text token a banned one stands for here (itself when not banned)
+    int32_t unban(int32_t t) const {
+        if (!ban_now_) return t;
+        const auto it = std::find(call_ban_.begin(), call_ban_.end(), t);
+        return it == call_ban_.end() ? t : call_repl_[(size_t) (it - call_ban_.begin())];
+    }
+    int32_t unban_top(int32_t top, int32_t /*d*/) const { return unban(top); }
+    // argmax over a full row; a banned top token stands for its plain-text replacement
+    int32_t argmax_row(const float * L, int64_t nv, int32_t exclude = -1) const {
+        int32_t best = -1;
+        for (int32_t i = 0; i < (int32_t) nv; i++) {
+            if (i != exclude && (best < 0 || L[i] > L[best])) best = i;
+        }
+        return best < 0 ? best : unban(best);
+    }
     int                mtp_n_ = 6;  // most MTP proposals per base pass (choose_mtp picks; 0 = draft with the base alone)
     static constexpr int kMaxMtp = 8;
     double               mseen_[kMaxMtp + 1] = {}, mfail_[kMaxMtp + 1] = {};  // MTP proposal survival by position

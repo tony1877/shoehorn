@@ -126,6 +126,22 @@ void SpecDecoder::dist_topk(const float * v, const int32_t * id, int k, std::vec
 }
 
 void SpecDecoder::finish_dist(std::vector<std::pair<float, int32_t>> & p) {
+    if (ban_now_) {  // inside an open tool call (set_call_ban): a banned token's probability goes to its replacement
+        for (size_t i = 0; i < p.size(); i++) {
+            if (!banned(p[i].second)) continue;
+            const int32_t r = unban(p[i].second);
+            size_t        j = 0;
+            while (j < p.size() && p[j].second != r) j++;
+            if (j < p.size()) {  // merge: log(e^a + e^b), entries are still logits
+                const float a = p[i].first, b = p[j].first, m = std::max(a, b);
+                p[j].first    = m + std::log(std::exp(a - m) + std::exp(b - m));
+                p.erase(p.begin() + (long) i--);
+            } else {
+                p[i].second = r;
+            }
+        }
+        std::stable_sort(p.begin(), p.end(), [](const auto & x, const auto & y) { return x.first > y.first; });
+    }
     // softmax over the kept (sorted) entries, then min_p and top_p, renormalised
     const float mx  = p[0].first;
     double      sum = 0;
@@ -157,13 +173,7 @@ void SpecDecoder::finish_dist(std::vector<std::pair<float, int32_t>> & p) {
 
 int32_t SpecDecoder::sample(const float * logits, int32_t exclude) {
     const int32_t nv = (int32_t) m_.hp().n_vocab;
-    if (sp_.temp <= 0) {
-        int32_t best = -1;
-        for (int32_t i = 0; i < nv; i++) {
-            if (i != exclude && (best < 0 || logits[i] > logits[best])) best = i;
-        }
-        return best;
-    }
+    if (sp_.temp <= 0) return argmax_row(logits, nv, exclude);
     std::vector<std::pair<float, int32_t>> p;
     dist(logits, p);
     double tot = 0;
@@ -183,14 +193,7 @@ int32_t SpecDecoder::sample(const float * logits, int32_t exclude) {
 }
 
 double SpecDecoder::prob(const float * logits, int32_t tok) {
-    if (sp_.temp <= 0) {
-        const int32_t nv   = (int32_t) m_.hp().n_vocab;
-        int32_t       best = 0;
-        for (int32_t i = 1; i < nv; i++) {
-            if (logits[i] > logits[best]) best = i;
-        }
-        return best == tok ? 1.0 : 0.0;
-    }
+    if (sp_.temp <= 0) return argmax_row(logits, m_.hp().n_vocab) == tok ? 1.0 : 0.0;
     std::vector<std::pair<float, int32_t>> p;
     dist(logits, p);
     for (auto & e : p) {
@@ -212,6 +215,7 @@ bool SpecDecoder::prefill(const std::vector<int32_t> & prompt, std::vector<int32
         if (!m_.eval(prompt.data() + i, n, o, final ? logits_.data() : nullptr, nullptr, err)) return false;
     }
     set_context(prompt);
+    ban_now_ = ban_if(call_state_);
     last_ = sample(logits_.data(), -1);
     emit(out, last_);
     st_.emitted++;
@@ -223,6 +227,7 @@ bool SpecDecoder::prefill(const std::vector<int32_t> & prompt, std::vector<int32
 void SpecDecoder::begin(const float * last_logits, std::vector<int32_t> & out) {
     logits_.assign(last_logits, last_logits + m_.hp().n_vocab);
     apply_penalties(logits_.data(), sp_, counts_);
+    ban_now_ = ban_if(call_state_);
     last_ = sample(logits_.data(), -1);
     emit(out, last_);
     st_.emitted++;
@@ -518,12 +523,15 @@ void SpecDecoder::accept(const std::vector<int32_t> & toks, const std::vector<Di
     next = -1;
     std::uniform_real_distribution<double> u(0.0, 1.0);
     cur = counts_;
+    bool cst = call_state_;  // open tool call after toks[0] (emitted); walked along the drafts
     for (; acc < k_; acc++) {
         const int32_t d = toks[(size_t) acc + 1];
+        if (acc > 0) cst = step_call(cst, toks[(size_t) acc]);
+        ban_now_ = ban_if(cst);  // this row's history: the tokens before d
         if (vk > 0) {
             cur[d]++;
             if (!sampled) {  // top-1 only: accept iff it is the draft, else it is the next token
-                const int32_t top = vidp[(size_t) acc];
+                const int32_t top = unban_top(vidp[(size_t) acc], d);
                 if (top == d) {
                     emit(out, d);
                     continue;
@@ -602,9 +610,11 @@ void SpecDecoder::accept(const std::vector<int32_t> & toks, const std::vector<Di
     }
     if (acc == k_) st_.full_cycles++;
     if (acc == k_) {  // all accepted: bonus token from the last position
+        if (k_ > 0) cst = step_call(cst, toks[(size_t) k_]);
+        ban_now_ = ban_if(cst);
         if (vk > 0) {
             if (!sampled) {
-                next = vidp[(size_t) k_];
+                next = unban_top(vidp[(size_t) k_], -1);
             } else {
                 Dist pb;
                 dist_topk(lgp + (size_t) k_ * vk, vidp + (size_t) k_ * vk, vk, pb);
@@ -615,6 +625,7 @@ void SpecDecoder::accept(const std::vector<int32_t> & toks, const std::vector<Di
             next = sample(lgp + (size_t) k_ * nv, -1);
         }
     }
+    ban_now_ = false;  // (drafts propose freely)
     emit(out, next);
     st_.accepted += acc;
     st_.emitted += acc + 1;
@@ -936,7 +947,9 @@ bool SpecDecoder::step_plain(std::vector<int32_t> & out, std::string & err) {
         if (!m_.eval(&last_, 1, model::EvalOpts{}, logits_.data(), nullptr, err)) return false;
         st_.t_verify += now() - t0;
         apply_penalties(logits_.data(), sp_, counts_);
+        ban_now_ = ban_if(call_state_);
         last_ = sample(logits_.data(), -1);
+        ban_now_ = false;
         emit(out, last_);
         st_.emitted++;
         return true;
@@ -1135,6 +1148,7 @@ bool SpecDecoder::step_shadow(std::vector<int32_t> & out, std::string & err) {
     int     acc  = 0;
     int32_t next = -1;
     cur          = counts_;
+    bool cst     = call_state_;  // open tool call after toks[0] (emitted); walked along the drafts
     auto row_dist = [&](int i, Dist & p) {
         if (vk > 0) {
             dist_topk(lg.data() + (size_t) i * vk, vid.data() + (size_t) i * vk, vk, p);
@@ -1146,14 +1160,16 @@ bool SpecDecoder::step_shadow(std::vector<int32_t> & out, std::string & err) {
     };
     for (; acc < kk; acc++) {
         const int32_t d = toks[(size_t) acc + 1];
+        if (acc > 0) cst = step_call(cst, toks[(size_t) acc]);
+        ban_now_ = ban_if(cst);  // this row's history: the tokens before d
         if (!sampled) {
             int32_t top;
             if (vk > 0) {
-                top = vid[(size_t) acc];
+                top = unban_top(vid[(size_t) acc], d);
             } else {
                 float * L = lg.data() + (size_t) acc * nv;
                 apply_penalties(L, sp_, cur);
-                top = (int32_t) (std::max_element(L, L + nv) - L);
+                top = argmax_row(L, nv);
             }
             cur[d]++;
             if (top == d) {
@@ -1184,6 +1200,8 @@ bool SpecDecoder::step_shadow(std::vector<int32_t> & out, std::string & err) {
     if (acc < kk && acc + 1 <= kMaxK) fail_[acc + 1] += 1;
 
     t0 = now();
+    if (acc == kk && kk > 0) cst = step_call(cst, toks[(size_t) kk]);
+    ban_now_ = ban_if(cst);  // the last row (pre-drafted test or bonus token)
     if (acc == kk) {
         st_.full_cycles++;
         st_.emitted += acc;
@@ -1192,15 +1210,16 @@ bool SpecDecoder::step_shadow(std::vector<int32_t> & out, std::string & err) {
             // the last row tests the first pre-drafted token next cycle; no bonus token
             if (!sampled) {
                 if (vk > 0) {
-                    pend_top_ = vid[(size_t) kk];
+                    pend_top_ = unban_top(vid[(size_t) kk], -1);
                 } else {
                     float * L = lg.data() + (size_t) kk * nv;
                     apply_penalties(L, sp_, cur);
-                    pend_top_ = (int32_t) (std::max_element(L, L + nv) - L);
+                    pend_top_ = argmax_row(L, nv);
                 }
             } else {
                 row_dist(kk, pend_p_);
             }
+            ban_now_ = false;
             pending_ = true;
             st_.t_rollback += now() - t0;
             return true;
@@ -1208,16 +1227,17 @@ bool SpecDecoder::step_shadow(std::vector<int32_t> & out, std::string & err) {
         Dist pb;
         if (!sampled) {
             if (vk > 0) {
-                next = vid[(size_t) kk];
+                next = unban_top(vid[(size_t) kk], -1);
             } else {
                 float * L = lg.data() + (size_t) kk * nv;
                 apply_penalties(L, sp_, cur);
-                next = (int32_t) (std::max_element(L, L + nv) - L);
+                next = argmax_row(L, nv);
             }
         } else {
             row_dist(kk, pb);
             next = draw(pb, rng_);
         }
+        ban_now_ = false;
         d_dirty_ = true;
     } else {
         st_.emitted += acc;

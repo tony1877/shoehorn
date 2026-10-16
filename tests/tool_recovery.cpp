@@ -37,10 +37,69 @@ int main() {
     const auto parsed = nlohmann::ordered_json::parse(previous);
     CHECK(parsed["content"] == "line é😀\nline 2");
     CHECK(parsed["file_path"] == "a.txt");
+    // the XML parser's calls replace the strict grammar's (which splits quoted markup into extra calls)
     common_chat_msg strict;
     strict.tool_calls.push_back({"unchanged", "{}", "id"});
-    e8::cli::lenient_tool_calls(raw, tools, strict, true);
-    CHECK(strict.tool_calls[0].name == "unchanged");
+    e8::cli::lenient_tool_calls(raw, tools, strict, false);
+    CHECK(strict.tool_calls.size() == 1 && strict.tool_calls[0].name == "write");
+
+    // streams `text` byte by byte: the arguments only grow, and the final parse gives `want` calls
+    auto stream_check = [&](const std::string & text, const std::vector<common_chat_tool> & ts, size_t want) {
+        std::vector<std::string> prev(want);
+        for (size_t n = 1; n <= text.size(); ++n) {
+            common_chat_msg m;
+            e8::cli::lenient_tool_calls(text.substr(0, n), ts, m, n < text.size());
+            CHECK(m.tool_calls.size() <= want);
+            for (size_t i = 0; i < m.tool_calls.size(); ++i) {
+                CHECK(m.tool_calls[i].arguments.rfind(prev[i], 0) == 0);
+                prev[i] = m.tool_calls[i].arguments;
+            }
+        }
+        common_chat_msg m;
+        e8::cli::lenient_tool_calls(text, ts, m, false);
+        CHECK(m.tool_calls.size() == want);
+        return m;
+    };
+    // a file that documents the format: its quoted markup stays text, and is not a second call
+    const std::string doc = "# Format\n\n```text\n<tool_call>\n<function=write>\n<parameter=file_path>\nx.txt\n</parameter>\n"
+                            "<parameter=content>\nHello\n</parameter>\n</function>\n</tool_call>\n```\n\nEnd `</parameter>` too.";
+    auto m1 = stream_check("<tool_call>\n<function=write>\n<parameter=file_path>\nnotes/doc.md\n</parameter>\n<parameter=content>\n" +
+                           doc + "\n</parameter>\n</function>\n</tool_call>", tools, 1);
+    CHECK(nlohmann::ordered_json::parse(m1.tool_calls[0].arguments)["content"] == doc);
+    CHECK(nlohmann::ordered_json::parse(m1.tool_calls[0].arguments)["file_path"] == "notes/doc.md");
+    // a parameter the tool does not have, quoted in a file
+    const std::string tmpl = "<parameter=name>\nvalue\n</parameter>";
+    auto m2 = stream_check("<tool_call>\n<function=write>\n<parameter=file_path>\nt.txt\n</parameter>\n<parameter=content>\n" +
+                           tmpl + "\n</parameter>\n</function>\n</tool_call>", tools, 1);
+    CHECK(nlohmann::ordered_json::parse(m2.tool_calls[0].arguments)["content"] == tmpl);
+    // two calls in a row
+    auto m3 = stream_check("<tool_call>\n<function=write>\n<parameter=file_path>\na\n</parameter>\n<parameter=content>\n1\n</parameter>\n"
+                           "</function>\n</tool_call>\n<tool_call>\n<function=write>\n<parameter=file_path>\nb\n</parameter>\n"
+                           "<parameter=content>\n2\n</parameter>\n</function>\n</tool_call>", tools, 2);
+    CHECK(nlohmann::ordered_json::parse(m3.tool_calls[1].arguments)["file_path"] == "b");
+    // cut off (end of turn inside the call): never a finished call
+    common_chat_msg m4;
+    e8::cli::lenient_tool_calls("<tool_call>\n<function=write>\n<parameter=file_path>\nc\n</parameter>\n<parameter=content>\nhalf", tools, m4, false);
+    CHECK(m4.tool_calls.empty());
+    // markup mentioned while reasoning is not a call
+    common_chat_msg m5;
+    e8::cli::lenient_tool_calls("<think>\nI will emit <tool_call> next.\n</think>\n<tool_call>\n<function=write>\n<parameter=file_path>\nd\n"
+                                "</parameter>\n<parameter=content>\nok\n</parameter>\n</function>\n</tool_call>", tools, m5, false);
+    CHECK(m5.tool_calls.size() == 1 && nlohmann::ordered_json::parse(m5.tool_calls[0].arguments)["file_path"] == "d");
+    // a file about reasoning tags (no reasoning in the text): its </think> is file text
+    const std::string tags = "Use <think> and </think>:\n```\n<think>\nsteps\n</think>\nanswer\n```";
+    auto m7 = stream_check("<tool_call>\n<function=write>\n<parameter=file_path>\nr.md\n</parameter>\n<parameter=content>\n" + tags +
+                           "\n</parameter>\n</function>\n</tool_call>", tools, 1);
+    CHECK(nlohmann::ordered_json::parse(m7.tool_calls[0].arguments)["content"] == tags);
+    // parameters in any order, typed by the schema
+    common_chat_tool sre;
+    sre.name = "str_replace_editor";
+    sre.parameters = R"({"type":"object","properties":{"command":{"type":"string"},"path":{"type":"string"},"insert_line":{"type":"integer"},"new_str":{"type":"string"}}})";
+    auto m6 = stream_check("<tool_call>\n<function=str_replace_editor>\n<parameter=new_str>\nx = 1\n</parameter>\n<parameter=insert_line>\n3\n"
+                           "</parameter>\n<parameter=command>\ninsert\n</parameter>\n<parameter=path>\nf.py\n</parameter>\n</function>\n</tool_call>",
+                           { sre }, 1);
+    const auto a6 = nlohmann::ordered_json::parse(m6.tool_calls[0].arguments);
+    CHECK(a6["insert_line"] == 3 && a6["path"] == "f.py" && a6["new_str"] == "x = 1");
     common_chat_msg answer;
     answer.content = std::string(20000, 'x');
     answer.reasoning_content = "reasoning is separately budgeted";

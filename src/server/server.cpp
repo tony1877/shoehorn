@@ -1506,6 +1506,23 @@ loaded:
     };
     const int32_t tc_open = tool_temp > 0 && tool_temp < base_temp ? special_id("<tool_call>") : -1;
     const int32_t tc_close = tc_open >= 0 ? special_id("</tool_call>") : -1;
+    // Inside an open tool call the end-of-turn tokens are banned (SpecDecoder::set_call_ban): there the model only
+    // samples one when the file it writes mentions the marker (a ChatML note, a template), and ending the turn would
+    // cut the call off mid-argument. Each one's probability goes to the first token of the same marker written as
+    // plain text ("<|im_end|>" as characters), so the model goes on writing what it meant.
+    const int32_t call_open = special_id("<tool_call>"), call_close = special_id("</tool_call>");
+    std::vector<int32_t> call_ban, call_repl;
+    if (call_open >= 0 && call_close >= 0) {
+        const std::vector<int32_t> lt = common_tokenize(S.vocab, "<", false, false);
+        for (int32_t t = 0, n = llama_vocab_n_tokens(S.vocab); t < n; t++) {
+            if (!llama_vocab_is_eog(S.vocab, t)) continue;
+            const std::vector<int32_t> plain = common_tokenize(S.vocab, common_token_to_piece(S.vocab, t, true), false, false);
+            const int32_t r = !plain.empty() ? plain[0] : !lt.empty() ? lt[0] : -1;
+            if (r < 0 || r == t) continue;
+            call_ban.push_back(t);
+            call_repl.push_back(r);
+        }
+    }
     auto consume = [&]() {
         for (; used < out.size() && !done; used++) {
             const int32_t t = out[used];
@@ -1573,11 +1590,20 @@ loaded:
         } else if (on_delta) {
             try {
                 common_chat_msg cur;
-                if (recovery_stream) {
+                bool            strict_ok = !recovery_stream;
+                if (strict_ok) {
+                    try {
+                        cur = common_chat_parse(text, !done, pp);
+                    } catch (const std::exception &) {
+                        // the grammar cannot read this text (yet): keep the prose so far, the XML parser below
+                        // still reads the tool calls
+                        if (text.find("<tool_call>") == std::string::npos) throw;
+                        strict_ok = false;
+                    }
+                }
+                if (!strict_ok) {
                     cur.reasoning_content = prev.reasoning_content;
                     cur.content = prev.content;
-                } else {
-                    cur = common_chat_parse(text, !done, pp);
                 }
                 const bool strict_empty = cur.tool_calls.empty();
                 lenient_tool_calls(text, req_tools, cur, !done);
@@ -1633,6 +1659,7 @@ loaded:
             auto d = std::make_unique<runtime::SpecDecoder>(*S.q35, S.spec_k, sp, S.spec_auto);
             d->set_mtp(S.mtp);
             d->set_echo(S.echo);
+            if (!call_ban.empty()) d->set_call_ban(call_open, call_close, call_ban, call_repl);
             return d;
         };
         int  next_loop_check = 512;
@@ -1862,6 +1889,13 @@ loaded:
         std::mt19937_64 rng(sp.seed ? sp.seed : S.rng());
         auto            next = [&]() {
             runtime::apply_penalties(last.data(), sp, counts);
+            if (!call_ban.empty() && counts[call_open] > counts[call_close])  // inside an open tool call
+                for (size_t i = 0; i < call_ban.size(); i++) {  // its probability to the plain-text token
+                    float & a = last[(size_t) call_ban[i]], & b = last[(size_t) call_repl[i]];
+                    const float m = std::max(a, b);
+                    b = m + std::log(std::exp(a - m) + std::exp(b - m));
+                    a = -INFINITY;
+                }
             out.push_back(sample(last.data(), m.n_vocab(), sp, rng));
             counts[out.back()]++;
         };
@@ -1886,9 +1920,27 @@ loaded:
     SL.state_tokens.insert(SL.state_tokens.end(), out.begin(), out.end() - 1);
     R.t_gen = std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
     if (chat) {  // final parse (also needed by the timing log below)
-        R.msg = common_chat_parse(text, false, pp);
+        try {
+            R.msg = common_chat_parse(text, false, pp);
+        } catch (const std::exception & e) {
+            if (text.find("<tool_call>") == std::string::npos) throw;
+            // the grammar rejects the text; the XML parser reads the calls, the prose is what precedes them
+            fprintf(stderr, "strict parse failed (%s); tool calls from the XML parser\n", e.what());
+            R.msg = common_chat_msg();
+            R.msg.role    = "assistant";
+            R.msg.content = text.substr(0, text.find("<tool_call>"));
+        }
         lenient_tool_calls(text, req_tools, R.msg);
         if (bound_answer(R.msg, static_cast<size_t>(max_content_chars))) R.finish = "length";
+        // generation that stopped inside a tool call (end of turn or a stop string; max_tokens says "length"):
+        // its last call is cut off and must never be reported as a finished call for a client to execute
+        const size_t lo = text.rfind("<tool_call>"), lc = text.rfind("</tool_call>");
+        if (lo != std::string::npos && (lc == std::string::npos || lc < lo) && R.finish != "length" &&
+            !R.msg.tool_calls.empty()) {
+            fprintf(stderr, "generation stopped inside tool call '%s': dropped, not reported as a finished call\n",
+                    R.msg.tool_calls.back().name.c_str());
+            R.msg.tool_calls.pop_back();
+        }
     }
 
     S.last_used = std::chrono::steady_clock::now();
