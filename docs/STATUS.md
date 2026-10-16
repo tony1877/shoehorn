@@ -31,9 +31,7 @@ One page across the project; details live in the linked documents.
 - Remote encoder (`encode-server` + `serve --encoder-url`): works from the laptop's RTX 4070 (a 1657x1085 screenshot in
   2.7 s instead of 22 s). Not wired into this PC's live setup: the laptop would need to start `encode-server` at logon,
   and the live server's start script would need `--encoder-url`.
-- **The published v0.2.0 Windows zip runs only on RTX 50xx** (it was built for sm_120a alone) and needs an AVX-512
-  CPU. `scripts\build.ps1 -Release` now builds for sm_86/89/120a and any AVX2 CPU, as the Linux release does;
-  `package-windows.ps1` packages from it. The release asset has not been replaced yet.
+- v0.2.0 Windows zip replaced on 2026-10-16: the first one ran only on RTX 50xx with an AVX-512 CPU. The new one (`scripts\build.ps1 -Release`, packaged by `package-windows.ps1`) is built for sm_86/89/120a and any AVX2 CPU, as the Linux release; SHA256SUMS and the release text are updated.
 - `tests/vision_smoke.py` runs by hand against a live server; not in CI (needs a GPU and the model).
 - Flash-Next (`qwen4exp`) takes no images.
 
