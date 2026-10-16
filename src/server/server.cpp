@@ -225,6 +225,8 @@ struct Server {
     // first, and to the local encoder when it fails (then not again for kRemoteEncoderBackoffS)
     std::string                           encoder_url;
     std::chrono::steady_clock::time_point encoder_down_until{};
+    std::string                           encoder_error;      // the last failure (dashboard)
+    double                                encoder_fail_t = 0, encoder_ok_t = 0;  // unix seconds of the last failure / success
     // dashboard (/dashboard, /stats): the last requests' timing lines and what is generating now
     std::mutex                       stats_mu;
     std::deque<json>                 recent;
@@ -524,6 +526,8 @@ struct Result {
                                     // side sequence): lcp - reused tokens were cached but read again (a real cache miss)
     int             n_tool = 0;     // tokens generated inside <tool_call> blocks (at --tool-temp)  // side sequence: 1 = parked the conversation, 2 = resumed the parked one
     double          t_prompt = 0, t_gen = 0;
+    int             n_images = 0;              // images in the prompt (encoded now or reused from a cached prefix)
+    json            images = json::array();    // the ones encoded for this request: size, tokens, time, where
 };
 
 // Runs one request: chat (body has "messages") or completion ("prompt"). `on_delta` (streaming) receives OpenAI delta
@@ -1109,6 +1113,7 @@ loaded:
             imgs.v.push_back(sp);
         }
         mtmd_input_chunks_free(ch);
+        R.n_images = (int) imgs.v.size();
     }
     n_head = prompt.size();
     if (!tail.empty()) {
@@ -1328,14 +1333,24 @@ loaded:
         mtmd_context *     mc = S.entries[(size_t) idx].mtmd;
         const auto         te = std::chrono::steady_clock::now();
         std::vector<float> remote;
+        bool               fallback = false;  // the remote encoder failed and this image was encoded here
         const char *       where = S.entries[(size_t) idx].mtmd_gpu ? "GPU" : "CPU";
         if (!S.encoder_url.empty() && te >= S.encoder_down_until) {
             std::string why;
+            const double now_unix = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
             if (remote_encode(S, sp, (int) S.q35->hp().n_embd, remote, why)) {
                 where = "remote encoder";
+                std::lock_guard<std::mutex> lk(S.stats_mu);
+                S.encoder_ok_t = now_unix;
             } else {
                 remote.clear();
-                S.encoder_down_until = te + std::chrono::seconds(kRemoteEncoderBackoffS);
+                fallback = true;
+                {
+                    std::lock_guard<std::mutex> lk(S.stats_mu);
+                    S.encoder_error      = why;
+                    S.encoder_fail_t     = now_unix;
+                    S.encoder_down_until = te + std::chrono::seconds(kRemoteEncoderBackoffS);
+                }
                 fprintf(stderr, "remote encoder %s: %s; encoding here (remote not tried again for %d s)\n",
                         S.encoder_url.c_str(), why.c_str(), kRemoteEncoderBackoffS);
             }
@@ -1346,6 +1361,10 @@ loaded:
         }
         const double              t_enc = std::chrono::duration<double>(std::chrono::steady_clock::now() - te).count();
         const float *             embd = remote.empty() ? mtmd_get_output_embd(mc) : remote.data();
+        R.images.push_back({ { "w", sp.bm ? mtmd_bitmap_get_nx(sp.bm) : 0 }, { "h", sp.bm ? mtmd_bitmap_get_ny(sp.bm) : 0 },
+                             { "tokens", sp.n }, { "encode_s", t_enc },
+                             { "where", remote.empty() ? (S.entries[(size_t) idx].mtmd_gpu ? "gpu" : "cpu") : "remote" },
+                             { "fallback", fallback } });
         const mtmd_image_tokens * it   = mtmd_input_chunk_get_tokens_image(sp.chunk);
         const int64_t             ne   = S.q35->hp().n_embd;
         const int                 ub   = S.q35->max_batch(), p0 = m.n_past() - S.q35->rope_shift();
@@ -1886,6 +1905,10 @@ loaded:
                                          : std::chrono::duration<double>(t0_sys - S.last_end).count() },
                       { "temp", sp.temp }, { "spec", R.stats } };
         if (R.n_tool) line["tool_tokens"] = R.n_tool;
+        if (R.n_images) {  // images: how many the prompt held, and the ones encoded for it
+            line["images_in_prompt"] = R.n_images;
+            line["images"]           = R.images;
+        }
         if (R.side_swap) line["side"] = R.side_swap == 1 ? "parked" : "resumed";
         if (chat) {  // shape of the output (sizes and a repetition score, no text)
             auto rep = [](const std::string & s) {  // share of repeated lines (a reasoning loop shows as high)
@@ -2503,6 +2526,23 @@ int serve(const std::vector<std::string> & args_in) {
         out["models"] = models;
         out["loaded"] = S->model ? S->entries[(size_t) S->active].alias : "";
         out["config"] = S->config;
+        {  // vision encoder (the dashboard's images panel)
+            json enc = { { "vision", false }, { "local", "" } };
+            for (auto & e : S->entries) {
+                if (!e.mmproj.empty()) enc["vision"] = true;
+                if (e.mtmd) enc["local"] = e.mtmd_gpu ? "gpu" : "cpu";
+            }
+            if (!S->encoder_url.empty()) {
+                std::lock_guard<std::mutex> lk(S->stats_mu);
+                enc["url"]     = S->encoder_url;
+                const auto now = std::chrono::steady_clock::now();
+                enc["skip_s"]  = now < S->encoder_down_until ? std::chrono::duration<double>(S->encoder_down_until - now).count() : 0.0;
+                enc["error"]   = S->encoder_error;
+                enc["fail_t"]  = S->encoder_fail_t;
+                enc["ok_t"]    = S->encoder_ok_t;
+            }
+            out["encoder"] = enc;
+        }
         {  // where the model lives (the dashboard's memory view)
             json   mem = json::object();
             size_t fr = 0, tot = 0;

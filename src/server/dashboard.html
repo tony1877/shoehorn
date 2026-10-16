@@ -154,6 +154,12 @@ footer { color: var(--muted); font: 11.5px var(--f-mono); display: flex; justify
     <div class="mcell" id="reads"></div>
   </section>
 
+  <section class="panel mem" id="imgPanel" hidden>
+    <div class="mcell" id="imgSum"></div>
+    <div class="mcell" id="imgEnc"></div>
+    <div class="mcell" id="imgLast"></div>
+  </section>
+
   <section class="panel bench">
     <div class="mcell">
       <div class="mhead"><b>Speed check</b><span class="mono" id="benchWhen"></span></div>
@@ -394,6 +400,39 @@ function renderHw() {
     <div class="note">Counted from the weights each pass of the model reads; the context cache and activations add more.</div>`;
   if ($("reads").dataset.h !== r) { $("reads").innerHTML = r; $("reads").dataset.h = r; }
 }
+// ---- images (docs/VISION.md): what the vision encoder did over the last 24 hours, from the requests' timing lines,
+// and where it runs now (the remote encoder of --encoder-url, else this PC's GPU or CPU)
+let enc = {};
+const WHERE = { remote: "remote encoder", gpu: "this PC's GPU", cpu: "this PC's CPU" };
+function renderImages() {
+  const R = ALL.filter(r => r.images_in_prompt && Date.now() / 1e3 - r.t < 86400);
+  const I = R.flatMap(r => (r.images || []).map(i => Object.assign({ t: r.t }, i)));
+  $("imgPanel").hidden = !enc.vision && !R.length;
+  if ($("imgPanel").hidden) return;
+  const line = (l, v) => `<div><span>${l}</span><span class="mono">${v}</span></div>`;
+  const inPrompt = sum(R, r => r.images_in_prompt), toks = sum(I, i => i.tokens), secs = sum(I, i => i.encode_s);
+  const a = `<div class="mhead"><b>Images</b><span class="mono">last 24 hours</span></div>
+    <div class="mval">${fmt(I.length)}<small>${I.length === 1 ? "image" : "images"} encoded</small></div>
+    <div class="legend">${line("Embedding tokens", k(toks))}${line("Encode time, average", I.length ? dur(secs / I.length) : "-")}
+      ${line("Reused from the cache (not encoded again)", fmt(Math.max(0, inPrompt - I.length)))}</div>`;
+  const by = w => I.filter(i => i.where === w).length, fb = I.filter(i => i.fallback).length;
+  let st, cls = "";
+  if (!enc.url) st = `Here, on ${enc.local === "gpu" ? "the GPU" : enc.local === "cpu" ? "the CPU" : "the GPU or CPU (loads with the first image)"}`;
+  else if (enc.skip_s > 0) { st = `Not used for ${fmt(enc.skip_s)} s more: ${enc.error || "it failed"}`; cls = "warn"; }
+  else if (enc.fail_t && enc.fail_t > (enc.ok_t || 0)) { st = `Last try failed (${enc.error || "?"}); tried again with the next image`; cls = "warn"; }
+  else st = enc.ok_t ? `In use, last image ${dur(Date.now() / 1e3 - enc.ok_t)} ago` : "Set, no image sent yet";
+  const b = `<div class="mhead"><b>Encoder</b><span class="mono">${enc.url ? enc.url.replace(/^https?:\/\//, "") : "local"}</span></div>
+    <div class="note" style="color:var(--${cls === "warn" ? "warn" : "ink"})">${st}</div>
+    <div class="legend">${enc.url ? line("Encoded remotely", fmt(by("remote"))) : ""}${line("Encoded on this PC's GPU", fmt(by("gpu")))}${line("Encoded on this PC's CPU", fmt(by("cpu")))}
+      ${enc.url ? line("Remote failed, encoded here instead", fmt(fb)) : ""}</div>`;
+  const L = I[I.length - 1];
+  const c = `<div class="mhead"><b>Last image</b><span class="mono">${L ? clock(L.t).slice(0, 5) : ""}</span></div>` + (L
+    ? `<div class="mval">${dur(L.encode_s)}<small>to encode</small></div>
+      <div class="legend">${line("Size", `${fmt(L.w)} x ${fmt(L.h)} px`)}${line("Embedding tokens", fmt(L.tokens))}${line("Encoded on", WHERE[L.where] || L.where)}
+        ${L.fallback ? line("Remote encoder", "failed, encoded here") : ""}</div>`
+    : `<div class="note">No image in the last 24 hours.</div>`);
+  for (const [id, h] of [["imgSum", a], ["imgEnc", b], ["imgLast", c]]) if ($(id).dataset.h !== h) { $(id).innerHTML = h; $(id).dataset.h = h; }
+}
 // ---- speed check: the last run against the previous one on the same model. Measured run to run on the same build:
 // decode up to about 10% apart after a fresh start (code 47.7 vs 52.7 tok/s), prefill within 1.5%. Smaller changes are grey.
 let benchRunning = false;
@@ -452,6 +491,11 @@ function renderList() {
     if (r.side === "parked") tg.push(`<span class="tg good">side slot</span>`); else if (r.isSide) tg.push(`<span class="tg">side</span>`);
     if (r.side === "resumed") tg.push(`<span class="tg good">resumed</span>`);
     if (r.tool_calls) tg.push(`<span class="tg">${plural(r.tool_calls, "tool call")}</span>`);
+    if (r.images_in_prompt) {
+      const I = r.images || [], s = sum(I, i => i.encode_s);
+      tg.push(`<span class="tg" title="${I.length} encoded for this request${I.length ? " in " + dur(s) : ""}, ${r.images_in_prompt - I.length} reused">${plural(r.images_in_prompt, "image")}</span>`);
+      if (I.some(i => i.fallback)) tg.push(`<span class="tg warn">encoder fallback</span>`);
+    }
     if (r.loop) tg.push(`<span class="tg warn">repetition</span>`);
     if (r.finish === "length") tg.push(`<span class="tg warn">cut off</span>`);
     html += `<div class="r${fresh && renderList.ready ? " enter" : ""}"><span class="mono t">${clock(r.t).slice(0, 5)}</span><span class="mono">${k(r.prompt_tokens)}</span><span class="mono">${fmt(pct(r.reused_tokens, r.prompt_tokens), 0)}%</span><span class="mono">${readTime(r)}</span><span class="mono rd">${readRate(r)}</span><span class="mono">${fmt(r.gen_tokens)}</span><span class="mono spd">${r.gen_tokens >= 16 ? fmt(r.gen_tokens / r.decode_s, 0) + " tok/s" : "-"}</span><span class="tagz">${tg.join("")}</span></div>`;
@@ -469,7 +513,7 @@ async function poll() {
   catch (e) { live = { down: true }; $("status").className = "status off"; $("statusText").textContent = "offline"; return; }
   for (const r of d.recent || []) if (r.t > newest) { ALL.push(r); newest = r.t; }
   const nowP = performance.now(), nowS = Date.now() / 1000, was = live;
-  live = d.live || {}; cfg = d.config || {}; mem = d.mem || {}; loaded = d.loaded || ""; hw = d.hw || {};
+  live = d.live || {}; cfg = d.config || {}; mem = d.mem || {}; loaded = d.loaded || ""; hw = d.hw || {}; enc = d.encoder || {};
   if (hw.vram_read != null) { reads.push({ t: nowS0(), v: hw.vram_read, r: hw.ram_read }); while (reads.length > 2 && nowS0() - reads[1].t >= 2) reads.shift(); }
   if (live.busy && live.reading) { readHist.push({ t: nowS0(), n: live.read || 0 }); while (readHist.length > 2 && nowS0() - readHist[1].t >= 2) readHist.shift(); }
   else readHist = [];
@@ -491,7 +535,7 @@ async function poll() {
   samples.push({ t: nowS, v: writing && rate != null ? rate : inSession ? 0 : null });
   samples = samples.filter(p => nowS - p.t <= 125);
   renderHeader(d); renderNow(); renderMem(); renderHw();
-  if (!poll.n || poll.n % 4 === 0 || (was.busy !== live.busy)) renderList();
+  if (!poll.n || poll.n % 4 === 0 || (was.busy !== live.busy)) { renderList(); renderImages(); }
   poll.n = (poll.n || 0) + 1;
 }
 function frame() {

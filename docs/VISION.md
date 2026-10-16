@@ -53,6 +53,15 @@ On a 16 GB card the encoder runs on the CPU, which is slow for big images (a 165
 When the remote encoder fails (off, unreachable, refused), the image is encoded locally as before and the remote is not
 tried again for 60 s. The log's `image:` line says "on the remote encoder" when it encoded there.
 
+## Dashboard
+
+The dashboard's Images panel covers the last 24 hours: images encoded, embedding tokens, average encode time, and
+images reused from the cache instead of encoded again. It shows where the encoder runs (the remote encoder's state:
+in use, its last error and how long it is still skipped, or this PC's GPU or CPU), how many images each place encoded
+and how many fell back from the remote one, and the last image (size, tokens, time, where). Requests with images get an
+"N images" tag, and "encoder fallback" when the remote encoder failed. The numbers come from each request's timing
+line (`images_in_prompt`, and `images`: w, h, tokens, encode_s, where, fallback) and the `encoder` block of `/stats`.
+
 ## How it works
 
 - **Encoder.** llama.cpp's mtmd library decodes, resizes and encodes the image. On the GPU when the card has the
