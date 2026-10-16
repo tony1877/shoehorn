@@ -2,6 +2,7 @@
 #include "chat.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <set>
@@ -9,6 +10,74 @@
 
 namespace e8::cli {
 using json = nlohmann::ordered_json;
+
+// A non-string tool argument (a list, an object, a number) that is not valid JSON as written, with the slips models
+// make: a ```json fence, trailing commas, single-quoted strings, unquoted keys, Python's True / False / None. Returns
+// the repaired text (callers parse it; when it still fails, the value goes on as a string and the client's schema
+// check tells the model).
+inline std::string repair_json(std::string v) {
+    auto trim = [](std::string & x) {
+        while (!x.empty() && std::isspace(static_cast<unsigned char>(x.back()))) x.pop_back();
+        size_t a = 0;
+        while (a < x.size() && std::isspace(static_cast<unsigned char>(x[a]))) a++;
+        x.erase(0, a);
+    };
+    trim(v);
+    if (v.rfind("```", 0) == 0) {  // ```json ... ```
+        const size_t nl = v.find('\n');
+        v = nl == std::string::npos ? std::string() : v.substr(nl + 1);
+        if (v.size() >= 3 && v.compare(v.size() - 3, 3, "```") == 0) v.resize(v.size() - 3);
+        trim(v);
+    }
+    std::string out;
+    out.reserve(v.size() + 16);
+    auto ident = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-'; };
+    for (size_t i = 0; i < v.size();) {
+        const char c = v[i];
+        if (c == '"' || c == '\'') {  // a string: copied, single quotes turned into double
+            const char q = c;
+            out += '"';
+            for (i++; i < v.size() && v[i] != q; i++) {
+                if (v[i] == '\\' && i + 1 < v.size()) {
+                    if (q == '\'' && v[i + 1] == '\'') out += '\'';  // \' needs no escape in a JSON string
+                    else (out += v[i]) += v[i + 1];
+                    i++;
+                    continue;
+                }
+                if (q == '\'' && v[i] == '"') out += "\\\"";
+                else out += v[i];
+            }
+            out += '"';
+            i++;
+            continue;
+        }
+        if (c == ',') {  // trailing comma: dropped when only space comes before } or ]
+            size_t j = i + 1;
+            while (j < v.size() && std::isspace(static_cast<unsigned char>(v[j]))) j++;
+            if (j < v.size() && (v[j] == '}' || v[j] == ']')) {
+                i++;
+                continue;
+            }
+        }
+        if (ident(c) && !std::isdigit(static_cast<unsigned char>(c)) && c != '-') {  // a bare word
+            size_t j = i;
+            while (j < v.size() && ident(v[j])) j++;
+            const std::string w = v.substr(i, j - i);
+            size_t k = j;
+            while (k < v.size() && std::isspace(static_cast<unsigned char>(v[k]))) k++;
+            if (k < v.size() && v[k] == ':') out += '"' + w + '"';  // an unquoted key
+            else if (w == "True") out += "true";
+            else if (w == "False") out += "false";
+            else if (w == "None") out += "null";
+            else out += w;
+            i = j;
+            continue;
+        }
+        out += c;
+        i++;
+    }
+    return out;
+}
 
 // Tool calls in the Qwen XML format: <tool_call> <function=NAME> <parameter=P> VALUE </parameter> ... </function>
 // </tool_call>. The format has no escaping, so a value can itself contain that markup: a file that documents tool
@@ -122,7 +191,11 @@ inline std::vector<common_chat_tool_call> xml_tool_calls(const std::string & tex
             try {
                 args[pn] = json::parse(v);
             } catch (...) {
-                args[pn] = v;
+                try {
+                    args[pn] = json::parse(repair_json(v));
+                } catch (...) {
+                    args[pn] = v;
+                }
             }
             return true;
         };

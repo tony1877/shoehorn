@@ -126,7 +126,14 @@ void SpecDecoder::dist_topk(const float * v, const int32_t * id, int k, std::vec
 }
 
 void SpecDecoder::finish_dist(std::vector<std::pair<float, int32_t>> & p) {
-    if (ban_now_) {  // inside an open tool call (set_call_ban): a banned token's probability goes to its replacement
+    if (floor_now_) {  // answer floor (set_answer_floor): the banned tokens get no probability at all
+        std::vector<std::pair<float, int32_t>> keep;
+        keep.reserve(p.size());
+        for (auto & e : p) {
+            if (!banned(e.second)) keep.push_back(e);
+        }
+        if (!keep.empty()) p.swap(keep);
+    } else if (ban_now_) {  // inside an open tool call (set_call_ban): a banned token's probability goes to its replacement
         for (size_t i = 0; i < p.size(); i++) {
             if (!banned(p[i].second)) continue;
             const int32_t r = unban(p[i].second);
@@ -215,7 +222,7 @@ bool SpecDecoder::prefill(const std::vector<int32_t> & prompt, std::vector<int32
         if (!m_.eval(prompt.data() + i, n, o, final ? logits_.data() : nullptr, nullptr, err)) return false;
     }
     set_context(prompt);
-    ban_now_ = ban_if(call_state_);
+    set_ban_row(call_state_, 0);
     last_ = sample(logits_.data(), -1);
     emit(out, last_);
     st_.emitted++;
@@ -227,7 +234,7 @@ bool SpecDecoder::prefill(const std::vector<int32_t> & prompt, std::vector<int32
 void SpecDecoder::begin(const float * last_logits, std::vector<int32_t> & out) {
     logits_.assign(last_logits, last_logits + m_.hp().n_vocab);
     apply_penalties(logits_.data(), sp_, counts_);
-    ban_now_ = ban_if(call_state_);
+    set_ban_row(call_state_, 0);
     last_ = sample(logits_.data(), -1);
     emit(out, last_);
     st_.emitted++;
@@ -527,7 +534,7 @@ void SpecDecoder::accept(const std::vector<int32_t> & toks, const std::vector<Di
     for (; acc < k_; acc++) {
         const int32_t d = toks[(size_t) acc + 1];
         if (acc > 0) cst = step_call(cst, toks[(size_t) acc]);
-        ban_now_ = ban_if(cst);  // this row's history: the tokens before d
+        set_ban_row(cst, acc);  // this row's history: the tokens before d
         if (vk > 0) {
             cur[d]++;
             if (!sampled) {  // top-1 only: accept iff it is the draft, else it is the next token
@@ -611,7 +618,7 @@ void SpecDecoder::accept(const std::vector<int32_t> & toks, const std::vector<Di
     if (acc == k_) st_.full_cycles++;
     if (acc == k_) {  // all accepted: bonus token from the last position
         if (k_ > 0) cst = step_call(cst, toks[(size_t) k_]);
-        ban_now_ = ban_if(cst);
+        set_ban_row(cst, k_);
         if (vk > 0) {
             if (!sampled) {
                 next = unban_top(vidp[(size_t) k_], -1);
@@ -625,7 +632,7 @@ void SpecDecoder::accept(const std::vector<int32_t> & toks, const std::vector<Di
             next = sample(lgp + (size_t) k_ * nv, -1);
         }
     }
-    ban_now_ = false;  // (drafts propose freely)
+    ban_now_ = floor_now_ = false;  // (drafts propose freely)
     emit(out, next);
     st_.accepted += acc;
     st_.emitted += acc + 1;
@@ -947,9 +954,9 @@ bool SpecDecoder::step_plain(std::vector<int32_t> & out, std::string & err) {
         if (!m_.eval(&last_, 1, model::EvalOpts{}, logits_.data(), nullptr, err)) return false;
         st_.t_verify += now() - t0;
         apply_penalties(logits_.data(), sp_, counts_);
-        ban_now_ = ban_if(call_state_);
+        set_ban_row(call_state_, 0);
         last_ = sample(logits_.data(), -1);
-        ban_now_ = false;
+        ban_now_ = floor_now_ = false;
         emit(out, last_);
         st_.emitted++;
         return true;
@@ -1161,7 +1168,7 @@ bool SpecDecoder::step_shadow(std::vector<int32_t> & out, std::string & err) {
     for (; acc < kk; acc++) {
         const int32_t d = toks[(size_t) acc + 1];
         if (acc > 0) cst = step_call(cst, toks[(size_t) acc]);
-        ban_now_ = ban_if(cst);  // this row's history: the tokens before d
+        set_ban_row(cst, acc);  // this row's history: the tokens before d
         if (!sampled) {
             int32_t top;
             if (vk > 0) {
@@ -1201,7 +1208,7 @@ bool SpecDecoder::step_shadow(std::vector<int32_t> & out, std::string & err) {
 
     t0 = now();
     if (acc == kk && kk > 0) cst = step_call(cst, toks[(size_t) kk]);
-    ban_now_ = ban_if(cst);  // the last row (pre-drafted test or bonus token)
+    set_ban_row(cst, kk);  // the last row (pre-drafted test or bonus token)
     if (acc == kk) {
         st_.full_cycles++;
         st_.emitted += acc;
@@ -1219,7 +1226,7 @@ bool SpecDecoder::step_shadow(std::vector<int32_t> & out, std::string & err) {
             } else {
                 row_dist(kk, pend_p_);
             }
-            ban_now_ = false;
+            ban_now_ = floor_now_ = false;
             pending_ = true;
             st_.t_rollback += now() - t0;
             return true;
@@ -1237,7 +1244,7 @@ bool SpecDecoder::step_shadow(std::vector<int32_t> & out, std::string & err) {
             row_dist(kk, pb);
             next = draw(pb, rng_);
         }
-        ban_now_ = false;
+        ban_now_ = floor_now_ = false;
         d_dirty_ = true;
     } else {
         st_.emitted += acc;

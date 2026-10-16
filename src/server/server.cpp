@@ -858,6 +858,8 @@ bool remote_encode(const Server & S, const ImgSpan & sp, int n_embd, std::vector
     return true;
 }
 
+constexpr int kThinkGrace = 512;  // tokens past the reasoning budget allowed to finish the current sentence
+
 bool run_request(Server & S, Turn & turn, const json & body, Result & R, const std::function<bool(const json &)> & on_delta,
                  const std::function<bool()> & cancelled, std::string & err) {
     int idx = 0;  // the entry this request names (the main model when it names none of ours)
@@ -1005,8 +1007,9 @@ loaded:
         in.chat_template_kwargs["enable_thinking"] = "false";
     }
     if (body.contains("reasoning_effort") && body["reasoning_effort"].is_string()) {
-        // "none"/"off" turns thinking off; low / medium / high cap the reasoning at 2K / 8K / 24K tokens (the
-        // Qwen templates ignore an effort kwarg, so the budget is what makes the setting mean something)
+        // "none"/"off" turns thinking off; low / medium / high cap the reasoning at 4K / 16K / 32K tokens (the
+        // Qwen templates ignore an effort kwarg, so the budget is what makes the setting mean something). Agent
+        // steps at medium (dsh's default) ran into 8K mid-plan.
         const std::string re = body["reasoning_effort"].get<std::string>();
         if (re == "none" || re == "off") {
             in.enable_thinking                        = false;
@@ -1015,9 +1018,9 @@ loaded:
             // not passed to the template: Qwen templates add an effort sentence to the system prompt only while
             // thinking is on, so the prompt (and the prefix cache) would change whenever thinking toggles between
             // agent steps. The budget below enforces the effort instead.
-            if (re == "minimal" || re == "low") req_think_budget = 2048;
-            else if (re == "medium") req_think_budget = 8192;
-            else if (re == "high" || re == "xhigh" || re == "max") req_think_budget = 24576;
+            if (re == "minimal" || re == "low") req_think_budget = 4096;
+            else if (re == "medium") req_think_budget = 16384;
+            else if (re == "high" || re == "xhigh" || re == "max") req_think_budget = 32768;
         }
     }
     const common_chat_params cp = common_chat_templates_apply(S.tmpl, in);
@@ -1551,7 +1554,11 @@ loaded:
         }
         if (detect_repetition && text.size() >= next_generation_check) {
             next_generation_check = text.size() + 512;
-            if (generation_repeats(text)) {
+            // inside an open tool call (a file being written) legitimately repetitive content is common (data rows,
+            // fixtures, padding): require 32 KiB of exact repetition there instead of 8 KiB; max_tokens bounds the rest
+            const size_t lo = text.rfind("<tool_call>"), lc = text.rfind("</tool_call>");
+            const bool   in_call = lo != std::string::npos && (lc == std::string::npos || lc < lo);
+            if (generation_repeats(text, in_call ? 32768 : 8192)) {
                 generation_loop = true;
                 done = true;
                 return; // Never publish a completed/truncated tool call.
@@ -1663,6 +1670,7 @@ loaded:
             return d;
         };
         int  next_loop_check = 512;
+        size_t budget_seen   = std::string::npos;  // reasoning over budget: text checked for a sentence end so far
         auto   dec_p    = make_dec();
         double t_server = 0;  // consuming tokens between decode steps (detokenize, stop strings, streaming)
         // the two lanes (sequence slots with a drafter): the model is detached, this request holds neither the model
@@ -1708,7 +1716,19 @@ loaded:
             if (think_open && text.find("</think>") != std::string::npos) think_open = false;
             bool cut = false;
             const int budget = req_think_budget > 0 ? req_think_budget : S.think_budget;
-            if (think_open && budget > 0 && R.n_gen >= budget) cut = true;
+            // over budget: close after the next sentence or line end (a decoding step adds several tokens, so look in
+            // all the text it added, not only at its end), up to kThinkGrace tokens later, not mid-thought
+            if (think_open && budget > 0 && R.n_gen >= budget) {
+                if (budget_seen == std::string::npos) budget_seen = text.size();
+                bool boundary = false;
+                for (size_t i = budget_seen; i + 1 < text.size() && !boundary; i++) {
+                    boundary = text[i] == '\n' ||
+                               ((text[i] == '.' || text[i] == '!' || text[i] == '?' || text[i] == ':') && text[i + 1] == ' ');
+                }
+                if (!text.empty() && text.back() == '\n') boundary = true;
+                budget_seen = text.size() ? text.size() - 1 : 0;
+                cut         = boundary || R.n_gen >= budget + kThinkGrace;
+            }
             if (think_open && !cut && R.n_gen >= next_loop_check) {
                 next_loop_check = R.n_gen + 128;
                 cut             = reasoning_loops(text);
@@ -1742,6 +1762,8 @@ loaded:
                     std::vector<int32_t> ctx_now = prompt;
                     ctx_now.insert(ctx_now.end(), out.begin(), out.end());
                     dec_p = make_dec();
+                    // the model must answer after the closing note: an end of turn right away left an empty reply
+                    dec_p->set_answer_floor(16);
                     dec_p->set_context(ctx_now);
                     dec_p->begin(last.data(), out);
                     consume();
@@ -3283,11 +3305,44 @@ int serve(const std::vector<std::string> & args_in) {
             // runs after this handler returns: capture by value only
             Server * srv = S.get();
             resp.set_chunked_content_provider("text/event-stream", [srv, body, obj, chat](size_t, httplib::DataSink & sink) {
-                Server & SS   = *srv;
-                auto     send = [&](const json & j) {
-                    const std::string s = "data: " + j.dump() + "\n\n";
+                Server &   SS = *srv;
+                std::mutex wm;  // the keep-alive thread writes too
+                auto       last_write = std::chrono::steady_clock::now();
+                auto       send = [&](const json & j) {
+                    const std::string           s = "data: " + j.dump() + "\n\n";
+                    std::lock_guard<std::mutex> lk(wm);
+                    last_write = std::chrono::steady_clock::now();
                     return sink.is_writable() && sink.write(s.data(), s.size());
                 };
+                // Keep-alive: an empty delta after 5 s without output, so a client with an idle timeout does not drop
+                // the request while it waits for its turn, the model loads (~40 s after an idle unload) or a long
+                // prompt is read (minutes at 200K tokens). Generation sends its own (on_delta with an empty object).
+                std::atomic<bool> finished{ false };
+                std::thread       ka([&] {
+                    while (!finished) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                        if (finished) break;
+                        std::lock_guard<std::mutex> lk(wm);
+                        if (std::chrono::steady_clock::now() - last_write < std::chrono::seconds(5)) continue;
+                        json c = { { "index", 0 }, { "finish_reason", nullptr } };
+                        if (chat) c["delta"] = json::object();
+                        else {
+                            c["text"]     = "";
+                            c["logprobs"] = nullptr;
+                        }
+                        const std::string s = "data: " + obj(c, true).dump() + "\n\n";
+                        last_write          = std::chrono::steady_clock::now();
+                        if (!sink.is_writable() || !sink.write(s.data(), s.size())) break;
+                    }
+                });
+                struct KaStop {
+                    std::atomic<bool> & f;
+                    std::thread &       t;
+                    ~KaStop() {
+                        f = true;
+                        if (t.joinable()) t.join();
+                    }
+                } ka_stop{ finished, ka };
                 auto delta = [&](const json & d, const json & finish) {
                     json c = { { "index", 0 } };
                     if (chat) c["delta"] = d;
@@ -3298,8 +3353,8 @@ int serve(const std::vector<std::string> & args_in) {
                     c["finish_reason"] = finish;
                     return obj(c, true);
                 };
-                Turn turn(SS);
                 if (chat) send(delta({ { "role", "assistant" }, { "content", nullptr } }, nullptr));
+                Turn        turn(SS);  // (may wait for another request: the keep-alive covers it)
                 Result      R;
                 std::string e;
                 bool        ok = false;
@@ -3317,6 +3372,8 @@ int serve(const std::vector<std::string> & args_in) {
                     last["timings"] = timings(R);
                     send(last);
                 }
+                finished = true;  // no keep-alive after the end
+                if (ka.joinable()) ka.join();
                 const std::string done = "data: [DONE]\n\n";
                 sink.write(done.data(), done.size());
                 sink.done();

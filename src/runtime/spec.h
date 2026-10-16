@@ -72,6 +72,9 @@ public:
     void set_call_ban(int32_t open, int32_t close, std::vector<int32_t> ban, std::vector<int32_t> repl) {
         call_open_ = open, call_close_ = close, call_ban_ = std::move(ban), call_repl_ = std::move(repl);
     }
+    // The next n emitted tokens may not be the banned (end-of-turn) ones at all: after the server closes the
+    // reasoning itself, the model must answer rather than end the turn with nothing (needs set_call_ban's list).
+    void set_answer_floor(int n) { floor_left_ = n; }
     // sampling temperature from the next cycle on (> 0 only: a greedy decoder stays greedy); the drafts already made
     // keep the distribution they were drawn from, so the verify's acceptance stays exact
     void set_temp(float t) {
@@ -161,6 +164,7 @@ private:
         out.push_back(t);
         counts_[t]++;
         call_state_ = step_call(call_state_, t);
+        if (floor_left_ > 0) floor_left_--;
         hist_.push_back(t);
     }
 
@@ -186,7 +190,14 @@ private:
     int32_t              call_open_ = -1, call_close_ = -1;
     std::vector<int32_t> call_ban_, call_repl_;
     bool                 ban_now_ = false;
+    bool                 floor_now_ = false;   // set_answer_floor: drop (not redirect) the banned tokens at this row
+    int                  floor_left_ = 0;
     bool                 call_state_ = false;  // after the emitted tokens
+    // the ban flags for a row with `ahead` tokens of this cycle before it (beyond the emitted ones)
+    void set_ban_row(bool st, int ahead) {
+        floor_now_ = !call_ban_.empty() && floor_left_ - ahead > 0;
+        ban_now_   = ban_if(st) || floor_now_;
+    }
     bool step_call(bool st, int32_t t) const { return t == call_open_ ? true : t == call_close_ ? false : st; }
     bool ban_if(bool st) const { return st && call_open_ >= 0 && !call_ban_.empty(); }
     bool banned(int32_t t) const {
@@ -198,12 +209,18 @@ private:
         const auto it = std::find(call_ban_.begin(), call_ban_.end(), t);
         return it == call_ban_.end() ? t : call_repl_[(size_t) (it - call_ban_.begin())];
     }
-    int32_t unban_top(int32_t top, int32_t /*d*/) const { return unban(top); }
-    // argmax over a full row; a banned top token stands for its plain-text replacement
+    // a greedy top token that is banned: the plain-text one inside a call; under the answer floor the draft when it is
+    // allowed (only the top token is known here), else the plain text too
+    int32_t unban_top(int32_t top, int32_t d) const {
+        if (!banned(top)) return top;
+        if (floor_now_ && d >= 0 && !banned(d)) return d;
+        return unban(top);
+    }
+    // argmax over a full row; a banned top token stands for its plain-text replacement, or is skipped under the floor
     int32_t argmax_row(const float * L, int64_t nv, int32_t exclude = -1) const {
         int32_t best = -1;
         for (int32_t i = 0; i < (int32_t) nv; i++) {
-            if (i != exclude && (best < 0 || L[i] > L[best])) best = i;
+            if (i != exclude && !(floor_now_ && banned(i)) && (best < 0 || L[i] > L[best])) best = i;
         }
         return best < 0 ? best : unban(best);
     }

@@ -13,6 +13,9 @@ int main() {
     for (int i = 0; i < 1000; ++i) repetitive += "                   \\\"disgusting\\\", \\\"disgusting\\\", \\\"disgusting\\\", \\\"disgusting\\\",\\n";
     CHECK(e8::cli::generation_repeats(repetitive));
     CHECK(!e8::cli::generation_repeats(repetitive.substr(0, 8191)));
+    // inside a tool call the window is 32 KiB: 8 KiB of identical data rows is not a loop there
+    CHECK(!e8::cli::generation_repeats(repetitive.substr(0, 16384), 32768));
+    CHECK(e8::cli::generation_repeats(repetitive.substr(0, 40000), 32768));
     std::string code;
     for (int i = 0; i < 1000; ++i) code += "const value_" + std::to_string(i) + " = compute(" + std::to_string(i) + ");\n";
     CHECK(!e8::cli::generation_repeats(code));
@@ -91,6 +94,29 @@ int main() {
     auto m7 = stream_check("<tool_call>\n<function=write>\n<parameter=file_path>\nr.md\n</parameter>\n<parameter=content>\n" + tags +
                            "\n</parameter>\n</function>\n</tool_call>", tools, 1);
     CHECK(nlohmann::ordered_json::parse(m7.tool_calls[0].arguments)["content"] == tags);
+    // non-string arguments with common JSON slips are repaired
+    using e8::cli::repair_json;
+    CHECK(nlohmann::ordered_json::parse(repair_json("[1, 2, 3,]")) == nlohmann::ordered_json::parse("[1,2,3]"));
+    CHECK(nlohmann::ordered_json::parse(repair_json("{'a': True, 'b': None, c: 'say \"hi\"',}"))
+          == nlohmann::ordered_json({ { "a", true }, { "b", nullptr }, { "c", "say \"hi\"" } }));
+    CHECK(nlohmann::ordered_json::parse(repair_json("```json\n[{\"id\": 1, \"done\": False}]\n```"))
+          == nlohmann::ordered_json::parse(R"([{"id":1,"done":false}])"));
+    CHECK(nlohmann::ordered_json::parse(repair_json(R"({"text": "it's, fine]", "n": -2.5e3})"))
+          == nlohmann::ordered_json::parse(R"({"text":"it's, fine]","n":-2500.0})"));
+    common_chat_tool todo;
+    todo.name = "todo_write";
+    todo.parameters = R"({"type":"object","properties":{"todos":{"type":"array"}}})";
+    common_chat_msg m8;
+    e8::cli::lenient_tool_calls("<tool_call>\n<function=todo_write>\n<parameter=todos>\n[{'content': 'fix bug', 'status': 'pending'},]\n"
+                                "</parameter>\n</function>\n</tool_call>", { todo }, m8, false);
+    CHECK(m8.tool_calls.size() == 1);
+    CHECK(nlohmann::ordered_json::parse(m8.tool_calls[0].arguments)["todos"][0]["content"] == "fix bug");
+    // a function the request does not offer is passed on by name (the client reports "unknown tool" to the model)
+    common_chat_msg m9;
+    e8::cli::lenient_tool_calls("<tool_call>\n<function=magic_wand>\n<parameter=spell>\nlumos\n</parameter>\n</function>\n</tool_call>",
+                                tools, m9, false);
+    CHECK(m9.tool_calls.size() == 1 && m9.tool_calls[0].name == "magic_wand");
+    CHECK(nlohmann::ordered_json::parse(m9.tool_calls[0].arguments)["spell"] == "lumos");
     // parameters in any order, typed by the schema
     common_chat_tool sre;
     sre.name = "str_replace_editor";

@@ -59,6 +59,23 @@ One page across the project; details live in the linked documents.
   model will not write `<think>` / `</think>` as text (it leaves them out), and when a file mentions `<|im_end|>` it
   sometimes writes another marker. `ctest -R tool_recovery` covers the parser cases.
 
+### Agent consistency (2026-10-16)
+
+- Reasoning budgets per effort raised (low / medium / high: 4K / 16K / 32K tokens; medium, dsh's default, was 8K).
+  Over budget the reasoning is closed after the next sentence or line end (within one decoding step; 512 tokens at
+  most), and the first 16 answer tokens may not end the turn (`set_answer_floor`), which once left an empty reply.
+  Measured: closed 25-135 tokens past the budget, 10 of 10 runs answered (before: up to 551 tokens later, mid-word,
+  and 1 of 7 answers empty).
+- Streams send an empty delta after 5 s of silence while a request waits for its turn, the model loads or a long
+  prompt is read: longest silence 5.0 s over a 96 s read (before: silent the whole time).
+- Repetition guard: 32 KiB of exact repetition inside a tool call (8 KiB elsewhere), so repetitive files are not cut.
+- Non-string tool arguments are repaired when they are not valid JSON (trailing commas, single quotes, unquoted keys,
+  Python literals, a code fence).
+- Checked, no change needed: dsh sends no answer cap (`max_content_chars`), reports unknown tool names to the model
+  (`unknown tool "x"`), and matches `edit` on LF-normalized text, writing back the file's own line endings.
+- `tests/agent_consistency.py` (live): keep-alives, reasoning budget, repetition, JSON list arguments, unknown tool.
+  Left: the model loses count on long runs of identical lines (asked for 150, writes until stopped).
+
 ### Small
 
 - The Models page shows the RTX 5080 as "17 GB" (VRAM rounding).
