@@ -29,8 +29,9 @@ One page across the project; details live in the linked documents.
 
 - The GPU encoder on a real 24 GB card: checked on the 5080 only with layers moved to the CPU (`SHOEHORN_ENCODER=gpu`).
 - Remote encoder (`encode-server` + `serve --encoder-url`): works from the laptop's RTX 4070 (a 1657x1085 screenshot in
-  2.7 s instead of 22 s). Not wired into this PC's live setup: the laptop would need to start `encode-server` at logon,
-  and the live server's start script would need `--encoder-url`.
+  2.7 s instead of 22 s). In use since 2026-10-16: the laptop runs it as a startup task ("shoehorn encode-server",
+  SYSTEM, API key required), and `C:\models\start-detached.ps1` passes `--encoder-url http://10.77.0.2:8091`; an image
+  pasted into dsh is encoded on the laptop (a 1657x1085 screenshot: 3.0 s, read correctly).
 - v0.2.0 Windows zip replaced on 2026-10-16: the first one ran only on RTX 50xx with an AVX-512 CPU. The new one (`scripts\build.ps1 -Release`, packaged by `package-windows.ps1`) is built for sm_86/89/120a and any AVX2 CPU, as the Linux release; SHA256SUMS and the release text are updated.
 - `tests/vision_smoke.py` runs by hand against a live server; not in CI (needs a GPU and the model).
 - Flash-Next (`qwen4exp`) takes no images.
