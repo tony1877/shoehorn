@@ -257,7 +257,7 @@ export class ReactLoopAgent implements Agent {
     const assembly = await this.loopCtx.systemPrompt.assemble(assembleContextFor(this, signal))
     signal.throwIfAborted()
     const sections = renderContextSections(assembly)
-    const context = this.runtimeContext.project(joinContextSections(sections), sections)
+    const context = this.runtimeContext.project(joinContextSections(sections), sections, position.step > 1)
     const decision = await this.dispatch.waterfall(
       'agent/pre-step', { messages: claimed, ...position, signal },
       (): Promise<PreStepDecision> => Promise.resolve<PreStepDecision>({

@@ -7,14 +7,18 @@ import { chatNode } from './common.ts'
 
 declare module '../contract/chat-nodes.ts' {
   interface ChatNodeDataMap {
-    /** Complete system prompt rendered for one model request. */
-    'system-prompt': { readonly text: string }
+    /**
+     * Complete system prompt rendered for one model request. `repeat`: an unchanged prompt at the start of a new
+     * request series (the conversation was rewritten: pruned or compacted), labelled as such.
+     */
+    'system-prompt': { readonly text: string, readonly repeat?: boolean }
   }
 }
 
 interface RequestPromptState extends ReturnType<RequestPromptInspector> {
   readonly anchorSeq: number
   readonly showsPrompt: boolean
+  readonly repeat: boolean
   readonly turn?: number
   readonly step?: number
 }
@@ -82,6 +86,11 @@ export function requestPromptDefinition(inspect: RequestPromptInspector): Conver
           || match.event.data.startsSeries === true
           || change === 'system'
           || change === 'system-and-tools',
+        repeat: previous !== undefined
+          && match.event.data.reason === 'series'
+          && change !== 'system'
+          && change !== 'system-and-tools'
+          && previous.prompt.system === inspection.prompt.system,
         ...location,
         ...inspection,
       }
@@ -90,7 +99,10 @@ export function requestPromptDefinition(inspect: RequestPromptInspector): Conver
     buildViewNode: (context) => {
       const state = context.state
       if (state === undefined || !state.showsPrompt || state.prompt.system === '') return null
-      return chatNode(context, 'system-prompt', state.anchorSeq, { text: state.prompt.system })
+      return chatNode(context, 'system-prompt', state.anchorSeq, {
+        text: state.prompt.system,
+        ...state.repeat ? { repeat: true } : {},
+      })
     },
   }
 }

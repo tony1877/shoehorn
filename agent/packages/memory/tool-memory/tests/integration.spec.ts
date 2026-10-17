@@ -143,9 +143,29 @@ describe('memory tools through the agent loop', () => {
     const out = results(agent.session.snapshotEvents())
     expect(out[1]).toContain('Updated memory #1.')
     expect(out[2]).toBe('Forgot memory #1.')
-    expect(requestText(adapter.requests[2]!)).toContain('[user, global, pinned] New title')
-    // After forgetting, the index is cleared again.
+    // An index-only change waits for the next turn: no second snapshot in the middle of this one.
+    expect(requestText(adapter.requests[2]!)).toContain('[user, global] Old title')
+    expect(requestText(adapter.requests[2]!)).not.toContain('[user, global, pinned] New title')
+    // After forgetting, the index is cleared again (an empty index is not deferred).
     expect(requestText(adapter.requests[3]!)).toContain('Current runtime context: none')
+    await ctx.fiber.dispose()
+  })
+})
+
+describe('memory index across turns', () => {
+  it('brings an index changed mid-turn up to date at the next turn', async () => {
+    const adapter = new MockAdapter([
+      toolCallResponse('c1', 'memory_save', { kind: 'user', title: 'Old title', body: 'b', scope: 'global' }),
+      toolCallResponse('c2', 'memory_update', { id: 1, title: 'New title' }),
+      textResponse('done'),
+      textResponse('again'),
+    ])
+    const ctx = await harness(adapter, dbPath())
+    const agent = await ctx.agentLoop.create(SessionId('it-defer'), { provider: 'mock', model: 'mock' }, { cwd: WS })
+    await say(ctx, agent, 'go')
+    expect(requestText(adapter.requests[2]!)).not.toContain('[user, global] New title')
+    await say(ctx, agent, 'next')
+    expect(requestText(adapter.requests[3]!)).toContain('[user, global] New title')
     await ctx.fiber.dispose()
   })
 })

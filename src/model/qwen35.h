@@ -231,6 +231,18 @@ public:
         std::vector<int>     mtp_slot_pos;
     };
     bool can_snapshot(int n) const { return !slots_.empty() && W_ < n_ctx_ && n > 0 && n <= W_ && n_past_ == n && !dry_pending_; }
+    // Recurrent checkpoint: the DeltaNet conv/ssm state of the active sequence after its first n positions (~157 MB on
+    // the 27B), kept in RAM. rewind() goes back to it from any later point of the same sequence: the attention KV of
+    // [0, n) is still there (RAM rows, refilled into the VRAM ring), only the recurrence needs the copy. A prompt
+    // that changes in the middle (an agent pruning old tool output) then reads from the last checkpoint before the
+    // change instead of from the start.
+    struct RecSnap {
+        int                  n = 0;
+        std::vector<uint8_t> rec;
+    };
+    size_t rec_bytes() const;
+    bool   save_rec(RecSnap & s, std::string & err);
+    bool   rewind(const RecSnap & s, std::string & err);
     bool save_prefix(PrefixSnap & s, std::string & err);
     // replaces the active sequence's state (call after reset()); n_past() becomes s.n
     bool load_prefix(const PrefixSnap & s, std::string & err);
@@ -294,17 +306,22 @@ public:
         static const int env = std::getenv("E8_PREFILL_CHUNK") ? std::atoi(std::getenv("E8_PREFILL_CHUNK")) : 0;
         const int        chunk = std::max(1, env > 0 ? std::min(env, opt_.n_ubatch) : opt_.n_ubatch);
         traffic::prefill_done = 0;
+        // the residual-free part ends `keep` tokens before the prompt's end: this call's end, or the whole prompt's
+        // when the caller reads it in pieces (set_prompt_end), so the split does not change which tokens get it
+        const int base = n_past_, end = prompt_end_ > 0 ? prompt_end_ : base + n;
         for (int i = 0; i < n; i += chunk) {
             const int m = std::min(chunk, n - i);
             EvalOpts  o;
             o.last_only = true;
-            o.residual  = !(fast_keep_ > 0 && i + m <= n - fast_keep_);
+            o.residual  = !(fast_keep_ > 0 && base + i + m <= end - fast_keep_);
             if (!eval(tokens + i, m, o, i + m == n ? logits : nullptr, nullptr, err)) return false;
             traffic::prefill_done = i + m;
         }
         return true;
     }
     void set_fast_prefill(int keep) { fast_keep_ = keep > 0 ? keep : 0; }
+    // absolute position where the prompt being read ends (0 = each prefill() call's own end)
+    void set_prompt_end(int end) { prompt_end_ = end > 0 ? end : 0; }
     // Vision: text after an image continues at rotary position (index - rope_shift): an image of n tokens on an
     // h x w grid takes max(h, w) positions, not n (Qwen-VL M-RoPE). The KV stays indexed by sequence position, so
     // commit / rollback are unaffected; the caller sets the shift for the point it continues from (prefix reuse).
@@ -419,6 +436,7 @@ private:
     LoadOptions opt_;
     int         n_ctx_  = 0;
     int         n_past_ = 0;
+    int         prompt_end_ = 0;  // set_prompt_end
     int         saved_n_past_ = 0;
     int         recorded_n_ = 0;  // recorded tokens of the last recorded eval (0 = none)
     int         recorded_full_ = 0;  // its batch size (rollback beyond recorded_n_ is only possible to keep all)

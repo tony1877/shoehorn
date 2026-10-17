@@ -1347,6 +1347,99 @@ bool Qwen35::load_prefix(const PrefixSnap & s, std::string & err) {
     return true;
 }
 
+size_t Qwen35::rec_bytes() const {
+    size_t b = 0;
+    for (size_t il = 0; il < conv_state_.size(); il++) {
+        if (conv_state_[il]) b += ggml_nbytes(conv_state_[il]) + ggml_nbytes(ssm_state_[il]);
+    }
+    return b;
+}
+
+bool Qwen35::save_rec(RecSnap & s, std::string & err) {
+    if (dry_pending_) {
+        err = "save_rec: an uncommitted eval is pending";
+        return false;
+    }
+    s.n = n_past_;
+    s.rec.resize(rec_bytes());
+    size_t off = 0;
+    for (size_t il = 0; il < conv_state_.size(); il++) {
+        for (ggml_tensor * t : { conv_state_[il], ssm_state_[il] }) {
+            if (!t) continue;
+            ggml_backend_tensor_get(t, s.rec.data() + off, 0, ggml_nbytes(t));
+            off += ggml_nbytes(t);
+        }
+    }
+    return true;
+}
+
+bool Qwen35::rewind(const RecSnap & s, std::string & err) {
+    const int n = s.n;
+    if (dry_pending_ || n <= 0 || n > n_past_ || s.rec.size() != rec_bytes()) {
+        err = "rewind: checkpoint does not fit this sequence";
+        return false;
+    }
+    const bool split = W_ < n_ctx_;
+    if (split) {
+        // the RAM rows must hold [0, n): copy what only the ring still has, then refill the ring's window before n
+        const int lo = std::max(0, n - W_);
+        if (host_valid_ < n) {
+            const int upto = std::min(std::max(exact_upto_, n), n_past_);
+            if (!flush_ring(host_valid_, upto, err)) return false;
+        }
+        if (host_valid_ < n) {
+            err = "rewind: KV for positions " + std::to_string(host_valid_) + ".." + std::to_string(n) + " is not in RAM";
+            return false;
+        }
+        const auto &         h = hp_;
+        std::vector<uint8_t> buf;
+        for (int p = lo; p < n;) {
+            const int s0 = p % W_;
+            int       e  = p + 1;
+            while (e < n && (e % W_) == s0 + (e - p)) e++;  // a run of consecutive ring rows
+            const int cnt = e - p;
+            for (int64_t il = 0; il < h.n_layer; il++) {
+                if (h.is_recurrent(il)) continue;
+                for (int kv = 0; kv < 2; kv++) {
+                    ggml_tensor * rc = (kv ? v_cache_ : k_cache_)[(size_t) il];
+                    buf.resize(rc->nb[1] * (size_t) cnt);
+                    for (int64_t j = 0; j < h.n_head_kv; j++) {
+                        const ggml_tensor * ht = (kv ? hv_ : hk_)[(size_t) (il * h.n_head_kv + j)];
+                        for (int r = 0; r < cnt; r++) {
+                            std::memcpy(buf.data() + rc->nb[1] * (size_t) r + ht->nb[1] * (size_t) j,
+                                        (const uint8_t *) ht->data + ht->nb[1] * (size_t) (p + r), ht->nb[1]);
+                        }
+                    }
+                    ggml_backend_tensor_set(rc, buf.data(), rc->nb[1] * (size_t) (Kd_ + s0), buf.size());
+                }
+            }
+            for (int r = 0; r < cnt; r++) slot_pos_[(size_t) (s0 + r)] = p + r;
+            p = e;
+        }
+        host_valid_ = std::min(host_valid_, n);
+        exact_upto_ = std::min(exact_upto_, n);
+    }
+    for (auto & sp : slot_pos_) if (sp >= n) sp = -1;      // rows past the checkpoint no longer exist
+    for (auto & sp : mtp_slot_pos_) if (sp >= n) sp = -1;
+    size_t off = 0;
+    for (size_t il = 0; il < conv_state_.size(); il++) {
+        for (ggml_tensor * t : { conv_state_[il], ssm_state_[il] }) {
+            if (!t) continue;
+            ggml_backend_tensor_set(t, s.rec.data() + off, 0, ggml_nbytes(t));
+            off += ggml_nbytes(t);
+        }
+    }
+    n_past_ = n;
+    if (far_ws_ > n) far_rows_ = far_ws_ = 0;
+    sum_upto_ = std::min(sum_upto_, n / kPage);
+    sum_low_  = std::min(sum_low_, sum_upto_);
+    // (the end-of-prompt checkpoint may lie past n, over KV rows about to be rewritten: the caller forgets it)
+    hid_row_   = -1;
+    saved_n_past_ = saved_n_past1_ = 0;
+    recorded_n_ = recorded_full_ = 0;
+    return true;
+}
+
 std::vector<std::vector<ggml_fp16_t>> Qwen35::summarize(const std::vector<ggml_tensor *> & hk, int from, int upto) const {
     // element-wise min/max of each page's keys (from the RAM KV), midpoints as halves, heads in parallel
     const auto &  h  = hp_;

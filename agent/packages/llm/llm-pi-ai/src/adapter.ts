@@ -116,6 +116,7 @@ function profileOptions(
   profile: ResolvedPiAiProviderProfile,
   reasoning: ModelThinkingLevel | undefined,
   apiKey: string | undefined,
+  purpose?: GenerateOptions['purpose'],
 ): SimpleStreamOptions {
   const enabledReasoning: ThinkingLevel | undefined = reasoning === 'off' ? undefined : reasoning
   return {
@@ -126,7 +127,7 @@ function profileOptions(
     ...profile.transport === undefined ? {} : { transport: profile.transport },
     ...profile.timeoutMs === undefined ? {} : { timeoutMs: profile.timeoutMs },
     ...profile.websocketConnectTimeoutMs === undefined ? {} : { websocketConnectTimeoutMs: profile.websocketConnectTimeoutMs },
-    ...samplingPayload(profile),
+    ...samplingPayload(profile, purpose),
     // The agent recovery layer owns visible attempts; one adapter call is one SDK attempt.
     maxRetries: 0,
   }
@@ -135,11 +136,17 @@ function profileOptions(
 /**
  * Merge the route's `sampling` fields into an `openai-completions` request
  * body through pi-ai's `onPayload` hook. Fields the body already carries (a
- * request's own `temperature`) win.
+ * request's own `temperature`) win. A compaction request keeps the session's
+ * tools (so the provider reuses the cached prompt) but must answer in text:
+ * it gets `tool_choice: "none"` (a summary once came back as a `write` call).
  */
-function samplingPayload(profile: ResolvedPiAiProviderProfile): Pick<SimpleStreamOptions, 'onPayload'> {
+function samplingPayload(
+  profile: ResolvedPiAiProviderProfile,
+  purpose?: GenerateOptions['purpose'],
+): Pick<SimpleStreamOptions, 'onPayload'> {
   const sampling = Object.entries(profile.sampling ?? {})
-  if (sampling.length === 0 || profile.api !== 'openai-completions') return {}
+  const textOnly = purpose === 'compaction'
+  if ((sampling.length === 0 && !textOnly) || profile.api !== 'openai-completions') return {}
   return {
     onPayload: (payload: unknown) => {
       if (typeof payload !== 'object' || payload === null) return undefined
@@ -148,6 +155,7 @@ function samplingPayload(profile: ResolvedPiAiProviderProfile): Pick<SimpleStrea
       for (const [key, value] of sampling) {
         if (body[key] === undefined) body[key] = value
       }
+      if (textOnly && Array.isArray(body.tools) && body.tools.length > 0) body.tool_choice = 'none'
       return body
     },
   }
@@ -395,7 +403,7 @@ export class PiAiAdapter extends LlmAdapter {
           },
         }, onReplayDegrade)
       const events = snapshot.models.streamSimple(model, context, {
-        ...profileOptions(profile, reasoning, apiKey),
+        ...profileOptions(profile, reasoning, apiKey, options.purpose),
         ...options.temperature === undefined ? {} : { temperature: options.temperature },
         ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },
         ...options.sessionId === undefined ? {} : { sessionId: String(options.sessionId) },

@@ -155,6 +155,7 @@ struct Server {
     std::string                      alias, api_key;
     int                              spec_k = 12;
     float                            tool_temp = 0.6f;
+    int                              ckpt_every = 8192, ckpt_max = 8;  // recurrent checkpoints along a prompt (0 = off)
     int                              fast_prefill = 0;  // --fast-prefill N (see Qwen35::set_fast_prefill)  // sampling temperature inside <tool_call> blocks (0 = as the request)
     bool                             spec_auto = true;
     int                              mtp = 6;  // most MTP proposals per base pass while drafting (adaptive; 0 = off)
@@ -170,6 +171,12 @@ struct Server {
     // per sequence slot: tokens in its model state / at its checkpoint; epoch = the model's slot_epoch() they belong to
     struct Slot {
         std::vector<int32_t> state_tokens, ck_tokens;
+        // recurrent checkpoints along the sequence (--ckpt-every / --ckpt-max), each with a hash of the tokens before it
+        struct Ck {
+            uint64_t                 hash = 0;
+            model::Qwen35::RecSnap   snap;
+        };
+        std::vector<Ck>      cks;
         uint64_t             epoch = 0, used = 0;
         bool                 busy = false;  // a request is using it
     };
@@ -523,6 +530,8 @@ struct Result {
     std::string     finish = "stop";
     int             n_prompt = 0, n_gen = 0, n_reused = 0, slot = 0;
     int             side_swap = 0;
+    int             ck_rewind = 0;  // > 0: the prompt was read from the recurrent checkpoint at this token
+    std::string     prompt_top;     // E8_LOG_RAW: the top logits after the prompt ("id:logit ...")
     int             n_lcp = 0;      // the longest prefix of this prompt the server held (slot state, checkpoint or parked
                                     // side sequence): lcp - reused tokens were cached but read again (a real cache miss)
     int             n_tool = 0;     // tokens generated inside <tool_call> blocks (at --tool-temp)  // side sequence: 1 = parked the conversation, 2 = resumed the parked one
@@ -1136,6 +1145,24 @@ loaded:
     auto extends = [&](const std::vector<int32_t> & base) {
         return !base.empty() && base.size() < prompt.size() && std::equal(base.begin(), base.end(), prompt.begin());
     };
+    auto tok_hash = [](const int32_t * t, size_t n) {  // FNV-1a over the token ids
+        uint64_t h = 1469598103934665603ull;
+        for (size_t i = 0; i < n; i++) {
+            h ^= (uint32_t) t[i];
+            h *= 1099511628211ull;
+        }
+        return h;
+    };
+    // the furthest recurrent checkpoint of a slot that this prompt starts with (-1: none)
+    auto best_ck = [&](const Server::Slot & x) {
+        int b = -1;
+        for (int i = 0; i < (int) x.cks.size(); i++) {
+            const size_t n = (size_t) x.cks[(size_t) i].snap.n;
+            if (n < prompt.size() && (b < 0 || n > (size_t) x.cks[(size_t) b].snap.n) &&
+                x.cks[(size_t) i].hash == tok_hash(prompt.data(), n)) b = i;
+        }
+        return b;
+    };
     // ---- sequence slot: the one whose state or checkpoint this prompt extends furthest, else an empty one, else the
     // least recently used
     const int n_slots = S.q35 ? S.q35->n_slots() : 1;
@@ -1153,6 +1180,7 @@ loaded:
         if (S.q35 && S.q35->slot_epoch(s) != sl.epoch) {
             sl.state_tokens.clear();
             sl.ck_tokens.clear();
+            sl.cks.clear();
             sl.epoch = S.q35->slot_epoch(s);
         }
     };
@@ -1223,11 +1251,16 @@ loaded:
         if (S.q35->side_epoch() != S.park.epoch) {  // dropped (KV pool full)
             S.park.state_tokens.clear();
             S.park.ck_tokens.clear();
+            S.park.cks.clear();
             S.park.epoch = S.q35->side_epoch();
         }
         auto reuse = [&](const Server::Slot & x, int np) -> size_t {
             if (extends(x.state_tokens) && (int) x.state_tokens.size() == np) return x.state_tokens.size();
             if (extends(x.ck_tokens)) return x.ck_tokens.size();
+            // a prompt that changed in the middle (pruned tool output) still continues the sequence when a recurrent
+            // checkpoint covers a good part of it: rewinding beats parking it and reading everything again
+            const int b = best_ck(x);
+            if (b >= 0 && (size_t) x.cks[(size_t) b].snap.n * 4 >= prompt.size()) return (size_t) x.cks[(size_t) b].snap.n;
             return 0;
         };
         constexpr size_t kSideMin = 2048;  // an active sequence worth keeping
@@ -1240,14 +1273,17 @@ loaded:
                 S.q35->drop_side();
                 S.park.state_tokens.clear();
                 S.park.ck_tokens.clear();
+                S.park.cks.clear();
             }
             if (!S.q35->swap_side(err)) {
                 SL.state_tokens.clear();
                 SL.ck_tokens.clear();
+                SL.cks.clear();
                 return false;
             }
             std::swap(SL.state_tokens, S.park.state_tokens);
             std::swap(SL.ck_tokens, S.park.ck_tokens);
+            std::swap(SL.cks, S.park.cks);
             SL.epoch     = S.q35->slot_epoch(0);
             S.park.epoch = S.q35->side_epoch();
             fprintf(stderr, "side sequence: %s (%zu tokens parked, %.0f ms)\n",
@@ -1273,7 +1309,21 @@ loaded:
     } else if (extends(SL.ck_tokens)) {
         m.checkpoint_restore();
         start = SL.ck_tokens.size();
+    } else if (const int b = S.q35 ? best_ck(SL) : -1; b >= 0 && [&] {
+                   std::string e;
+                   if (S.q35->rewind(SL.cks[(size_t) b].snap, e)) return true;
+                   fprintf(stderr, "prompt reuse: %s\n", e.c_str());
+                   return false;
+               }()) {
+        // the prompt changed after this checkpoint: read from it, forget what lay past it
+        start = (size_t) SL.cks[(size_t) b].snap.n;
+        SL.cks.resize((size_t) b + 1);
+        SL.ck_tokens.clear();
+        R.ck_rewind = (int) start;
+        fprintf(stderr, "prompt reuse: rewound to the checkpoint at token %zu of %zu (%zu read again)\n", start, prompt.size(),
+                prompt.size() - start);
     } else {
+        SL.cks.clear();
         if (!SL.ck_tokens.empty()) {
             // reuse miss: where the new prompt leaves the checkpointed one (debugging cache hit rates)
             size_t d = 0;
@@ -1393,6 +1443,37 @@ loaded:
                 where, std::chrono::duration<double>(std::chrono::steady_clock::now() - te).count());
         return true;
     };
+    auto save_ck = [&](size_t n) {
+        if (!SL.cks.empty() && (size_t) SL.cks.back().snap.n >= n) return;  // already have one here
+        Server::Slot::Ck c;
+        std::string      e;
+        if (!S.q35->save_rec(c.snap, e)) {
+            fprintf(stderr, "recurrent checkpoint: %s\n", e.c_str());
+            return;
+        }
+        c.hash = tok_hash(prompt.data(), n);
+        SL.cks.push_back(std::move(c));
+        while ((int) SL.cks.size() > S.ckpt_max) {
+            // drop the one whose removal leaves the smallest gap (never the newest)
+            size_t drop = 0, gap = SIZE_MAX;
+            for (size_t i = 0; i + 1 < SL.cks.size(); i++) {
+                const size_t g = (size_t) SL.cks[i + 1].snap.n - (i ? (size_t) SL.cks[i - 1].snap.n : 0);
+                if (g < gap) { gap = g; drop = i; }
+            }
+            SL.cks.erase(SL.cks.begin() + (long long) drop);
+        }
+        static bool told = false;
+        if (!told) {
+            told = true;
+            fprintf(stderr, "recurrent checkpoints: every %d tokens, up to %d (%.0f MB each)\n", S.ckpt_every, S.ckpt_max,
+                    S.q35->rec_bytes() / 1e6);
+        }
+    };
+    if (S.q35) S.q35->set_prompt_end((int) prompt.size());
+    struct PromptEnd {
+        model::Qwen35 * q;
+        ~PromptEnd() { if (q) q->set_prompt_end(0); }
+    } prompt_end{ S.q35 };
     auto eval_range = [&](size_t a, size_t b) {
         S.live_read_base = (int) a;
         model::traffic::prefill_done = 0;
@@ -1414,13 +1495,21 @@ loaded:
                 ok = eval_image(*in_img);
                 p += (size_t) in_img->n;
             } else {
-                ok = m.prefill(prompt.data() + p, (int) (next - p), last.data(), err);
-                p  = next;
+                // stop at each multiple of --ckpt-every to keep a recurrent checkpoint there
+                size_t to = next;
+                if (S.q35 && S.ckpt_every > 0 && S.ckpt_max > 0) {
+                    const size_t q = (p / (size_t) S.ckpt_every + 1) * (size_t) S.ckpt_every;
+                    if (q < next && q + 1 < prompt.size()) to = q;
+                }
+                ok = m.prefill(prompt.data() + p, (int) (to - p), last.data(), err);
+                p  = to;
+                if (ok && to < next) save_ck(to);
             }
         }
         if (!ok) {
             SL.state_tokens.clear();
             SL.ck_tokens.clear();
+            SL.cks.clear();
             return false;
         }
         return true;
@@ -1470,6 +1559,16 @@ loaded:
         SL.ck_tokens.assign(prompt.begin(), prompt.begin() + (long long) n_head);
     }
     if (!eval_range(start, prompt.size())) return false;
+    if (std::getenv("E8_LOG_RAW")) {  // debugging prompt reuse: the read must end in the same logits however it started
+        std::vector<int> ix(last.size());
+        for (size_t i = 0; i < ix.size(); i++) ix[i] = (int) i;
+        std::partial_sort(ix.begin(), ix.begin() + 8, ix.end(), [&](int a, int b) { return last[(size_t) a] > last[(size_t) b]; });
+        char buf[48];
+        for (int i = 0; i < 8; i++) {
+            snprintf(buf, sizeof buf, "%d:%.4f ", ix[(size_t) i], last[(size_t) ix[(size_t) i]]);
+            R.prompt_top += buf;
+        }
+    }
     const auto t1 = std::chrono::steady_clock::now();
     S.live_gen   = 0;
     S.live_reading = false;
@@ -1525,6 +1624,17 @@ loaded:
             if (r < 0 || r == t) continue;
             call_ban.push_back(t);
             call_repl.push_back(r);
+        }
+    }
+    // tool_choice "none": the tools stay in the prompt (a client keeps its cached prefix, as an agent's summary
+    // request does) but no call may start. Greedy decoding only sees the top token, so it samples near-greedily here.
+    std::vector<int32_t> never;
+    if (chat && call_open >= 0 && body.contains("tool_choice") && body["tool_choice"].is_string() &&
+        body["tool_choice"].get<std::string>() == "none") {
+        never.push_back(call_open);
+        if (sp.temp <= 0) {
+            sp.temp  = 1e-3f;
+            sp.top_k = std::max(sp.top_k, 8);
         }
     }
     auto consume = [&]() {
@@ -1668,6 +1778,7 @@ loaded:
             d->set_mtp(S.mtp);
             d->set_echo(S.echo);
             if (!call_ban.empty()) d->set_call_ban(call_open, call_close, call_ban, call_repl);
+            if (!never.empty()) d->set_never(never);
             return d;
         };
         int  next_loop_check = 512;
@@ -1912,6 +2023,7 @@ loaded:
         std::mt19937_64 rng(sp.seed ? sp.seed : S.rng());
         auto            next = [&]() {
             runtime::apply_penalties(last.data(), sp, counts);
+            for (const int32_t t : never) last[(size_t) t] = -INFINITY;
             if (!call_ban.empty() && counts[call_open] > counts[call_close])  // inside an open tool call
                 for (size_t i = 0; i < call_ban.size(); i++) {  // its probability to the plain-text token
                     float & a = last[(size_t) call_ban[i]], & b = last[(size_t) call_repl[i]];
@@ -1933,6 +2045,7 @@ loaded:
     if (generation_loop) {
         SL.state_tokens.clear();
         SL.ck_tokens.clear();
+        SL.cks.clear();
         err = "Generation stopped: sustained repeated output. The unfinished response must not be executed; regenerate a concise implementation. Set detect_repetition=false only for deliberately repetitive output.";
         fprintf(stderr, "generation repetition stopped after %d tokens\n", R.n_gen);
         return false;
@@ -1987,7 +2100,7 @@ loaded:
                                           std::chrono::duration<double>(R.t_prompt + R.t_gen));
         json line = { { "t", (double) std::chrono::duration_cast<std::chrono::milliseconds>(now_sys.time_since_epoch()).count() / 1e3 },
                       { "model", S.entries[(size_t) S.active].alias }, { "kind", chat ? "chat" : "completion" },
-                      { "prompt_tokens", R.n_prompt }, { "reused_tokens", R.n_reused }, { "cached_prefix", R.n_lcp }, { "slot", R.slot }, { "prefill_s", R.t_prompt },
+                      { "prompt_tokens", R.n_prompt }, { "reused_tokens", R.n_reused }, { "cached_prefix", R.n_lcp }, { "ck_rewind", R.ck_rewind }, { "slot", R.slot }, { "prefill_s", R.t_prompt },
                       { "gen_tokens", R.n_gen }, { "decode_s", R.t_gen }, { "finish", R.finish },
                       { "idle_before_s", S.last_end.time_since_epoch().count() == 0 ? -1.0
                                          : std::chrono::duration<double>(t0_sys - S.last_end).count() },
@@ -2044,15 +2157,21 @@ loaded:
     R.msg.set_tool_call_ids(ids_cache, gen_id);
     if (!R.msg.tool_calls.empty() && R.finish == "stop") R.finish = "tool_calls";
     if (const char * dir = std::getenv("E8_LOG_RAW")) {
-        // debugging: the raw generated text of chat turns that ended without a tool call (last 8 kept)
-        static int seq = 0;
-        if (R.msg.tool_calls.empty()) {
-            const std::string path = std::string(dir) + "/raw-" + std::to_string(seq++ % 8) + ".txt";
-            if (FILE * fr = fopen(path.c_str(), "wb")) {
-                fprintf(fr, "finish=%s n_gen=%d\n----\n", R.finish.c_str(), R.n_gen);
-                fwrite(text.data(), 1, text.size(), fr);
-                fclose(fr);
-            }
+        // debugging: the raw generated text of every chat turn with its final parse, and the request body (last 32 kept)
+        static int  seq  = 0;
+        const int   n    = seq++ % 32;
+        const std::string base = std::string(dir) + "/raw-" + std::to_string(n);
+        if (FILE * fr = fopen((base + ".txt").c_str(), "wb")) {
+            fprintf(fr, "finish=%s n_gen=%d n_prompt=%d reused=%d ck_rewind=%d reasoning=%zu content=%zu calls=%zu\nprompt_top=%s\n----\n",
+                    R.finish.c_str(), R.n_gen, R.n_prompt, R.n_reused, R.ck_rewind, R.msg.reasoning_content.size(),
+                    R.msg.content.size(), R.msg.tool_calls.size(), R.prompt_top.c_str());
+            fwrite(text.data(), 1, text.size(), fr);
+            fclose(fr);
+        }
+        if (FILE * fb = fopen((base + ".req.json").c_str(), "wb")) {
+            const std::string b = body.dump();
+            fwrite(b.data(), 1, b.size(), fb);
+            fclose(fb);
         }
     }
     return true;
@@ -2083,6 +2202,8 @@ const SettingOpt kSettings[] = {
     { "--idle-unload", "0", "Context and memory", "Free the GPU after this many idle seconds (0 = keep the model loaded).", "" },
     { "--sys-cache", "4", "Context and memory", "System prompts kept in RAM for new conversations (0 = off).", "" },
     { "--sys-cache-gb", "3", "Context and memory", "RAM cap of the system prompt cache, GB.", "" },
+    { "--ckpt-every", "8192", "Context and memory", "Keep a recurrent checkpoint every N prompt tokens, so a prompt changed in the middle (an agent pruning old tool output) is read again from there, not from the start (0 = off).", "" },
+    { "--ckpt-max", "8", "Context and memory", "Recurrent checkpoints kept per conversation (about 160 MB of RAM each on the 27B).", "" },
     { "--res-gpu-gb", "", "Context and memory", "Residual kept in VRAM, GB, or auto (faster verify; on 16 GB only about 1 GB fits). Empty: auto from 24 GB of VRAM up, else 0.", "" },
     { "--spec", "auto", "Speed", "Speculative decoding: auto, or a fixed draft length.", "" },
     { "--fast-prefill", "0", "Speed", "Read all but the last N prompt tokens without the residual (about 1.7x prefill; KLD 0.0028).", "" },
@@ -2176,6 +2297,8 @@ int serve(const std::vector<std::string> & args_in) {
         else if (a == "--kv-lock") kv_lock = true;
         else if (a == "--ubatch") ubatch = std::atoi(val().c_str());
         else if (a == "--fast-prefill") fast_prefill = std::atoi(val().c_str());
+        else if (a == "--ckpt-every") S->ckpt_every = std::max(0, std::atoi(val().c_str()));
+        else if (a == "--ckpt-max") S->ckpt_max = std::max(0, std::atoi(val().c_str()));
         else if (a == "--no-side") side = false;
         else if (a == "--slots") n_slots = std::max(1, std::atoi(val().c_str()));
         else if (a == "--kv-pool-gb") kv_pool_gb = std::atof(val().c_str());

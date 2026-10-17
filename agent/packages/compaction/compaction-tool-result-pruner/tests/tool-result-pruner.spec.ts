@@ -276,3 +276,54 @@ describe('ToolResultPruner session transaction', () => {
     expect(() => prune.pruneSession(session)).not.toThrow()
   })
 })
+
+describe('ToolResultPruner pass limits', () => {
+  it('never prunes results of the running turn that the model has not read yet', () => {
+    const session = Session.create(SessionId('unread'))
+    appendToolStep(session, 1, 'old', [{ type: 'text', text: 'O'.repeat(100) }])
+    session.append('turn/start', { turn: 2 })
+    session.append('step/start', { turn: 2, step: 1 })
+    session.append('assistant/message', {
+      turn: 2,
+      step: 1,
+      message: createMessage({
+        role: 'assistant',
+        content: [{ type: 'tool-call', id: ToolCallId('new'), name: 'bash', arguments: '{}' }],
+        source: { kind: 'model', provider: MODEL, model: MODEL },
+      }),
+    }, { surfaceOp: 'append' })
+    session.append('tool/call', { turn: 2, step: 1, callId: ToolCallId('new'), name: 'bash', arguments: '{}' })
+    session.append('tool/result', {
+      turn: 2,
+      step: 1,
+      message: createToolResultMessage({ callId: ToolCallId('new'), content: [{ type: 'text', text: 'N'.repeat(100) }], isError: false }),
+    }, { surfaceOp: 'append' })
+    const result = service().pruneSession(session)
+    expect(result.pruned.map(entry => entry.callId)).toEqual([ToolCallId('old')])
+  })
+
+  it('goes oldest first and stops at the target', () => {
+    const session = Session.create(SessionId('target'))
+    appendToolStep(session, 1, 'a', [{ type: 'text', text: 'A'.repeat(100) }])
+    appendToolStep(session, 2, 'b', [{ type: 'text', text: 'B'.repeat(100) }])
+    appendToolStep(session, 3, 'c', [{ type: 'text', text: 'C'.repeat(100) }])
+    session.append('turn/start', { turn: 4 })
+    const result = service().pruneSession(session, { currentTokens: 1000, targetTokens: 999 })
+    expect(result.pruned.map(entry => entry.callId)).toEqual([ToolCallId('a')])
+  })
+
+  it('leaves the protected tail whole', () => {
+    const session = Session.create(SessionId('tail'))
+    appendToolStep(session, 1, 'a', [{ type: 'text', text: 'A'.repeat(100) }])
+    appendToolStep(session, 2, 'b', [{ type: 'text', text: 'B'.repeat(100) }])
+    session.append('turn/start', { turn: 3 })
+    const tail = METER.estimateMessage(createToolResultMessage({ callId: ToolCallId('b'), content: [{ type: 'text', text: 'B'.repeat(100) }], isError: false }))
+      + METER.estimateMessage(createMessage({
+        role: 'assistant',
+        content: [{ type: 'tool-call', id: ToolCallId('b'), name: 'bash', arguments: '{}' }],
+        source: { kind: 'model', provider: MODEL, model: MODEL },
+      }))
+    const result = service().pruneSession(session, { protectTailTokens: tail })
+    expect(result.pruned.map(entry => entry.callId)).toEqual([ToolCallId('a')])
+  })
+})

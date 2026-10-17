@@ -126,6 +126,14 @@ void SpecDecoder::dist_topk(const float * v, const int32_t * id, int k, std::vec
 }
 
 void SpecDecoder::finish_dist(std::vector<std::pair<float, int32_t>> & p) {
+    if (!never_.empty()) {
+        std::vector<std::pair<float, int32_t>> keep;
+        keep.reserve(p.size());
+        for (auto & e : p) {
+            if (!never(e.second)) keep.push_back(e);
+        }
+        if (!keep.empty()) p.swap(keep);
+    }
     if (floor_now_) {  // answer floor (set_answer_floor): the banned tokens get no probability at all
         std::vector<std::pair<float, int32_t>> keep;
         keep.reserve(p.size());

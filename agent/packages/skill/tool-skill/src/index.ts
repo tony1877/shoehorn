@@ -239,7 +239,8 @@ export function apply(ctx: Context, config: Config = {}): void {
         ? decision
         : { ...decision, messages: decision.messages.filter(message => message.id !== existing.message.id) }
     }
-    const catalog = history.published
+    // "changed" only when it did: after a compaction removed the last catalog, the same one comes back as it was
+    const catalog = history.published && history.lastDigest !== digest
       ? renderCatalogUpdate(entries)
       : renderCatalogMessage(entries)
     return {
@@ -358,9 +359,10 @@ function readCatalogEntries(source: unknown): SkillCatalogSource['entries'] | un
   return readable
 }
 
-function catalogHistory(agent: Agent): { visibleDigest?: string; published: boolean } {
+function catalogHistory(agent: Agent): { visibleDigest?: string; lastDigest?: string; published: boolean } {
   const visible = new Set(agent.session.surface.nodes)
   let published = false
+  let lastDigest: string | undefined
   for (let index = agent.session.seq - 1; index >= 0; index -= 1) {
     const event = agent.session.eventAt(SessionSeq(index))
     if (event === undefined) {
@@ -371,9 +373,10 @@ function catalogHistory(agent: Agent): { visibleDigest?: string; published: bool
     if (entries === undefined) continue
     const digest = digestCatalogEntries(entries)
     published = true
-    if (visible.has(event.seq)) return { visibleDigest: digest, published }
+    lastDigest ??= digest
+    if (visible.has(event.seq)) return { visibleDigest: digest, lastDigest, published }
   }
-  return { published }
+  return { ...lastDigest === undefined ? {} : { lastDigest }, published }
 }
 
 function catalogMessage(

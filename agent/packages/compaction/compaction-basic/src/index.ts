@@ -336,9 +336,14 @@ export class BasicCompactionEngine extends CompactionEngine {
     if (measurement.totalTokens < spec.thresholdTokens) return null
 
     // Once pressure qualifies, land the model-free pass before choosing a
-    // summary range, then remeasure through the singleton replay fold.
+    // summary range, then remeasure through the singleton replay fold. The pass
+    // prunes every eligible result at once but leaves the retained tail whole:
+    // each pass makes the provider read the prompt again from the first pruned
+    // result on, and with everything older already pruned that is close to the
+    // tail (stopping early would leave old results for a later pass that
+    // changes the prompt near its start).
     if (prune !== undefined) {
-      prune.pruneSession(agent.session)
+      prune.pruneSession(agent.session, { protectTailTokens: spec.retainTokens })
       measurement = meter.measure(agent.session)
     }
     if (measurement.totalTokens < spec.thresholdTokens) return null

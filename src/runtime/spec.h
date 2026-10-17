@@ -69,6 +69,8 @@ public:
     // would cut the call off). Each one's probability goes to `repl[i]`, the first token of the same marker written
     // as plain text, so the model goes on writing it as characters. Checked per position against the tokens before
     // it; drafts are still proposed freely and rejected by the verify.
+    // Tokens never emitted (a request with tool_choice "none": the tool-call opener), whatever the context.
+    void set_never(std::vector<int32_t> t) { never_ = std::move(t); }
     void set_call_ban(int32_t open, int32_t close, std::vector<int32_t> ban, std::vector<int32_t> repl) {
         call_open_ = open, call_close_ = close, call_ban_ = std::move(ban), call_repl_ = std::move(repl);
     }
@@ -189,6 +191,8 @@ private:
     // keep the ban on after the real call ends (the turn could not end)
     int32_t              call_open_ = -1, call_close_ = -1;
     std::vector<int32_t> call_ban_, call_repl_;
+    std::vector<int32_t> never_;
+    bool never(int32_t t) const { return !never_.empty() && std::find(never_.begin(), never_.end(), t) != never_.end(); }
     bool                 ban_now_ = false;
     bool                 floor_now_ = false;   // set_answer_floor: drop (not redirect) the banned tokens at this row
     int                  floor_left_ = 0;
@@ -220,7 +224,7 @@ private:
     int32_t argmax_row(const float * L, int64_t nv, int32_t exclude = -1) const {
         int32_t best = -1;
         for (int32_t i = 0; i < (int32_t) nv; i++) {
-            if (i != exclude && !(floor_now_ && banned(i)) && (best < 0 || L[i] > L[best])) best = i;
+            if (i != exclude && !(floor_now_ && banned(i)) && !never(i) && (best < 0 || L[i] > L[best])) best = i;
         }
         return best < 0 ? best : unban(best);
     }

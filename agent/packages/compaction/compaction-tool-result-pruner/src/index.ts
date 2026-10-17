@@ -7,8 +7,9 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { freezeMessage } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import type { Session, SessionEvent, SessionSeq, ToolResultMessage } from '@deepseek-ai/dsh-session'
+import type { ContentBlock, Message } from '@deepseek-ai/dsh-llm'
+import { SessionSeq } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent, ToolResultMessage } from '@deepseek-ai/dsh-session'
 // Type-only: the `compaction/*` SessionEventMap merges (the shadow-price event).
 import type {} from '@deepseek-ai/dsh-compaction'
 // Type-only: the `ctx.tokenMeter` Context merge for the declared injection.
@@ -33,6 +34,33 @@ declare module '@deepseek-ai/cordis' {
   interface Context {
     toolResultPruner: ToolResultPruner
   }
+}
+
+/** Limits for one pruning pass; without any, every over-budget result already answered is pruned. */
+export interface PruneOptions {
+  /** Leave tool results within this many estimated tokens of the end of the surface untouched. */
+  readonly protectTailTokens?: number
+  /** The surface's current estimated size; with `targetTokens`, the pass stops once it is down to the target. */
+  readonly currentTokens?: number
+  readonly targetTokens?: number
+}
+
+function messageOf(event: SessionEvent | undefined): Message | undefined {
+  if (event === undefined) return undefined
+  const data = event.data as { message?: Message } | Message | undefined
+  if (data !== undefined && typeof data === 'object' && 'message' in data && data.message !== undefined) return data.message
+  if (event.type === 'user/message') return data as Message
+  return undefined
+}
+
+/** The number of the turn still running, if any. */
+function openTurn(session: Session): number | undefined {
+  for (let index = session.seq - 1; index >= 0; index -= 1) {
+    const event = session.eventAt(SessionSeq(index))
+    if (event?.type === 'turn/end') return undefined
+    if (event?.type === 'turn/start') return (event.data as { turn: number }).turn
+  }
+  return undefined
 }
 
 interface SnapshotCandidate {
@@ -133,17 +161,50 @@ export class ToolResultPruner extends Service {
    * @throws when the session rejects a replacement; replacements committed
    * earlier in the pass remain durable.
    */
-  pruneSession(session: Session): PruneResult {
-    const candidates: SnapshotCandidate[] = []
-    for (const seq of [...session.surface.nodes]) {
+  pruneSession(session: Session, options: PruneOptions = {}): PruneResult {
+    // Surface order is oldest first. Results the model has not answered yet (after the last assistant message) are
+    // never pruned: it has not read them. Neither are those within `protectTailTokens` of the end, and with
+    // `targetTokens` the pass stops once the estimate is down to it, so passes are rarer and the newest work stays
+    // whole (each pass also costs the provider a prompt re-read from the first changed message on).
+    const nodes = [...session.surface.nodes]
+    const priced: Array<{ seq: SessionSeq, event: SessionEvent | undefined, tokens: number }> = []
+    let lastAssistant = -1
+    for (const [index, seq] of nodes.entries()) {
       const event = session.eventAt(seq)
-      /* v8 ignore next -- surface seqs are validated contiguous log references. */
-      if (event?.type === 'tool/result') candidates.push({ seq, event })
+      if (event?.type === 'assistant/message') lastAssistant = index
+      const message = messageOf(event)
+      priced.push({ seq, event, tokens: message === undefined ? 0 : this.ctx.tokenMeter.estimateMessage(message) })
     }
+    // (only results of the turn still running: the model reads them on its next step)
+    const open = openTurn(session)
+    let protectFrom = priced.length
+    if (open !== undefined) {
+      for (let index = Math.max(0, lastAssistant + 1); index < priced.length; index += 1) {
+        const event = priced[index]!.event
+        if (event?.type === 'tool/result' && (event.data as { turn?: number }).turn === open) {
+          protectFrom = index
+          break
+        }
+      }
+    }
+    if (options.protectTailTokens !== undefined && options.protectTailTokens > 0) {
+      let tail = 0
+      let index = priced.length
+      while (index > 0 && tail + priced[index - 1]!.tokens <= options.protectTailTokens) tail += priced[--index]!.tokens
+      protectFrom = Math.min(protectFrom, index)
+    }
+    const candidates: SnapshotCandidate[] = []
+    for (const [index, { seq, event }] of priced.entries()) {
+      if (index >= protectFrom) break
+      /* v8 ignore next -- surface seqs are validated contiguous log references. */
+      if (event?.type === 'tool/result') candidates.push({ seq, event: event as SessionEvent<'tool/result'> })
+    }
+    let estimate = options.currentTokens
 
     const pruned: PrunedEntry[] = []
     let charsRemoved = 0
     for (const { seq, event } of candidates) {
+      if (estimate !== undefined && options.targetTokens !== undefined && estimate <= options.targetTokens) break
       const result = event.data.message.content[0]
       const content = this.pruneContent(result.content)
       if (content === null) continue
@@ -179,6 +240,9 @@ export class ToolResultPruner extends Service {
         charsAfter,
       })
       charsRemoved += charsBefore - charsAfter
+      if (estimate !== undefined) {
+        estimate -= this.ctx.tokenMeter.estimateMessage(event.data.message) - this.ctx.tokenMeter.estimateMessage(message)
+      }
     }
     return { pruned, charsRemoved }
   }

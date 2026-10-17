@@ -272,7 +272,7 @@ export async function summarizeWithLlm(
   if (error !== undefined) throw error
 
   const rawOutput = assembler.blocks()
-  const summary = summaryText(rawOutput)
+  const summary = stripCallMarkup(summaryText(rawOutput))
   if (!summary.some(block => block.text.trim().length > 0)) {
     throw new Error('summarization produced no text summary content')
   }
@@ -317,6 +317,33 @@ function finishError(finish: FinishReason): Error | undefined {
     default:
       return undefined
   }
+}
+
+/**
+ * Remove tool-call markup around a summary: a model that answers with a `write` call leaves its opening tags at the
+ * start or its closing tags at the end of the text a server streamed, which would otherwise stay in every later
+ * request as part of the checkpoint.
+ */
+export function stripCallMarkup(
+  blocks: Array<Extract<ContentBlock, { type: 'text' }>>,
+): Array<Extract<ContentBlock, { type: 'text' }>> {
+  if (blocks.length === 0) return blocks
+  const out = blocks.slice()
+  // (and the checkpoint's own tags, which frameSummary adds: a model that echoes them would nest them)
+  out[0] = {
+    ...out[0]!,
+    text: out[0]!.text
+      .replace(/^\s*<tool_call>\s*<function=[^>\n]*>\s*(?:<parameter=[^>\n]*>\s*)?/, '')
+      .replace(/^\s*<compacted-summary>\s*/, ''),
+  }
+  const end = out.length - 1
+  out[end] = {
+    ...out[end]!,
+    text: out[end]!.text
+      .replace(/\s*(?:<\/parameter>\s*)?(?:<\/function>\s*)?<\/tool_call>\s*$/, '\n')
+      .replace(/\s*<\/compacted-summary>\s*$/, '\n'),
+  }
+  return out
 }
 
 /** Reject visual output and keep only text before synthesizing a user message. */

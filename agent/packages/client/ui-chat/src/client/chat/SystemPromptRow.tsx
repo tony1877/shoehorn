@@ -8,6 +8,8 @@ import css from './ContextInjectionRow.module.css'
 export interface SystemPromptRowProps {
   /** Complete model-visible prompt text. */
   text: string
+  /** The same prompt again at a rewritten conversation's new request series. */
+  repeat?: boolean
   /** The owning view's locale seat. */
   t: ChatViewSlotProps['t']
 }
@@ -19,14 +21,14 @@ export interface SystemPromptRowProps {
  * @param props - Complete prompt text and the locale seat.
  * @returns The system-prompt disclosure row.
  */
-export function SystemPromptRow({ text, t }: SystemPromptRowProps) {
+export function SystemPromptRow({ text, repeat = false, t }: SystemPromptRowProps) {
   const [open, setOpen] = useState(false)
   return (
     <DisclosureRow
       className={css.root}
       icon={<IconBrowseOutline16 size={14} />}
       chevronClassName={css.chevron}
-      title={t('message.systemPrompt')}
+      title={t(repeat ? 'message.systemPromptRepeat' : 'message.systemPrompt')}
       open={open}
       expandable
       expandOnRowClick
@@ -43,5 +45,5 @@ export function SystemPromptRow({ text, t }: SystemPromptRowProps) {
 export const SystemPromptNodeView = memo(function SystemPromptNodeView({
   node, t,
 }: Pick<ChatNodeViewProps<'system-prompt'>, 'node' | 't'>) {
-  return <SystemPromptRow text={node.data.text} t={t} />
+  return <SystemPromptRow text={node.data.text} repeat={node.data.repeat === true} t={t} />
 })

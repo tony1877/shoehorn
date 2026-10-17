@@ -97,3 +97,30 @@ One page across the project; details live in the linked documents.
 - The Models page shows the RTX 5080 as "17 GB" (VRAM rounding).
 - AUR files already point at 0.2.0 (push them when AUR registration reopens).
 - **Idle unload switch** (2026-10-17): the dashboard header has a "model" selector: stay loaded (warm), or unload after 5 min / 15 min / 1 h idle. `POST /idle-unload {"seconds": N}` applies it without a restart (the unloader waits for its turn, so a running answer is never cut), saves `--idle-unload` in the settings file, and "stay loaded" reloads a freed model at once. `/stats` reports `idle_unload`. Checked live: freed 36 s after a 30 s setting, reloaded 14 s after "stay loaded".
+
+### Long agent sessions (2026-10-17)
+
+Found with a live 92-131-step research session in dsh (two compactions), then fixed and re-run twice:
+
+- **Prompt reuse after a change in the middle** (server): the recurrent state could only resume where the last prompt
+  ended, so any prune or compaction re-read the whole conversation from the cached system prompt (up to 133K tokens,
+  ~90 s). Now a recurrent checkpoint is kept every `--ckpt-every` 8192 prompt tokens (`--ckpt-max` 8, ~157 MB of RAM
+  each on the 27B) and a changed prompt rewinds to the last one before the change (`Qwen35::save_rec` / `rewind`).
+  Checked: logits after the prompt bit-identical to a full read; 89 s -> 23 s for a prune 80K tokens in.
+  `--fast-prefill` now counts from the whole prompt's end, so reading in pieces does not change which tokens get the
+  residual.
+- **Tool-result pruning** (dsh): results the model has not read yet (the running turn's, after its last assistant
+  message) and the retained tail (16% of the window) are never pruned; a pass prunes every other eligible result at
+  once, so later passes change the prompt near its end.
+- **Compaction summaries**: requested with `tool_choice: "none"` (the server enforces it: no `<tool_call>` token), and
+  stray tool-call or checkpoint tags at the ends of a summary are stripped (a summary once came back as a `write` call
+  and its closing tags stayed in the checkpoint).
+- **Re-injected context** (dsh): a memory-index-only change of the runtime context waits for the next turn instead of
+  appending a whole snapshot mid-turn; after a compaction the skill catalog comes back with its normal wording instead
+  of "the catalog changed"; an unchanged system prompt at a new request series is shown as "Context rewritten · system
+  prompt unchanged".
+- **Dashboard**: a "model" selector in the header: stay loaded, or unload after 5 min / 15 min / 1 h idle (live, saved
+  as `--idle-unload`).
+- Left: the first prune pass after a compaction still re-reads most of the prompt (it prunes results right after the
+  checkpoint at its start). `E8_LOG_RAW=DIR` dumps each request body, the raw output and the top logits after the
+  prompt (last 32).
