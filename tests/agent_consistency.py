@@ -5,6 +5,11 @@
   C  repetition guard: a 12 KiB file of identical rows is written whole, or a runaway past it is still stopped
   D  JSON arguments: a list argument comes back as a JSON array
   E  unknown tool: a call to a function the request does not offer is passed on by name (the client reports it)
+  F  output limit inside a call: finish length, no half call, a note in the reply for the next turn
+  G  client abort mid-answer: the conversation goes on, answered, with the prompt reused
+  H  recall of an exact signature ~50K tokens back (beyond the exact VRAM window)
+  I  prompt reuse across the steps of a tool loop with reasoning on (no re-reads)
+  J  two sessions at once: both answered correctly
 
   python tests/agent_consistency.py --api-key-file KEY [--url http://127.0.0.1:8090] [--only A,B]
 """
@@ -56,7 +61,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--url', default='http://127.0.0.1:8090')
     ap.add_argument('--api-key-file', required=True)
-    ap.add_argument('--only', default='A,B,C,D,E')
+    ap.add_argument('--only', default='A,B,C,D,E,F,G,H,I,J')
     a = ap.parse_args()
     key = [l for l in open(a.api_key_file).read().splitlines() if l.strip() and not l.startswith('#')][-1].strip()
     only = set(a.only.split(','))
@@ -132,6 +137,84 @@ def main():
         # pass-through of an unknown name itself is covered by tests/tool_recovery.cpp)
         ok = all(n in ('magic_wand', 'write') for n in names) and finish in ('tool_calls', 'stop')
         report('E unknown tool', ok, f'calls {names or "none (answered in text)"}, finish {finish}')
+    if 'F' in only:  # a file bigger than max_tokens: no half call, a note the model will see next turn
+        body = dict(off, tools=[WRITE], max_tokens=600, messages=[{'role': 'user', 'content':
+                    'Create lib/big.py with 60 functions f1..f60, each with a 3-line docstring. Use the write tool now.'}])
+        _, _, content, calls, finish = stream(a.url, key, body)
+        report('F output limit inside a call', finish == 'length' and 'cut off at the output limit' in content,
+               f'finish {finish}, note {"present" if "output limit" in content else "MISSING"}, {len(calls)} streamed call(s) '
+               '(the client drops a call when the finish is length)')
+    if 'G' in only:  # the client goes away mid-answer; the conversation then goes on
+        q1 = 'Write a numbered list of 40 classic novels with their authors.'
+        req = urllib.request.Request(a.url + '/v1/chat/completions', json.dumps(dict(off, stream=True, max_tokens=1500, messages=[
+            {'role': 'user', 'content': q1}])).encode(), {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key})
+        r = urllib.request.urlopen(req, timeout=600)
+        got = ''
+        for line in r:
+            line = line.decode().strip()
+            if line.startswith('data: {'):
+                got += (json.loads(line[6:])['choices'][0].get('delta') or {}).get('content') or ''
+            if len(got) > 300:
+                break
+        r.close()  # abort mid-answer
+        time.sleep(1.0)
+        msgs = [{'role': 'user', 'content': q1}, {'role': 'assistant', 'content': got},
+                {'role': 'user', 'content': 'Stop the list there. In one line: which author appears first in your list?'}]
+        body = dict(off, max_tokens=60, messages=msgs)
+        req = urllib.request.Request(a.url + '/v1/chat/completions', json.dumps(body).encode(),
+                                     {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key})
+        j = json.loads(urllib.request.urlopen(req, timeout=600).read())
+        ans = j['choices'][0]['message'].get('content') or ''
+        first = got.split('\n')[0] if got else ''
+        cached = j['usage']['prompt_tokens_details']['cached_tokens']
+        report('G after a client abort', bool(ans.strip()), f'answer {ans.strip()[:70]!r}; list started {first[:50]!r}; '
+               f'{cached} of {j["usage"]["prompt_tokens"]} prompt tokens reused')
+    if 'H' in only:  # an exact detail ~50K tokens back (beyond the exact VRAM window: sparse attention)
+        filler = ' '.join(f'Log line {i}: worker {i % 17} finished batch {i * 31 % 997} in {i % 9 + 1} ms.' for i in range(4200))
+        needle = 'def reconcile_ledger(entries: list[LedgerEntry], *, tolerance_cents: int = 3, strict: bool = False) -> Report:'
+        doc = f'Module notes. The key function is:\n{needle}\nThen the logs follow.\n' + filler
+        body = dict(off, max_tokens=120, messages=[{'role': 'user', 'content': doc + '\n\nQuote the exact signature of '
+                    'reconcile_ledger from the start of this message, on one line, nothing else.'}])
+        _, _, content, _, _ = stream(a.url, key, body)
+        report('H recall ~50K tokens back', needle.split('def ')[1].split(' ->')[0] in content,
+               f'answer {content.strip()[:150]!r}')
+    if 'I' in only:  # an agent loop: each step's prompt should be read from the cache, not again
+        sys_p = 'You are a coding agent. Use the tools.'
+        msgs = [{'role': 'system', 'content': sys_p}, {'role': 'user', 'content':
+                 'Create notes/a.txt, then notes/b.txt, then notes/c.txt, each with one line about its letter. '
+                 'One write call per step, waiting for each result.'}]
+        reuse = []
+        for step in range(4):
+            body = {'tools': [WRITE], 'max_tokens': 2000, 'messages': msgs, 'chat_template_kwargs': {'enable_thinking': True}}
+            req = urllib.request.Request(a.url + '/v1/chat/completions', json.dumps(body).encode(),
+                                         {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key})
+            j = json.loads(urllib.request.urlopen(req, timeout=900).read())
+            u, m = j['usage'], j['choices'][0]['message']
+            reuse.append((u['prompt_tokens_details']['cached_tokens'], u['prompt_tokens']))
+            if not m.get('tool_calls'):
+                break
+            msgs.append({'role': 'assistant', 'content': m.get('content') or '', 'tool_calls': m['tool_calls'],
+                         'reasoning_content': m.get('reasoning_content') or ''})
+            for tc in m['tool_calls']:
+                msgs.append({'role': 'tool', 'tool_call_id': tc['id'], 'content': 'ok, written'})
+        later = reuse[1:]
+        ok = bool(later) and all(c >= 0.9 * (p - 400) for c, p in later)  # all but the new turn's tokens reused
+        report('I prompt reuse across agent steps', ok, ', '.join(f'{c}/{p}' for c, p in reuse) + ' reused/prompt per step')
+    if 'J' in only:  # two sessions at once: both answer correctly, the second waits its turn
+        res = {}
+        def one(tag, q):
+            t0 = time.time()
+            _, _, content, _, finish = stream(a.url, key, dict(off, max_tokens=300, messages=[{'role': 'user', 'content': q}]))
+            res[tag] = (content, finish, time.time() - t0)
+        th = [threading.Thread(target=one, args=('a', 'What is 17 * 23? Answer with the number only.')),
+              threading.Thread(target=one, args=('b', 'What is the capital of Australia? One word.'))]
+        for t in th:
+            t.start()
+        for t in th:
+            t.join()
+        ok = '391' in res['a'][0] and 'Canberra' in res['b'][0]
+        report('J two sessions at once', ok, f"a {res['a'][0].strip()[:20]!r} in {res['a'][2]:.1f} s, "
+               f"b {res['b'][0].strip()[:20]!r} in {res['b'][2]:.1f} s")
     return 1 if fails else 0
 
 

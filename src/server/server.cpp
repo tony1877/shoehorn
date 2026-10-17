@@ -1963,6 +1963,19 @@ loaded:
                     R.msg.tool_calls.back().name.c_str());
             R.msg.tool_calls.pop_back();
         }
+        // cut by max_tokens inside a call (a file bigger than the output limit): the call was not run; say so in the
+        // reply, which the client keeps in the conversation, so the model writes it in parts instead of retrying it whole
+        if (lo != std::string::npos && (lc == std::string::npos || lc < lo) && R.finish == "length") {
+            const size_t      fn   = text.find("<function=", lo);
+            const size_t      fe   = fn == std::string::npos ? fn : text.find('>', fn);
+            const std::string name = fe == std::string::npos ? std::string("tool") : text.substr(fn + 10, fe - fn - 10);
+            const std::string note = std::string(R.msg.content.empty() ? "" : "\n\n") + "[The " + name +
+                                     " call was cut off at the output limit (max_tokens) and was not run. Write large files "
+                                     "in parts: a first part, then the rest in further calls (edit, or more files).]";
+            R.msg.content += note;
+            if (on_delta) on_delta(json{ { "content", note } });
+            fprintf(stderr, "tool call '%s' cut off by max_tokens: noted in the reply\n", name.c_str());
+        }
     }
 
     S.last_used = std::chrono::steady_clock::now();

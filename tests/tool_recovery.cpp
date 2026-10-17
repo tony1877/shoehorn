@@ -111,6 +111,12 @@ int main() {
                                 "</parameter>\n</function>\n</tool_call>", { todo }, m8, false);
     CHECK(m8.tool_calls.size() == 1);
     CHECK(nlohmann::ordered_json::parse(m8.tool_calls[0].arguments)["todos"][0]["content"] == "fix bug");
+    // JSON-style calls (no <function=): the strict parse's calls are kept
+    common_chat_msg m10;
+    m10.tool_calls.push_back({ "write", R"({"file_path":"j.txt","content":"x"})", "id" });
+    e8::cli::lenient_tool_calls("<tool_call>\n{\"name\": \"write\", \"arguments\": {\"file_path\": \"j.txt\", \"content\": \"x\"}}\n</tool_call>",
+                                tools, m10, false);
+    CHECK(m10.tool_calls.size() == 1 && m10.tool_calls[0].name == "write");
     // a function the request does not offer is passed on by name (the client reports "unknown tool" to the model)
     common_chat_msg m9;
     e8::cli::lenient_tool_calls("<tool_call>\n<function=magic_wand>\n<parameter=spell>\nlumos\n</parameter>\n</function>\n</tool_call>",

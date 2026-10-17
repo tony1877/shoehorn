@@ -22,11 +22,13 @@ import type {
 } from '@deepseek-ai/dsh-fs'
 import {
   applyLiteralEdit,
+  hasUtf8Bom,
   listDirectory,
   normalizeLineEndings,
   probe,
   probeNoFollow,
   readForEdit,
+  readHeadBytes,
   readTextForDiff,
   readWholeBytes,
   readWholeText,
@@ -201,9 +203,13 @@ export class LocalFileSystem extends FileSystem {
       const before = diffable
         ? await readTextForDiff(target.targetKey, this.config.diffBasisMaxBytes, signal)
         : null
+      // replacing a file that starts with a UTF-8 byte-order mark keeps it (Windows tools such as PowerShell 5.1
+      // need it to read non-ASCII text as UTF-8)
+      const keepBom = existing !== null && existing.type === 'file' && !content.startsWith('\uFEFF')
+        && hasUtf8Bom(await readHeadBytes(target.targetKey, 3))
       await writeFileAtomic(
         target.targetKey,
-        content,
+        keepBom ? '\uFEFF' + content : content,
         existing?.mode,
         signal,
         this.internals,
@@ -244,7 +250,8 @@ export class LocalFileSystem extends FileSystem {
 
       const original = await readForEdit(target.targetKey, target.displayPath, signal)
       const edited = applyLiteralEdit(original.content, edit.oldString, edit.newString, edit.replaceAll, target.displayPath)
-      const content = restoreLineEndings(edited.content, original.lineEndings)
+      // the file's own line endings and UTF-8 byte-order mark (TextDecoder drops it on read)
+      const content = (original.bom ? '\uFEFF' : '') + restoreLineEndings(edited.content, original.lineEndings)
       await writeFileAtomic(target.targetKey, content, existing.mode, signal, this.internals)
 
       const after = await probe(target.targetKey)

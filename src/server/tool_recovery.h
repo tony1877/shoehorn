@@ -280,6 +280,9 @@ inline void lenient_tool_calls(const std::string & text, const std::vector<commo
     if (text.find("<tool_call>") == std::string::npos) return;
     size_t     content_end = std::string::npos;
     const auto calls       = xml_tool_calls(text, tools, partial, content_end);
+    // a model that writes its calls another way (JSON inside <tool_call>, as Hermes-style fine-tunes do): the strict
+    // parse's calls stand
+    if (calls.empty() && !msg.tool_calls.empty() && text.find("<function=") == std::string::npos) return;
     if (!partial && calls.size() != msg.tool_calls.size()) {
         fprintf(stderr, "tool calls: %zu by the XML parser, %zu by the strict grammar (the XML parser's are used)\n",
                 calls.size(), msg.tool_calls.size());

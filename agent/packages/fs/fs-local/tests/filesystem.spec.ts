@@ -353,6 +353,14 @@ describe('listDir', () => {
 })
 
 describe('writeText', () => {
+  it('replacing a file with a UTF-8 byte-order mark keeps the mark', async () => {
+    await writeFile(join(dir, 'b.ps1'), Buffer.concat([Buffer.from([0xEF, 0xBB, 0xBF]), Buffer.from('old')]))
+    await fs.writeText(await fs.resolve('b.ps1'), 'néw')
+    const bytes = await readFile(join(dir, 'b.ps1'))
+    expect([...bytes.subarray(0, 3)]).toEqual([0xEF, 0xBB, 0xBF])
+    expect(bytes.subarray(3).toString('utf8')).toBe('néw')
+  })
+
   it('createIfAbsent creates a new file', async () => {
     const target = await fs.resolve('new.txt')
     const outcome = await fs.writeText(target, 'fresh', { kind: 'createIfAbsent' })
@@ -622,6 +630,24 @@ describe('editText', () => {
     // The written file keeps the original CRLF endings (before/after are the
     // LF-normalized diff basis, not the on-disk bytes).
     expect(await readFile(join(dir, 'a.txt'), 'utf8')).toBe('a\r\nNEW\r\nb\r\n')
+  })
+
+  it('keeps a UTF-8 byte-order mark (TextDecoder drops it on read)', async () => {
+    await writeFile(join(dir, 'bom.ps1'), Buffer.concat([Buffer.from([0xEF, 0xBB, 0xBF]), Buffer.from('Write-Host "héllo"\r\n')]))
+    const target = await fs.resolve('bom.ps1')
+    await fs.editText(target, { oldString: 'héllo', newString: 'wörld', replaceAll: false })
+    const bytes = await readFile(join(dir, 'bom.ps1'))
+    expect([...bytes.subarray(0, 3)]).toEqual([0xEF, 0xBB, 0xBF])
+    expect(bytes.subarray(3).toString('utf8')).toBe('Write-Host "wörld"\r\n')
+  })
+
+  it('names UTF-16 and legacy code-page files instead of calling them binary', async () => {
+    await writeFile(join(dir, 'u16.txt'), Buffer.concat([Buffer.from([0xFF, 0xFE]), Buffer.from('hello world', 'utf16le')]))
+    await writeFile(join(dir, 'cp1252.txt'), Buffer.from([0x63, 0x61, 0x66, 0xE9, 0x0A]))
+    await expect(fs.editText(await fs.resolve('u16.txt'), { oldString: 'hello', newString: 'x', replaceAll: false }))
+      .rejects.toMatchObject({ code: 'FS_NOT_TEXT', message: expect.stringContaining('UTF-16') })
+    await expect(fs.editText(await fs.resolve('cp1252.txt'), { oldString: 'caf', newString: 'x', replaceAll: false }))
+      .rejects.toMatchObject({ code: 'FS_NOT_TEXT', message: expect.stringContaining('code page') })
   })
 
   it('checks the stale version BEFORE literal matching', async () => {

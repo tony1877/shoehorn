@@ -76,6 +76,22 @@ One page across the project; details live in the linked documents.
 - `tests/agent_consistency.py` (live): keep-alives, reasoning budget, repetition, JSON list arguments, unknown tool.
   Left: the model loses count on long runs of identical lines (asked for 150, writes until stopped).
 
+### Agent edge cases (2026-10-17)
+
+- Tool calls written as JSON inside `<tool_call>` (Hermes-style fine-tunes) keep the strict parse's calls; the XML
+  parser only replaces them when the text uses `<function=`. (The 27B and Flash-Next both use `<function=`.)
+- A call cut off by `max_tokens` (a file bigger than the output limit) is not run, and the reply now says so: "[The
+  write call was cut off at the output limit ... Write large files in parts ...]", which the model sees next turn.
+- dsh `edit` and `write` keep a UTF-8 byte-order mark (it was dropped: PowerShell 5.1 then misreads non-ASCII
+  scripts). UTF-16 and legacy code-page files are named as such with how to convert them, instead of "binary file".
+- Live checks (agent_consistency.py F-J), all passing: output-limit note; a client abort mid-answer, then the
+  conversation goes on (answered, prompt reused); an exact signature recalled ~50K tokens back; a four-step tool
+  loop with reasoning reuses every earlier step (587/659, 654/726, 721/793 tokens); two sessions at once both
+  answered (the second waits its turn: no slots, the full context window stays).
+- Checked, no change: dsh compaction keeps exact paths and file state and dsh refuses edits to unread or changed
+  files; shell output is capped at 64 KB and `read` at 2000 lines; a session with images switched to Flash-Next (text
+  only) goes on, the images sent as text placeholders.
+
 ### Small
 
 - The Models page shows the RTX 5080 as "17 GB" (VRAM rounding).

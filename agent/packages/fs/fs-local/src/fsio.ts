@@ -322,8 +322,33 @@ export async function listDirectory(target: LocalTarget, signal?: AbortSignal): 
 
 // --- Reading ---
 
-function notTextError(verb: 'read' | 'edit', displayPath: string): FsError {
-  return new FsError(`cannot ${verb} "${displayPath}": invalid UTF-8 text`, 'FS_NOT_TEXT')
+// How to read a file the tools cannot: only UTF-8 is supported, so the model is told to convert it first rather
+// than treat it as unreadable (Windows has many UTF-16 and legacy code-page text files).
+const CONVERT_HINT = 'only UTF-8 is supported: convert it first (PowerShell: Get-Content -Raw -Encoding <enc> F | '
+  + 'Set-Content -Encoding utf8 F; elsewhere: iconv)'
+
+/** UTF-16 text: a byte-order mark, or a sample whose every other byte is NUL (ASCII text in UTF-16). */
+function looksUtf16(buffer: Uint8Array): boolean {
+  if (buffer.length >= 2 && ((buffer[0] === 0xFF && buffer[1] === 0xFE) || (buffer[0] === 0xFE && buffer[1] === 0xFF))) return true
+  const n = Math.min(buffer.length, 512) & ~1
+  if (n < 8) return false
+  let even = 0, odd = 0
+  for (let i = 0; i < n; i += 2) {
+    if (buffer[i] === 0) even++
+    if (buffer[i + 1] === 0) odd++
+  }
+  return Math.max(even, odd) >= 0.9 * (n / 2) && Math.min(even, odd) <= 0.1 * (n / 2)
+}
+
+function notTextError(verb: 'read' | 'edit', displayPath: string, hint?: string): FsError {
+  return new FsError(`cannot ${verb} "${displayPath}": invalid UTF-8 text${hint ? ` (${hint})` : ''}`, 'FS_NOT_TEXT')
+}
+
+/** NUL bytes in the sample: UTF-16 text (reported as text in another encoding) or binary. */
+function nulError(buffer: Uint8Array, verb: 'read' | 'edit', displayPath: string): FsError {
+  return looksUtf16(buffer)
+    ? notTextError(verb, displayPath, `UTF-16 text; ${CONVERT_HINT}`)
+    : new FsError(`cannot ${verb} "${displayPath}": binary file`, 'FS_NOT_TEXT')
 }
 
 function decodeUtf8(buffer: Uint8Array, verb: 'read' | 'edit', displayPath: string): string {
@@ -332,8 +357,33 @@ function decodeUtf8(buffer: Uint8Array, verb: 'read' | 'edit', displayPath: stri
   } catch (error: unknown) {
     /* v8 ignore next 2 -- TextDecoder({fatal}) only throws TypeError on invalid bytes; any other throw is an unreachable runtime fault. */
     if (!(error instanceof TypeError)) throw error
-    throw notTextError(verb, displayPath)
+    throw notTextError(verb, displayPath, `probably a legacy code page such as Windows-1252; ${CONVERT_HINT}`)
   }
+}
+
+/**
+ * The first `n` bytes of a file (fewer when it is shorter; none when it cannot be opened).
+ * @param absolutePath - the file to read.
+ * @param n - how many bytes at most.
+ * @returns the bytes read.
+ */
+export async function readHeadBytes(absolutePath: string, n: number): Promise<Uint8Array> {
+  let fh
+  try {
+    fh = await open(absolutePath, 'r')
+    const buf = new Uint8Array(n)
+    const { bytesRead } = await fh.read(buf, 0, n, 0)
+    return buf.subarray(0, bytesRead)
+  } catch {
+    return new Uint8Array(0)
+  } finally {
+    await fh?.close()
+  }
+}
+
+/** Whether bytes start with the UTF-8 byte-order mark (TextDecoder drops it: writes put it back). */
+export function hasUtf8Bom(buffer: Uint8Array): boolean {
+  return buffer.length >= 3 && buffer[0] === 0xEF && buffer[1] === 0xBB && buffer[2] === 0xBF
 }
 
 function decodeUtf8Stream(
@@ -376,9 +426,7 @@ export async function readWholeText(target: LocalTarget, signal?: AbortSignal): 
   await statRegularFile(target, 'read', signal)
   const raw = await readFileAbortable(target.targetKey, 'read', signal)
   throwIfAborted(signal, 'read')
-  if (raw.subarray(0, BINARY_SAMPLE_BYTES).includes(0)) {
-    throw new FsError(`cannot read "${target.displayPath}": binary file`, 'FS_NOT_TEXT')
-  }
+  if (raw.subarray(0, BINARY_SAMPLE_BYTES).includes(0)) throw nulError(raw, 'read', target.displayPath)
   return decodeUtf8(raw, 'read', target.displayPath)
 }
 
@@ -671,13 +719,13 @@ export async function readForEdit(
   absolutePath: string,
   displayPath: string,
   signal?: AbortSignal,
-): Promise<{ content: string; lineEndings: LineEndings }> {
+): Promise<{ content: string; lineEndings: LineEndings; bom: boolean }> {
   throwIfAborted(signal, 'edit')
   const buffer = await readFileAbortable(absolutePath, 'edit', signal)
   throwIfAborted(signal, 'edit')
-  if (buffer.includes(0)) throw new FsError(`cannot edit "${displayPath}": binary file`, 'FS_NOT_TEXT')
+  if (buffer.includes(0)) throw nulError(buffer, 'edit', displayPath)
   const raw = decodeUtf8(buffer, 'edit', displayPath)
-  return { content: normalizeLineEndings(raw), lineEndings: detectLineEndings(raw) }
+  return { content: normalizeLineEndings(raw), lineEndings: detectLineEndings(raw), bom: hasUtf8Bom(buffer) }
 }
 
 /**
