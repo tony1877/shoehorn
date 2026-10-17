@@ -268,7 +268,8 @@ struct Server {
         return d;
     }();
     std::chrono::steady_clock::time_point last_used = std::chrono::steady_clock::now();
-    std::mt19937_64                  rng{ std::random_device{}() };
+    std::atomic<int>                 idle_unload{ 0 };  // seconds idle before the model is freed (0 = stay loaded); the dashboard changes it live
+    std::mt19937_64                 rng{ std::random_device{}() };
 };
 
 std::string read_file(const std::string & p) {
@@ -2527,24 +2528,26 @@ int serve(const std::vector<std::string> & args_in) {
             if (!sp->model && !sp->load(0, e)) fprintf(stderr, "preload: %s\n", e.c_str());
         }).detach();
     }
-    std::thread idle;
-    if (idle_unload > 0) {  // free the model after idle_unload seconds without requests
-        idle = std::thread([sp, idle_unload] {
-            for (;;) {
-                std::this_thread::sleep_for(std::chrono::seconds(5));
-                if (!sp->model || std::chrono::steady_clock::now() - sp->last_used < std::chrono::seconds(idle_unload)) continue;
-                Turn turn(*sp, true);
-                if (sp->model && std::chrono::steady_clock::now() - sp->last_used >= std::chrono::seconds(idle_unload)) {
-                    sp->drafter.reset();
-                    sp->q35 = nullptr;
-                    sp->model.reset();
-                    sp->slots.clear();
-                    fprintf(stderr, "idle for %d s: model unloaded\n", idle_unload);
-                }
+    // free the model after S->idle_unload seconds without requests; always running, so the dashboard can switch it on
+    // and off without a restart. It takes the turn, so it never cuts into a generation, and checks again once it has it.
+    S->idle_unload = std::max(0, idle_unload);
+    std::thread([sp] {
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            const int lim = sp->idle_unload;
+            if (lim <= 0 || !sp->model ||
+                std::chrono::steady_clock::now() - sp->last_used < std::chrono::seconds(lim)) continue;
+            Turn turn(*sp, true);
+            const int lim2 = sp->idle_unload;
+            if (lim2 > 0 && sp->model && std::chrono::steady_clock::now() - sp->last_used >= std::chrono::seconds(lim2)) {
+                sp->drafter.reset();
+                sp->q35 = nullptr;
+                sp->model.reset();
+                sp->slots.clear();
+                fprintf(stderr, "idle for %d s: model unloaded\n", lim2);
             }
-        });
-        idle.detach();
-    }
+        }
+    }).detach();
 
     if (!S->timing_log.empty()) {  // the dashboard starts with the last requests from the timing log
         std::ifstream tl(S->timing_log);
@@ -2612,6 +2615,7 @@ int serve(const std::vector<std::string> & args_in) {
         for (auto & e : S->entries) models.push_back(e.alias);
         out["models"] = models;
         out["loaded"] = S->model ? S->entries[(size_t) S->active].alias : "";
+        out["idle_unload"] = S->idle_unload.load();
         out["config"] = S->config;
         {  // vision encoder (the dashboard's images panel)
             json enc = { { "vision", false }, { "local", "" } };
@@ -2853,6 +2857,37 @@ int serve(const std::vector<std::string> & args_in) {
         }
         save_models(*S);
         resp.set_content(json{ { "success", true } }.dump(), "application/json");
+    });
+    // ---- the dashboard's idle switch: {"seconds": N} frees the model after N idle seconds, 0 keeps it loaded and warm.
+    // Applied at once without a restart (a running generation is never touched: the unloader waits for its turn) and
+    // saved as --idle-unload in the settings file. Switching to "stay loaded" loads the model now if it was freed.
+    http.Post("/idle-unload", [&](const httplib::Request & req, httplib::Response & resp) {
+        if (!may_change(req, resp)) return;
+        const json b = body_of(req);
+        if (!b.contains("seconds") || !b["seconds"].is_number_integer()) return fail(resp, "need seconds (0 = stay loaded)");
+        const int sec = std::max(0, b["seconds"].get<int>());
+        S->idle_unload = sec;
+        S->last_used   = std::chrono::steady_clock::now();  // the countdown starts now, not at the last request
+        if (!S->settings.contains("flags") || !S->settings["flags"].is_object()) S->settings["flags"] = json::object();
+        S->settings["flags"]["--idle-unload"] = std::to_string(sec);
+        bool saved = false;
+        if (!S->settings_file.empty()) {
+            std::error_code ec;
+            std::filesystem::create_directories(std::filesystem::path(S->settings_file).parent_path(), ec);
+            std::ofstream f(S->settings_file, std::ios::binary | std::ios::trunc);
+            f << S->settings.dump(2);
+            f.close();
+            saved = (bool) f;
+        }
+        if (sec == 0 && !S->model)
+            std::thread([sp = S.get()] {
+                Turn        turn(*sp, true);
+                std::string e;
+                if (!sp->model && sp->idle_unload == 0 && !sp->load(sp->active < 0 ? 0 : sp->active, e))
+                    fprintf(stderr, "stay loaded: %s\n", e.c_str());
+            }).detach();
+        fprintf(stderr, "idle unload: %s\n", sec ? (std::to_string(sec) + " s").c_str() : "off (stay loaded)");
+        resp.set_content(json{ { "success", true }, { "idle_unload", sec }, { "saved", saved } }.dump(), "application/json");
     });
     // ---- the Settings page: the editable flags with their current values, saved to the settings file; applying
     // restarts the server (a new process with the same command line, which waits for this one to exit)
@@ -3399,7 +3434,7 @@ int serve(const std::vector<std::string> & args_in) {
 
     printf("shoehorn serve: %s on http://%s:%d (model id \"%s\", ctx %d, %s)\n", S->entries[0].path.c_str(), host.c_str(), port,
            S->entries[0].alias.c_str(), n_ctx,
-           idle_unload > 0 ? "loaded on demand" : S->q35 && S->q35->has_residual() ? "base + residual, speculative" : "plain decoding");
+           S->idle_unload > 0 ? "loaded on demand" : S->q35 && S->q35->has_residual() ? "base + residual, speculative" : "plain decoding");
     fflush(stdout);
     if (!http.listen(host, port)) {
         fprintf(stderr, "cannot listen on %s:%d\n", host.c_str(), port);

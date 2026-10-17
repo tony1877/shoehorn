@@ -36,6 +36,8 @@ header .sp { flex: 1; }
 .status.writing { color: var(--ink); } .status.writing i { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); animation: beat 1.2s ease-in-out infinite; }
 .status.reading i { background: var(--read); animation: beat .7s ease-in-out infinite; }
 .status.off i { background: var(--bad); }
+.keep { display: inline-flex; align-items: center; gap: 7px; font: 12px var(--f-mono); color: var(--ink2); padding: 3px 4px 3px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+.keep select { font: 12px var(--f-mono); color: var(--ink); background: var(--raise); border: 1px solid var(--line2); border-radius: 4px; padding: 2px 4px; }
 @keyframes beat { 50% { opacity: .4; } }
 
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; min-width: 0; }
@@ -127,6 +129,8 @@ footer { color: var(--muted); font: 11.5px var(--f-mono); display: flex; justify
     <div class="crumbs" id="crumbs"></div>
     <span class="sp"></span>
     <nav><a href="/dashboard" class="on">Dashboard</a><a href="/sensors">Sensors</a><a href="/models">Models</a><a href="/settings">Settings</a></nav>
+    <label class="keep" title="Stay loaded keeps the model in VRAM and warm. Otherwise it is freed after that long without requests and loads again (about 40 s) on the next one. Applies now, no restart; a running answer is never cut.">model
+      <select id="keep"><option value="0">stay loaded</option><option value="300">unload after 5 min idle</option><option value="900">unload after 15 min idle</option><option value="3600">unload after 1 h idle</option></select></label>
     <span class="status" id="status"><i></i><span id="statusText">connecting</span></span>
   </header>
 
@@ -506,6 +510,24 @@ function renderList() {
   $("foot").textContent = s && !isLive ? `Last activity ${dur(Date.now() / 1e3 - s.end)} ago` : "";
 }
 
+// ---- keep loaded / unload when idle
+function showKeep(sec) {
+  const el = $("keep");
+  if (document.activeElement === el || sec == null) return;
+  if (![...el.options].some(o => o.value === String(sec))) el.add(new Option(`unload after ${dur(sec)} idle`, String(sec)));
+  el.value = String(sec);
+}
+$("keep").onchange = async () => {
+  const el = $("keep"); el.disabled = true;
+  let key = ""; try { key = localStorage.getItem("shoehorn-api-key") || ""; } catch (e) {}
+  try {
+    const r = await fetch("/idle-unload", { method: "POST", headers: Object.assign({ "Content-Type": "application/json" }, key ? { Authorization: "Bearer " + key } : {}), body: JSON.stringify({ seconds: +el.value }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+  } catch (e) { alert("Could not change it: " + e.message); }
+  el.disabled = false; el.blur();
+};
+
 // ---- polling
 async function poll() {
   let d;
@@ -514,6 +536,7 @@ async function poll() {
   for (const r of d.recent || []) if (r.t > newest) { ALL.push(r); newest = r.t; }
   const nowP = performance.now(), nowS = Date.now() / 1000, was = live;
   live = d.live || {}; cfg = d.config || {}; mem = d.mem || {}; loaded = d.loaded || ""; hw = d.hw || {}; enc = d.encoder || {};
+  showKeep(d.idle_unload);
   if (hw.vram_read != null) { reads.push({ t: nowS0(), v: hw.vram_read, r: hw.ram_read }); while (reads.length > 2 && nowS0() - reads[1].t >= 2) reads.shift(); }
   if (live.busy && live.reading) { readHist.push({ t: nowS0(), n: live.read || 0 }); while (readHist.length > 2 && nowS0() - readHist[1].t >= 2) readHist.shift(); }
   else readHist = [];

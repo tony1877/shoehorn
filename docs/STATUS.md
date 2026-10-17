@@ -96,3 +96,4 @@ One page across the project; details live in the linked documents.
 
 - The Models page shows the RTX 5080 as "17 GB" (VRAM rounding).
 - AUR files already point at 0.2.0 (push them when AUR registration reopens).
+- **Idle unload switch** (2026-10-17): the dashboard header has a "model" selector: stay loaded (warm), or unload after 5 min / 15 min / 1 h idle. `POST /idle-unload {"seconds": N}` applies it without a restart (the unloader waits for its turn, so a running answer is never cut), saves `--idle-unload` in the settings file, and "stay loaded" reloads a freed model at once. `/stats` reports `idle_unload`. Checked live: freed 36 s after a 30 s setting, reloaded 14 s after "stay loaded".
