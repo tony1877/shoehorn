@@ -113,42 +113,22 @@ const modelPolicy: z<ModelCompactPolicyConfig> = z.object({
 export class BasicCompactionEngine extends CompactionEngine {
   static inject = ['llm', 'tokenMeter', 'sessions']
 
-  // Local defaults (dsh patch dsh-compaction-summary-quality), applied by the
-  // loader to every preset that mounts this plugin, including presets with no
-  // config at all such as dsh's stock `standard`: they get the same summarizer
-  // setup as `minimal-compact` / `standard-compact` instead of summarizing
-  // with the session's own model (thinking on) under an 8192-token cap, where
-  // the thinking ate the cap. `local-27b-summarizer` is the thinking-off route
-  // in ~/.dsh/settings.yaml. A preset's own values still win. Constructing the
-  // engine directly (tests) keeps the stock defaults from `resolveConfig`.
+  // The summarizer route, its limits and shoehorn's options (condensed tool output, the detailed template; dsh patch
+  // dsh-compaction-summary-quality) come from the preset; shoehorn's presets turn them on.
   static Config: z<BasicCompactionConfig> = z.object({
-    thresholdRatio: z.number().default(0.7),
+    thresholdRatio: thresholdRatioSchema,
+    headroomTokens: headroomTokensSchema,
     retainRatio: retainRatioSchema,
     retainTokens: retainTokensSchema,
-    summarizationProvider: z.string().default('local-27b-summarizer'),
-    summarizationModel: z.string().default('qwen3.8-27b-heretic-ara'),
-    maxTokens: z.number().step(1).min(1).default(48000),
-    compactionRetries: z.number().step(1).min(0).default(3),
-    maxOverflowRetries: z.number().step(1).min(0).default(3),
-    // orca chats summarize on the orca 27B's thinking-off route (the heretic
-    // chats use the default pair above). A preset's own list replaces this.
-    modelPolicies: z.array(modelPolicy).default([
-      {
-        provider: 'local-27b-orca',
-        model: 'qwen3.8-27b-uncensored-orca',
-        summarizationProvider: 'local-27b-orca-summarizer',
-        summarizationModel: 'qwen3.8-27b-uncensored-orca',
-      },
-      {
-        provider: 'local-flash-orca',
-        model: 'qwen3.8-flash-next-uncensored-orca',
-        summarizationProvider: 'local-27b-orca-summarizer',
-        summarizationModel: 'qwen3.8-27b-uncensored-orca',
-      },
-    ]),
+    summarizationProvider: summarizationProviderSchema,
+    summarizationModel: summarizationModelSchema,
+    maxTokens: maxTokensSchema,
+    compactionRetries: compactionRetriesSchema,
+    maxOverflowRetries: maxOverflowRetriesSchema,
+    modelPolicies: z.array(modelPolicy),
     auto: z.boolean(),
-    condenseToolOutput: z.boolean().default(true),
-    summaryTemplate: z.union(['standard', 'detailed'] as const).default('detailed'),
+    condenseToolOutput: z.boolean().default(false),
+    summaryTemplate: z.union(['standard', 'detailed'] as const).default('standard'),
   })
 
   /** Resolved and validated compaction configuration. */

@@ -286,6 +286,7 @@ describe('ToolResultPruner pass limits', () => {
     session.append('turn/start', { turn: 2 })
     session.append('step/start', { turn: 2, step: 1 })
     session.append('assistant/message', {
+      stream: [],
       turn: 2,
       step: 1,
       message: createMessage({

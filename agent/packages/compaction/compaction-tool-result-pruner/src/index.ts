@@ -45,17 +45,19 @@ export interface PruneOptions {
   readonly targetTokens?: number
 }
 
-function messageOf(event: SessionEvent | undefined): Message | undefined {
+/** The model-facing message an event contributes, if it is a message event. */
+function messageOf(session: Session, event: SessionEvent | undefined): Message | undefined {
   if (event === undefined) return undefined
-  const data = event.data as { message?: Message } | Message | undefined
-  if (data !== undefined && typeof data === 'object' && 'message' in data && data.message !== undefined) return data.message
-  if (event.type === 'user/message') return data as Message
-  return undefined
+  const data = event.data as { message?: unknown } | undefined
+  const isMessage = event.type === 'user/message'
+    || (data !== undefined && typeof data === 'object' && 'message' in data && data.message !== undefined)
+  return isMessage ? session.deriveEventMessage(event as never) as Message : undefined
 }
 
 /** The number of the turn still running, if any. */
 function openTurn(session: Session): number | undefined {
   for (let index = session.seq - 1; index >= 0; index -= 1) {
+    // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
     const event = session.eventAt(SessionSeq(index))
     if (event?.type === 'turn/end') return undefined
     if (event?.type === 'turn/start') return (event.data as { turn: number }).turn
@@ -170,9 +172,10 @@ export class ToolResultPruner extends Service {
     const priced: Array<{ seq: SessionSeq, event: SessionEvent | undefined, tokens: number }> = []
     let lastAssistant = -1
     for (const [index, seq] of nodes.entries()) {
+      // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
       const event = session.eventAt(seq)
       if (event?.type === 'assistant/message') lastAssistant = index
-      const message = messageOf(event)
+      const message = messageOf(session, event)
       priced.push({ seq, event, tokens: message === undefined ? 0 : this.ctx.tokenMeter.estimateMessage(message) })
     }
     // (only results of the turn still running: the model reads them on its next step)
@@ -205,8 +208,8 @@ export class ToolResultPruner extends Service {
     let charsRemoved = 0
     for (const { seq, event } of candidates) {
       if (estimate !== undefined && options.targetTokens !== undefined && estimate <= options.targetTokens) break
-      const result = event.data.message.content[0]
-      const content = this.pruneContent(result.content)
+      const original = session.deriveEventMessage(event) as ToolResultMessage
+      const content = this.pruneContent(original.content)
       if (content === null) continue
       const charsBefore = this.measureContent(original.content)
       const charsAfter = this.measureContent(content)
@@ -238,7 +241,7 @@ export class ToolResultPruner extends Service {
       })
       charsRemoved += charsBefore - charsAfter
       if (estimate !== undefined) {
-        estimate -= this.ctx.tokenMeter.estimateMessage(event.data.message) - this.ctx.tokenMeter.estimateMessage(message)
+        estimate -= this.ctx.tokenMeter.estimateMessage(original) - this.ctx.tokenMeter.estimateMessage(message)
       }
     }
     return { pruned, charsRemoved }

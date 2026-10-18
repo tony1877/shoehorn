@@ -223,11 +223,11 @@ export async function summarizeWithLlm(
   const instruction = config.summaryTemplate === 'detailed'
     ? DETAILED_COMPACTION_INSTRUCTION
     : COMPACTION_INSTRUCTION
-  const messages: Message[] = [
+  const messages: RequestMessage[] = [
     ...config.condenseToolOutput === true ? condenseToolTraffic(input.messages) : input.messages,
-    createUserMessage({
+    deepFreeze({
+      role: 'user',
       content: [{ type: 'text', text: instruction }],
-      source: { kind: 'plugin', plugin: 'dsh-compaction-basic' },
     }),
   ]
   const options: GenerateOptions = {

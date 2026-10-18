@@ -1526,14 +1526,13 @@ describe('default one-shot summarizer', () => {
       path: 'a.ts',
       file_text: `${'x'.repeat(240)}… [5000 chars]`,
     })
-    const sentResult = messages[2]?.content[0]
-    const resultText = sentResult?.type === 'tool-result' && sentResult.content[0]?.type === 'text'
-      ? sentResult.content[0].text
-      : ''
+    const sentResultMessage = messages[2]
+    const sentResult = sentResultMessage?.content[0]
+    const resultText = sentResultMessage?.role === 'tool' && sentResult?.type === 'text' ? sentResult.text : ''
     expect(resultText).toContain('[tool output condensed for the summary: 302 lines')
     expect(resultText).toContain('Error: boom at a.ts:3')
     expect(resultText).not.toContain('compiled file 100')
-    expect(sentResult?.type === 'tool-result' ? sentResult.toolCallId : undefined).toBe(callId)
+    expect(sentResultMessage?.role === 'tool' ? sentResultMessage.toolCallId : undefined).toBe(callId)
     const last = messages.at(-1)?.content[0]
     const lastText = last?.type === 'text' ? last.text : ''
     expect(lastText).toContain('## 1. User rules and corrections')

@@ -95,7 +95,7 @@ describe('real Loader composition', () => {
     })
   })
 
-  it('gives a preset row with no config the local summarizer defaults', async () => {
+  it('gives a preset row with no config the stock options', async () => {
     const loaded = await loadYaml([
       "- name: '@deepseek-ai/dsh-llm'",
       "- name: '@deepseek-ai/dsh-session'",
@@ -103,23 +103,10 @@ describe('real Loader composition', () => {
       "- name: '@deepseek-ai/dsh-token-meter'",
       "- name: '@deepseek-ai/dsh-compaction-basic'",
     ])
-    expect((loaded.compaction as unknown as BasicCompactionEngine).config).toMatchObject({
-      thresholdRatio: 0.7,
-      retainRatio: 0.16,
-      summarizationProvider: 'local-27b-summarizer',
-      summarizationModel: 'qwen3.8-27b-heretic-ara',
-      maxTokens: 48000,
-      compactionRetries: 3,
-      maxOverflowRetries: 3,
-      auto: true,
-      condenseToolOutput: true,
-      summaryTemplate: 'detailed',
-    })
     const engine = loaded.compaction as unknown as BasicCompactionEngine
-    expect(engine.config.modelPolicies.map(p => [p.provider, p.summarizationProvider])).toEqual([
-      ['local-27b-orca', 'local-27b-orca-summarizer'],
-      ['local-flash-orca', 'local-27b-orca-summarizer'],
-    ])
+    expect(engine.config).toMatchObject({ auto: true, condenseToolOutput: false, summaryTemplate: 'standard' })
+    expect(engine.config.summarizationProvider).toBeFalsy()
+    expect(engine.config.modelPolicies).toEqual([])
   })
 
   it('lets a preset override the local defaults', async () => {
@@ -140,7 +127,6 @@ describe('real Loader composition', () => {
       summarizationModel: 'qwen3.8-flash-next-heretic',
       maxTokens: 16000,
       summaryTemplate: 'standard',
-      condenseToolOutput: true,
     })
   })
 

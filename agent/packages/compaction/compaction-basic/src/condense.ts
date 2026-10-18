@@ -10,7 +10,7 @@
  * @module @deepseek-ai/dsh-compaction-basic/condense
  */
 
-import type { ContentBlock, Message } from '@deepseek-ai/dsh-llm'
+import type { RequestMessage } from '@deepseek-ai/dsh-llm'
 
 /** Lines worth keeping from the middle of a tool result. */
 const SIGNAL = /error|fail|✗|exception|fatal|denied|not found|exit code|ECONN|timed? ?out|passed|\bOOM\b/i
@@ -85,32 +85,29 @@ export function condenseToolArguments(args: string): string {
   return JSON.stringify(clipped)
 }
 
-/** Condense one content block; non-tool blocks pass through unchanged. */
-function condenseBlock(block: ContentBlock): ContentBlock {
-  switch (block.type) {
-    case 'tool-call':
-      return { ...block, arguments: condenseToolArguments(block.arguments) }
-    case 'tool-result': {
-      const text = block.content
-        .map(inner => inner.type === 'text' ? inner.text : `[${inner.type}]`)
-        .join('\n')
-      return { ...block, content: [{ type: 'text', text: condenseToolText(text) }] }
-    }
-    default:
-      return block
-  }
-}
-
 /**
- * Rewrite tool calls and tool results in a replayed region for summarization.
- * Message identities, roles and order are kept, so call/result pairing holds.
+ * Rewrite tool calls and tool results in a replayed region for summarization: tool-call arguments are clipped and
+ * each tool-role message's content becomes one condensed text block. Message identities, roles and order are kept,
+ * so call/result pairing holds.
  * @param messages - the replayed region, in surface order.
  * @returns new messages with condensed tool traffic.
  */
-export function condenseToolTraffic(messages: readonly Message[]): Message[] {
-  return messages.map(message => (
-    message.content.some(block => block.type === 'tool-call' || block.type === 'tool-result')
-      ? { ...message, content: message.content.map(condenseBlock) }
-      : message
-  ))
+export function condenseToolTraffic<M extends RequestMessage>(messages: readonly M[]): M[] {
+  return messages.map((message) => {
+    if (message.role === 'tool') {
+      const text = message.content
+        .map(block => block.type === 'text' ? block.text : `[${block.type}]`)
+        .join('\n')
+      return { ...message, content: [{ type: 'text', text: condenseToolText(text) }] }
+    }
+    if (message.role === 'assistant' && message.content.some(block => block.type === 'tool-call')) {
+      return {
+        ...message,
+        content: message.content.map(block => block.type === 'tool-call'
+          ? { ...block, arguments: condenseToolArguments(block.arguments) }
+          : block),
+      }
+    }
+    return message
+  })
 }

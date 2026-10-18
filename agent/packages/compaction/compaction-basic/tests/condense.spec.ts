@@ -59,13 +59,16 @@ describe('condenseToolTraffic', () => {
     const out = condenseToolTraffic([user, call, result])
     expect(out[0]).toBe(user)
     expect(out.map(m => m.id)).toEqual([user.id, call.id, result.id])
-    const block = out[2]?.content[0]
-    expect(block?.type).toBe('tool-result')
-    if (block?.type !== 'tool-result') return
-    expect(block.isError).toBe(true)
-    expect(block.toolCallId).toBe(callId)
-    expect(block.content).toHaveLength(1)
-    expect(block.content[0]?.type === 'text' && block.content[0].text.length).toBeLessThan(200)
+    const condensed = out[2]
+    expect(condensed?.role).toBe('tool')
+    if (condensed?.role !== 'tool') return
+    expect(condensed.isError).toBe(true)
+    expect(condensed.toolCallId).toBe(callId)
+    expect(condensed.content).toHaveLength(1)
+    const block = condensed.content[0]
+    expect(block?.type === 'text' && block.text.length).toBeLessThan(200)
+    const args = out[1]?.content[0]
+    expect(args?.type === 'tool-call' && args.arguments.length).toBeLessThan(300)
   })
 })
 
