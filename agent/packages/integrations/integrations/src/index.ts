@@ -20,7 +20,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import type {} from '@deepseek-ai/dsh-user-questions'
 import type {} from '@deepseek-ai/dsh-session-title'
-import type { SettingsScope } from '@deepseek-ai/dsh-settings'
+import type { Volatile } from '@deepseek-ai/cosmokit'
 // Typert-generated ./typert and ./remote artifacts import Zod at runtime.
 import type {} from 'zod'
 import { McpManager, assertServerSettings, serverView } from './mcp.ts'
@@ -64,7 +64,6 @@ export { formatNotification } from './notify.ts'
 export { approvalFor } from './mcp.ts'
 
 /** Settings namespace owned by this plugin. */
-const NAMESPACE = 'integrations'
 
 const ID = /^[a-z][a-z0-9-]{0,31}$/
 
@@ -139,22 +138,30 @@ export const SettingsSchema: z<IntegrationsSettings> = z.object({
   publicBaseUrl: z.string().default(''),
 }) as z<IntegrationsSettings>
 
-/** Composition config: the deployment's starting rows, below the user's edits. */
-export type Config = Partial<IntegrationsSettings> & {
+/**
+ * Plugin config. The integration rows are volatile fields: the Settings service edits them in the profile and the
+ * Loader hands the running service the new values (`loader/volatile-update`) without a remount.
+ */
+export interface Config {
+  servers: Volatile<IntegrationsSettings['servers']>
+  webhooks: Volatile<IntegrationsSettings['webhooks']>
+  notifications: Volatile<IntegrationsSettings['notifications']>
+  telegram: Volatile<IntegrationsSettings['telegram']>
+  publicBaseUrl: Volatile<string>
   /** Folder for the bot's and the webhook log's state files; default `$DSH_HOME/integrations`. */
   stateDirectory?: string
   /** Telegram Bot API server; default `https://api.telegram.org` (a self-hosted Bot API server also works). */
   telegramApiBase?: string
 }
-export const Config: z<Config> = z.object({
-  servers: z.array(ServerSchema),
-  webhooks: z.array(WebhookSchema),
-  notifications: z.array(NotificationSchema),
-  telegram: TelegramSchema,
-  publicBaseUrl: z.string(),
+export const Config = z.object({
+  servers: z.array(ServerSchema).default([]).volatile(),
+  webhooks: z.array(WebhookSchema).default([]).volatile(),
+  notifications: z.array(NotificationSchema).default([]).volatile(),
+  telegram: TelegramSchema.volatile(),
+  publicBaseUrl: z.string().default('').volatile(),
   stateDirectory: z.string(),
   telegramApiBase: z.string(),
-}) as z<Config>
+}) as unknown as z<Config>
 
 function assertUniqueIds(kind: string, rows: ReadonlyArray<{ id: string }>): void {
   const seen = new Set<string>()
@@ -202,19 +209,19 @@ export class Integrations extends TypertRemoteService {
   static inject = ['tools', 'credentials']
   static Config = Config
 
-  private scope: SettingsScope<IntegrationsSettings> | undefined
-  private composed: IntegrationsSettings
+  private readonly entryId: string
   private readonly mcp: McpManager
   private readonly webhooks: WebhookEndpoints
   private readonly notifier: Notifier
   private readonly signIns: OAuthSignIns
   private readonly telegram: TelegramBot
 
-  constructor(ctx: Context, config: Config = {}) {
+  constructor(ctx: Context, private readonly config: Config) {
     super(ctx, 'integrations')
-    const { stateDirectory, telegramApiBase, ...base } = config
-    this.composed = SettingsSchema(base as IntegrationsSettings)
-    validate(this.composed)
+    const { stateDirectory, telegramApiBase } = config
+    // the profile entry the Settings service writes (a plugin mounted without the Loader: its own name)
+    this.entryId = ctx.fiber.entry?.options.id ?? 'integrations'
+    validate(this.value)
     this.mcp = new McpManager(ctx)
     this.webhooks = new WebhookEndpoints(ctx, stateDirectory)
     this.notifier = new Notifier(ctx)
@@ -222,15 +229,8 @@ export class Integrations extends TypertRemoteService {
     this.telegram = new TelegramBot(ctx, chatId => this.pairTelegramChat(chatId), stateDirectory, telegramApiBase)
     ctx.effect(() => this.notifier.addSink(message => this.telegram.notify(message)), 'integrations.telegram.notify')
 
-    ctx.inject(['settings'], (settingsCtx) => {
-      const scope = settingsCtx.settings.register(NAMESPACE, SettingsSchema, { base: base as IntegrationsSettings, validate })
-      this.scope = scope
-      settingsCtx.effect(() => scope.watch(next => this.applyAll(next)), 'integrations.settings.watch')
-      settingsCtx.effect(() => () => {
-        this.scope = undefined
-      }, 'integrations.settings')
-      void this.applyAll(scope.get())
-    })
+    // the Settings service (or a profile edit) changed the rows: apply them
+    ctx.on('loader/volatile-update', () => { void this.applyAll(this.value) })
 
     ctx.inject(['webServer'], (webCtx) => {
       webCtx.effect(() => webCtx.webServer.register({
@@ -247,11 +247,18 @@ export class Integrations extends TypertRemoteService {
   }
 
   protected async [Service.init](): Promise<void> {
-    if (this.scope === undefined) await this.applyAll(this.composed)
+    await this.applyAll(this.value)
   }
 
   private get value(): IntegrationsSettings {
-    return this.scope?.get() ?? this.composed
+    const c = this.config
+    return SettingsSchema({
+      servers: c.servers.get(),
+      webhooks: c.webhooks.get(),
+      notifications: c.notifications.get(),
+      telegram: c.telegram.get(),
+      publicBaseUrl: c.publicBaseUrl.get(),
+    } as IntegrationsSettings)
   }
 
   private async applyAll(value: IntegrationsSettings): Promise<void> {
@@ -269,8 +276,12 @@ export class Integrations extends TypertRemoteService {
 
   private async write(next: IntegrationsSettings): Promise<void> {
     validate(next)
-    if (this.scope === undefined) throw new Error('settings storage is unavailable; integrations cannot be changed at runtime')
-    await this.scope.update(next)
+    const settings = this.ctx.get('settings')
+    if (settings === undefined) {
+      throw new Error('settings storage is unavailable; integrations cannot be changed at runtime')
+    }
+    // the profile write comes back as a volatile update, which applies it
+    await settings.update(this.entryId, next)
   }
 
   private async oauthCallback(url: string, response: import('node:http').ServerResponse): Promise<void> {

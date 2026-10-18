@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LocalCredentialProvider from '@deepseek-ai/dsh-credentials-local'
-import FileSettingsProvider from '@deepseek-ai/dsh-settings-file'
+import StubSettings from './settings-stub.ts'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import Integrations, { type TelegramSettings } from '@deepseek-ai/dsh-integrations'
@@ -106,8 +106,8 @@ async function mount(): Promise<{ service: Integrations; fake: FakeTelegram; sta
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(LocalCredentialProvider, { path: join(dir, '.credentials.yaml'), watch: false })
-  await ctx.plugin(FileSettingsProvider, { path: join(dir, 'settings.yaml'), watch: false })
-  await ctx.plugin(Integrations, { stateDirectory: join(dir, 'state'), telegramApiBase: base })
+  await ctx.plugin(StubSettings)
+  await ctx.plugin(Integrations, { stateDirectory: join(dir, 'state'), telegramApiBase: base } as never)
   return { service: ctx.get('integrations') as Integrations, fake, state: join(dir, 'state', 'telegram.json') }
 }
 

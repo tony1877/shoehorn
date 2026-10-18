@@ -28,7 +28,9 @@ Work happens on branch `dsh-upgrade-0.2.1`, worktree `C:\src\shoehorn-upgrade`. 
    - [x] mcp-client: upstream moved to the new MCP SDK (`@modelcontextprotocol/client` 2.2.0). Our connection / transport / index changes replayed (SSE transport, OAuth provider, server stderr log, allowlist `includeTools`, `exposure: deferred`); `includeTools` / `exposure` made optional so upstream's tests stand; integrations moved to the same SDK. 131 tests pass.
    - [x] repeat-tool-reminder (upstream's new message source plus our same-result and investigation detectors; 34 tests), fs-local (our UTF-8 BOM keeping on upstream's imports), tool-memory (upstream test). fs-local's symlink tests fail on this Windows account without developer mode, with or without our change.
    - [x] apps/cli `image-offload.expected.e2e.ts`: upstream's version for now; recheck in step 4 (its expected text depends on our image-hint wording).
-   - [ ] integrations: the settings API changed (`SettingsScope`, `forms.register`, `dsh-settings-file` gone).
+   - [x] integrations: upstream replaced settings namespaces (`settings.yaml`, `SettingsScope`) with volatile plugin config. The five integration settings are now `.volatile()` Config fields: the service reads them live, re-applies on `loader/volatile-update`, and the page's writes go through `settings.update(entryId, ...)` into the profile. Tests use a stand-in Settings service (`tests/settings-stub.ts`) that updates the references and emits the same event. 21 tests pass.
+   - [x] **Host typecheck: 0 errors.**
+   - [ ] Client side: `pnpm run build:lib` (host + client, incl. ui-integrations and ui-shoehorn).
 3. [ ] Port presets: our presets to the new preset system, and the defaults in integrations, webhooks and Telegram. The compaction plugin no longer carries shoehorn defaults, so shoehorn's presets must set: `summarizationProvider: local-27b-shoehorn-summarizer`, `summarizationModel: qwen3.8-27b-uncensored-shoehorn`, `thresholdRatio: 0.7`, `retainRatio: 0.16`, `maxTokens: 8192`, `compactionRetries: 3`, `condenseToolOutput: true`, `summaryTemplate: standard` (the values in today's `minimal-compact` preset and `scripts/windows-harness/configure-local.mjs`).
 4. [ ] Run the tests for every package we changed. Review each of the 48 conflict files: keep ours or take upstream's.
 5. [ ] Run the full build (`pnpm run build`) and start a test dsh on another port with a copy of `~/.dsh`.
@@ -46,3 +48,5 @@ Work happens on branch `dsh-upgrade-0.2.1`, worktree `C:\src\shoehorn-upgrade`. 
 - 2026-10-18: agent-loop done (67 -> 43). Next: compaction-basic (19), the pruner (6), then the small ones.
 - 2026-10-18: compaction done (43 -> 18). Next: integrations (5), tool-memory (3), mcp-client (3), repeat-tool-reminder (3), fs-local (1).
 - 2026-10-18: mcp-client, reminder, fs-local done (18 -> 5, all in integrations).
+- 2026-10-18: integrations ported to volatile config; host typecheck clean (184 -> 0). Next: client typecheck and build:lib.
+- Note for step 7: upstream imports an old `~/.dsh/settings.yaml` into the active profile once at start (renamed to `settings.yaml.imported`); our providers and models live there, so check the import result on the test copy first.

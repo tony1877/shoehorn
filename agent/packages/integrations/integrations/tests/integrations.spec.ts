@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LocalCredentialProvider from '@deepseek-ai/dsh-credentials-local'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
-import FileSettingsProvider from '@deepseek-ai/dsh-settings-file'
+import StubSettings from './settings-stub.ts'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import Integrations, {
@@ -61,8 +61,8 @@ async function mount(): Promise<{ ctx: Context; service: Integrations }> {
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(LocalCredentialProvider, { path: join(dir, '.credentials.yaml'), watch: false })
-  await ctx.plugin(FileSettingsProvider, { path: join(dir, 'settings.yaml'), watch: false })
-  await ctx.plugin(Integrations, { stateDirectory: join(dir, 'state') })
+  await ctx.plugin(StubSettings)
+  await ctx.plugin(Integrations, { stateDirectory: join(dir, 'state') } as never)
   const service = ctx.get('integrations') as Integrations
   return { ctx, service }
 }
