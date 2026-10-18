@@ -33,9 +33,8 @@ This table connects model-visible tool names to the plugin package and service s
 | `@deepseek-ai/dsh-tool-fs-search` | `glob`, `grep` | `ctx.workingDirectory`, `ctx.tools`, `ctx.subprocess`, `ctx.systemPrompt` | `tool/call`, `tool/result` | - | glob and grep are unconditional discovery tools that spawn the packaged ripgrep binary (`@vscode/ripgrep`) through ctx.subprocess as ordinary foreground calls (never background jobs) — no host `rg` install and no shell layer. The catalog uses `sampleOverCapGlobResults: true`; deployments must choose that behavior explicitly. Capped results save the complete formatted list through the optional ctx.spillStore backend; returned locators are follow-up-readable/searchable when the backend exposes local paths in co-located deployments. |
 | `@deepseek-ai/dsh-tool-terminal` | `terminal_close`, `terminal_list`, `terminal_open`, `terminal_read`, `terminal_send`, `terminal_signal` | `ctx.workingDirectory`, `ctx.tools`, `ctx.terminals`, `ctx.systemPrompt`, `ctx.jobs at call time for run_in_background` | `tool/call`, `tool/result` | - | The six terminal tools are opt-in and complement one-shot shell/filesystem tools. `terminal_send(run_in_background: true)` registers with `ctx.jobs`; TUI, named key sequences, BEL, resize, auto-start, and cross-agent sharing are absent from the schema. |
 | `@deepseek-ai/dsh-tool-goal` | `create_goal`, `get_goal`, `update_goal` | `ctx.tools`, `ctx.agents`, `ctx.goals`, `ctx.systemPrompt`, `a calling Agent in an authorized open turn` | `tool/call`, `goal/change for mutations`, `tool/result` | - | create, edit, pause, and resume require direct-human root authority; complete and blocked also accept the exact current goal round. The default blocked lower bound is three admitted rounds. |
-| `@deepseek-ai/dsh-schedule` | `schedule_create`, `schedule_delete`, `schedule_list` | `ctx.tools`, `ctx.sessions`, `Session persistence`, `a future live root Agent` | `tool/call`, `schedule/change create or delete`, `tool/result` | - | Registered only inside live root Agent scopes created after the opt-in Schedule plugin loads. Version 1 accepts after_seconds, explicit absolute at, and bounded fixed-rate every_seconds, and discloses session-local delivery; management reads and mutations require the shared Session persistence barrier. |
-| `@deepseek-ai/dsh-tool-lsp` | `lsp` | `ctx.tools`, `ctx.lsp`, `ctx.systemPrompt` | `tool/call`, `tool/result` | - | The lsp tool keeps provider selection and language-server subprocesses behind ctx.lsp, so its model-visible schema stays stable across providers. Requires a registered provider (e.g. `@deepseek-ai/dsh-lsp-stdio`) at runtime; without one, a query returns the structured `LSP_UNAVAILABLE` error rather than changing the schema. |
-| `@deepseek-ai/dsh-tool-memory` | `memory_forget`, `memory_get`, `memory_save`, `memory_search`, `memory_update` | `ctx.tools`, `ctx.systemPrompt` | `tool/call`, `tool/result`, `the SQLite memory database` | - | The memory tools read and write a SQLite database outside the session log (default `$DSH_HOME/memory/memory.db`), scoped to the caller's workspace or global. The plugin also adds a `tool:memory` guidance section and a `memory:index` runtime-context listing of what is already stored, re-sent only when the index changes. |
+| `@deepseek-ai/dsh-tool-schedule` | `schedule_create`, `schedule_delete`, `schedule_list`, `schedule_update` | `ctx.tools`, `ctx.schedule` | `tool/call`, `Schedule storage domain create, update, or delete`, `tool/result` | - | A preset or Agent scope mounts this package; the preset decides which agents receive the four management tools. Each call acts on the calling Agent's Session. Accepts after_seconds, explicit absolute at, bounded fixed-rate every_seconds, daily and weekly local times in an explicit IANA zone, and cron as a five-field expression. Management uses the Host storage domain; due messages resume the original Session. |
+| `@deepseek-ai/dsh-tool-lsp` | `lsp` | `ctx.workingDirectory`, `ctx.tools`, `ctx.lsp`, `ctx.systemPrompt` | `tool/call`, `tool/result` | - | The lsp tool keeps provider selection and language-server subprocesses behind ctx.lsp, so its model-visible schema stays stable across providers. Requires a registered provider (e.g. `@deepseek-ai/dsh-lsp-stdio`) at runtime; without one, a query returns the structured `LSP_UNAVAILABLE` error rather than changing the schema. |
 | `@deepseek-ai/dsh-tool-ralph` | `ralph` | `ctx.tools`, `ctx.workflowEngine`, `ctx.subagents`, `ctx.systemPrompt`, `a calling Agent (exec.agent parents every fresh round)` | `tool/call`, `tool/result`, `workflow and child session events during execution` | - | A fixed foreground workflow starts one fresh structured child per round; the model selects only the immutable objective and an optional round cap. |
 | `@deepseek-ai/dsh-tool-skill` | `skill` | `ctx.workingDirectory`, `ctx.tools`, `ctx.agents`, `ctx.skills` | `tool/call`, `tool/result`, `user/message replacement catalogs via agent.inject()` | - | - |
 | `@deepseek-ai/dsh-tool-session-query` | `session_event_read`, `session_event_search`, `session_event_trace`, `session_search`, `session_trace` | `ctx.tools`, `ctx.systemPrompt`, `ctx.sessionQuery`, `a calling Agent for workspace authority` | `tool/call`, `tool/result` | - | The five read-only tools hide provider cursors and authorize every result from the immutable calling agent session. The package is opt-in; compositions that need enforced deadlines or bounded inline output also mount the generic timeout or spill policies. |
@@ -1065,7 +1064,7 @@ Source: [`packages/fs/tool-fs/src/index.ts`](../packages/fs/tool-fs/src/index.ts
 
 ### `read_image`
 
-Read a PNG/JPEG/WebP/GIF file and return the image itself. Images attached to a message are already visible to you: do not read them again. Use this for image files on disk, or for an attachment omitted from the request (its placeholder gives the path). A path without a file extension is accepted; the format is detected from the file content, so such attachment paths can be passed directly without copying or renaming. Harness validates and downscales large supported images before the next model request, so use this tool directly instead of installing image libraries or creating thumbnails merely to inspect an image. Independent files may be read concurrently in small batches. Requires the current model to accept image input.
+Read a PNG/JPEG/WebP/GIF file and return the image itself. Large images are downscaled automatically; do not install image libraries or create thumbnails to inspect an image.
 
 ```json
 {
@@ -1771,203 +1770,6 @@ Query a language server for precise code navigation. operation is one of goToDef
 Source: [`packages/lsp/tool-lsp/src/index.ts`](../packages/lsp/tool-lsp/src/index.ts)
 
 The lsp tool keeps provider selection and language-server subprocesses behind ctx.lsp, so its model-visible schema stays stable across providers. Requires a registered provider (e.g. `@deepseek-ai/dsh-lsp-stdio`) at runtime; without one, a query returns the structured `LSP_UNAVAILABLE` error rather than changing the schema.
-
-<a id="deepseek-aidsh-tool-memory"></a>
-
-## `@deepseek-ai/dsh-tool-memory`
-
-### `memory_forget`
-
-Forget a memory that is wrong or no longer useful.
-
-```json
-{
-  "type": "object",
-  "properties": {
-    "id": {
-      "type": "integer",
-      "description": "Memory id."
-    }
-  },
-  "required": [
-    "id"
-  ]
-}
-```
-
-Source: [`packages/memory/tool-memory/src/index.ts`](../packages/memory/tool-memory/src/index.ts)
-
-### `memory_get`
-
-Read one memory in full by id.
-
-```json
-{
-  "type": "object",
-  "properties": {
-    "id": {
-      "type": "integer",
-      "description": "Memory id, as shown in the index or search results."
-    }
-  },
-  "required": [
-    "id"
-  ]
-}
-```
-
-Source: [`packages/memory/tool-memory/src/index.ts`](../packages/memory/tool-memory/src/index.ts)
-
-### `memory_save`
-
-Save a durable memory that later sessions can recall. Check for an existing memory on the same fact first and update it instead.
-
-```json
-{
-  "type": "object",
-  "properties": {
-    "kind": {
-      "type": "string",
-      "description": "user, feedback, project or reference.",
-      "enum": [
-        "user",
-        "feedback",
-        "project",
-        "reference"
-      ]
-    },
-    "title": {
-      "type": "string",
-      "description": "One-line hook that reads well on its own in the memory index."
-    },
-    "body": {
-      "type": "string",
-      "description": "The fact itself; for feedback and project memories add why it matters and how to apply it."
-    },
-    "scope": {
-      "type": "string",
-      "description": "\"workspace\" (default: only this workspace) or \"global\" (every workspace).",
-      "enum": [
-        "workspace",
-        "global"
-      ]
-    },
-    "tags": {
-      "type": "array",
-      "description": "Optional search tags.",
-      "items": {
-        "type": "string"
-      }
-    },
-    "pinned": {
-      "type": "boolean",
-      "description": "Keep it at the top of the index."
-    }
-  },
-  "required": [
-    "kind",
-    "title",
-    "body"
-  ]
-}
-```
-
-Source: [`packages/memory/tool-memory/src/index.ts`](../packages/memory/tool-memory/src/index.ts)
-
-### `memory_search`
-
-Full-text search over memories visible here (global plus this workspace), best match first.
-
-```json
-{
-  "type": "object",
-  "properties": {
-    "query": {
-      "type": "string",
-      "description": "Words to look for in titles, bodies and tags."
-    },
-    "kind": {
-      "type": "string",
-      "description": "Only this kind.",
-      "enum": [
-        "user",
-        "feedback",
-        "project",
-        "reference"
-      ]
-    },
-    "limit": {
-      "type": "integer",
-      "description": "Most results (default 10, max 50)."
-    }
-  },
-  "required": [
-    "query"
-  ]
-}
-```
-
-Source: [`packages/memory/tool-memory/src/index.ts`](../packages/memory/tool-memory/src/index.ts)
-
-### `memory_update`
-
-Change an existing memory; omitted fields keep their value.
-
-```json
-{
-  "type": "object",
-  "properties": {
-    "id": {
-      "type": "integer",
-      "description": "Memory id."
-    },
-    "kind": {
-      "type": "string",
-      "description": "New kind.",
-      "enum": [
-        "user",
-        "feedback",
-        "project",
-        "reference"
-      ]
-    },
-    "title": {
-      "type": "string",
-      "description": "New title."
-    },
-    "body": {
-      "type": "string",
-      "description": "New body (replaces the old one)."
-    },
-    "scope": {
-      "type": "string",
-      "description": "\"workspace\" (default: only this workspace) or \"global\" (every workspace).",
-      "enum": [
-        "workspace",
-        "global"
-      ]
-    },
-    "tags": {
-      "type": "array",
-      "description": "New tags (replace the old ones).",
-      "items": {
-        "type": "string"
-      }
-    },
-    "pinned": {
-      "type": "boolean",
-      "description": "Pin or unpin."
-    }
-  },
-  "required": [
-    "id"
-  ]
-}
-```
-
-Source: [`packages/memory/tool-memory/src/index.ts`](../packages/memory/tool-memory/src/index.ts)
-
-The memory tools read and write a SQLite database outside the session log (default `$DSH_HOME/memory/memory.db`), scoped to the caller's workspace or global. The plugin also adds a `tool:memory` guidance section and a `memory:index` runtime-context listing of what is already stored, re-sent only when the index changes.
 
 <a id="deepseek-aidsh-tool-ralph"></a>
 

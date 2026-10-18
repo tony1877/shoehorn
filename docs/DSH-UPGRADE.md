@@ -31,3 +31,6 @@ Work happens on branch `dsh-upgrade-0.2.1`, worktree `C:\src\shoehorn-upgrade`. 
 ## Log
 
 - 2026-10-18: step 1 done. The merge produced 0 remaining conflicts after `-X ours`.
+- 2026-10-18: conflicted config files resolved as upstream's version plus our additions (package.json files, tsconfig references). Generated files taken from upstream: pnpm-lock, the docs catalogs, tsconfig.base.json (aliases regenerated, plus hand-written ones for ui-integrations, ui-shoehorn and integrations/types).
+- 2026-10-18: integrations and the webhook session now point at `dsh-agent-preset-registry` (same `ctx.agentPresets` service) and `packages/experimental/webhook`. `pnpm install` is OK.
+- TODO: `dsh-settings-file` is gone upstream, and the integrations tests (settings-yaml based) still need porting to the new settings provider.
