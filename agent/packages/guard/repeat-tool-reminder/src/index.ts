@@ -81,11 +81,11 @@ export const Config: z<Config> = z.object({
 })
 
 /**
- * The `{kind:'plugin'}` source stamped on every reminder this guard injects —
- * the label is load-bearing (an unlabeled context would render as a user
- * prompt in derived history).
+ * The `{kind:'repeat-tool-reminder'}` producer source stamped on every reminder
+ * this guard injects — the label is load-bearing (an unlabeled context would
+ * render as a user prompt in derived history).
  */
-const PLUGIN_SOURCE: MessageSource = { kind: 'plugin', plugin: 'repeat-tool-reminder' }
+const REMINDER_SOURCE: MessageSource = { kind: 'repeat-tool-reminder' }
 
 /**
  * The gentle first-threshold reminder. Keyed to `thresholds[0]`, not a literal

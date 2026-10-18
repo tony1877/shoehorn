@@ -1,6 +1,6 @@
 import { memo, useState } from 'react'
 import type { ChatNodeViewProps, ChatViewSlotProps } from '../contract/slots.ts'
-import { DisclosureRow, IconBrowseOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { DisclosureRow, IconBrowseOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 import { OpaqueBody } from './ContextBody.tsx'
 import css from './ContextInjectionRow.module.css'
 
@@ -17,8 +17,9 @@ export interface SystemPromptRowProps {
 /**
  * Render one complete system prompt as a collapsed disclosure whose expanded
  * body is the same opaque context chrome: 141px code-block scrollport and
- * model-facing text with its real line breaks.
- * @param props - Complete prompt text and the locale seat.
+ * model-facing text with its real line breaks. An in-history update uses the
+ * same row under its own title.
+ * @param props - Complete prompt text, whether it is an update, and the locale seat.
  * @returns The system-prompt disclosure row.
  */
 export function SystemPromptRow({ text, repeat = false, t }: SystemPromptRowProps) {
@@ -26,7 +27,7 @@ export function SystemPromptRow({ text, repeat = false, t }: SystemPromptRowProp
   return (
     <DisclosureRow
       className={css.root}
-      icon={<IconBrowseOutline16 size={14} />}
+      icon={<IconBrowseOutlineRegular size={14} />}
       chevronClassName={css.chevron}
       title={t(repeat ? 'message.systemPromptRepeat' : 'message.systemPrompt')}
       open={open}

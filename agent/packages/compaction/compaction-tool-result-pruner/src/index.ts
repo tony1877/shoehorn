@@ -208,14 +208,11 @@ export class ToolResultPruner extends Service {
       const result = event.data.message.content[0]
       const content = this.pruneContent(result.content)
       if (content === null) continue
-      const charsBefore = this.measureContent(result.content)
+      const charsBefore = this.measureContent(original.content)
       const charsAfter = this.measureContent(content)
       const message = freezeMessage<ToolResultMessage>({
-        ...event.data.message,
-        content: [{
-          ...result,
-          content,
-        }] as [typeof result],
+        ...original,
+        content,
       })
       // Shadow-price protocol: the metering event and its replacement are
       // appended synchronously adjacent, so pure consumers subtract the
@@ -223,13 +220,13 @@ export class ToolResultPruner extends Service {
       session.append('compaction/prune', {
         shadowedRange: { start: seq, end: seq },
         shadowedSeqs: [seq],
-        shadowedTokenCount: this.ctx.tokenMeter.estimateMessage(event.data.message),
+        shadowedTokenCount: this.ctx.tokenMeter.estimateMessage(original),
       })
       const replacement = session.append('tool/result', {
         ...event.data,
         message,
       }, {
-        surfaceOp: { op: 'replace', start: seq, end: seq },
+        surfaceOp: { op: 'replace', startSeq: seq, endSeq: seq },
         sourceEventSeqs: [seq],
       })
       pruned.push({

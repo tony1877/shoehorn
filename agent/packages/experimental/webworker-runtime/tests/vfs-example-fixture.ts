@@ -2,6 +2,7 @@
 
 import { fileURLToPath } from 'node:url'
 import {
+  SESSION_FORMAT_VERSION,
   SessionId,
   SessionLogOffset,
   SessionSeq,
@@ -11,9 +12,12 @@ import {
   type SessionSeq as SessionSeqType,
 } from '@deepseek-ai/dsh-session'
 import {
-  eventLines, projectKey, toHeaderLine,
+  eventLines, generationLogFilename, projectKey, toHeaderLine,
 } from '@deepseek-ai/dsh-session-persistence-jsonl/src/format.ts'
-import { snapshotSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
+import { projectionCacheDomainSpec } from '@deepseek-ai/dsh-session-projection-cache'
+import { scheduleDomain } from '@deepseek-ai/dsh-schedule'
+import { snapshotSubagentDescriptor, SUBAGENT_DESCRIPTOR_VERSION } from '@deepseek-ai/dsh-subagent'
+import { SUBAGENT_CATALOG_VERSION } from '@deepseek-ai/dsh-subagent/src/catalog.ts'
 
 /** Root copied by the preview image's repository adapter. */
 export const VFS_EXAMPLE_ROOT = fileURLToPath(new URL('./fixtures/vfs-example', import.meta.url))
@@ -33,6 +37,21 @@ export const VFS_EXAMPLE_OLDEST_MESSAGE = 'History checkpoint 01: verify determi
 
 /** Settled tail marker used by browser acceptance and the demonstration GIF. */
 export const VFS_EXAMPLE_TAIL_MESSAGE = 'Preview tour complete'
+
+/** Non-empty reasoning bodies surrounded by empty and whitespace-only fixture blocks. */
+export const VFS_EXAMPLE_REASONING = [
+  'I will inspect the deterministic workspace and collect each preview surface.',
+  'Check the Chat presentation\n\nI will inspect the wrapped command, its first-line status, and the parent-path file link.',
+] as const
+
+/** Authored long command and a second line for wrapping and status-dot acceptance. */
+export const VFS_EXAMPLE_WRAPPED_COMMAND = `printf 'preview command fixture\\n' # ${'wrapped-argument-'.repeat(28)}\nprintf 'wrap complete\\n'\n`
+
+/** Durable task ids for the Host Schedule rows seeded into the preview's `DSH_HOME`. */
+export const VFS_EXAMPLE_SCHEDULE_IDS = {
+  daily: 'preview-daily-digest',
+  once: 'preview-release-window',
+} as const
 
 const WORKSPACE = '/dsh/workspace'
 const CREATED_AT = 1_787_472_000_000
@@ -79,7 +98,6 @@ interface EventDraft {
   readonly type: string
   readonly data: unknown
   readonly surfaceOp?: 'append'
-  readonly sourceEventSeqs?: SessionSeqType[]
   readonly ignorable?: true
 }
 
@@ -112,6 +130,38 @@ function userMessage(id: string, text: string): EventDraft {
   }
 }
 
+function assistantStream(content: readonly unknown[]): unknown[] {
+  const stream: unknown[] = []
+  let toolCalls = false
+  for (const [index, value] of content.entries()) {
+    const block = value as Record<string, unknown>
+    stream.push({ type: 'chunk', time: 0, chunk: { type: 'block-start', index, blockType: block.type } })
+    if (block.type === 'text') {
+      stream.push({ type: 'text-chunks', time0: 0, index, dt: [], texts: [block.text] })
+    } else if (block.type === 'reasoning') {
+      stream.push({ type: 'reasoning-chunks', time0: 0, index, dt: [], texts: [block.text] })
+    } else if (block.type === 'tool-call') {
+      toolCalls = true
+      stream.push({
+        type: 'tool-call-chunks',
+        time0: 0,
+        index,
+        dt: [],
+        id: block.id,
+        name: block.name,
+        args: [block.arguments],
+      })
+    }
+    stream.push({ type: 'chunk', time: 0, chunk: { type: 'block-end', index, block } })
+  }
+  stream.push({
+    type: 'chunk',
+    time: 0,
+    chunk: { type: 'finish', reason: { kind: toolCalls ? 'tool-calls' : 'stop' } },
+  })
+  return stream
+}
+
 function assistantMessage(id: string, turn: number, step: number, content: unknown[]): EventDraft {
   return {
     type: 'assistant/message',
@@ -124,8 +174,8 @@ function assistantMessage(id: string, turn: number, step: number, content: unkno
         content,
         source: { kind: 'model', provider: 'preview-fixture', model: 'deterministic' },
       },
+      stream: assistantStream(content),
     },
-    sourceEventSeqs: [],
     surfaceOp: 'append',
   }
 }
@@ -170,6 +220,12 @@ function galleryCalls(): GalleryCall[] {
       name: 'bash',
       args: { command: "printf 'preview ready\\n'", description: 'Print the preview readiness marker' },
       result: 'preview ready\n',
+    },
+    {
+      id: 'preview-wrapped-bash',
+      name: 'bash',
+      args: { command: VFS_EXAMPLE_WRAPPED_COMMAND, description: 'Show wrapped command and first-line status' },
+      result: 'preview command fixture\nwrap complete\n[exit code: 0]',
     },
     {
       id: 'preview-glob',
@@ -287,7 +343,8 @@ function mainLog(): {
   log.add(userMessage('preview-gallery-user', 'Show the seeded workspace, tool cards, subagents, and pagination in one tour.'))
   log.add({ type: 'step/start', data: { turn, step: 1 } })
   log.add(assistantMessage('preview-gallery-tools', turn, 1, [
-    { type: 'reasoning', text: 'I will inspect the deterministic workspace and collect each preview surface.' },
+    ...['', ' \t\n', VFS_EXAMPLE_REASONING[0], '', VFS_EXAMPLE_REASONING[1], '\n  ']
+      .map(text => ({ type: 'reasoning', text })),
     ...calls.map(call => ({ type: 'tool-call', id: call.id, name: call.name, arguments: JSON.stringify(call.args) })),
   ]))
   for (const call of calls) {
@@ -303,14 +360,11 @@ function mainLog(): {
         step: 1,
         message: {
           id: `${call.id}-result`,
-          role: 'user',
-          content: [{
-            type: 'tool-result',
-            toolCallId: call.id,
-            content: [{ type: 'text', text: call.result }],
-            isError: call.error !== undefined,
-          }],
+          role: 'tool',
+          toolCallId: call.id,
           source: { kind: 'tool', callId: call.id },
+          content: [{ type: 'text', text: call.result }],
+          isError: call.error !== undefined,
         },
         ...call.meta === undefined ? {} : { meta: call.meta },
         ...call.error === undefined ? {} : { error: call.error },
@@ -318,11 +372,17 @@ function mainLog(): {
       surfaceOp: 'append',
     })
   }
+  for (const child of [
+    { childId: VFS_EXAMPLE_SESSION_IDS.oneShot, childCreatedAt: CREATED_AT + 100_000, mode: 'one-shot', label: 'Review preview architecture' },
+    { childId: VFS_EXAMPLE_SESSION_IDS.continuable, childCreatedAt: CREATED_AT + 200_000, mode: 'continuable', label: 'Continue preview verification' },
+  ] as const) {
+    log.add({ type: 'subagent/catalog', data: { version: SUBAGENT_CATALOG_VERSION, ...child } })
+  }
   log.add({ type: 'step/end', data: { turn, step: 1 } })
   log.add({ type: 'step/start', data: { turn, step: 2 } })
   log.add(assistantMessage('preview-gallery-final', turn, 2, [{
     type: 'text',
-    text: `## ${VFS_EXAMPLE_TAIL_MESSAGE}\n\nThe workspace, specialized tool cards, two subagent histories, and an earlier history page are ready to inspect.`,
+    text: `## ${VFS_EXAMPLE_TAIL_MESSAGE}\n\nThe workspace, specialized tool cards, two subagent histories, and an earlier history page are ready to inspect.\n\nThis is fixture-authored demonstration data, not a live model run. Open [Parent workspace guide:1–8](<../workspace/PREVIEW.md#L1-L8>) to inspect the same workspace file through a parent path.`,
   }]))
   log.add({ type: 'step/end', data: { turn, step: 2 } })
   log.add({ type: 'turn/end', data: { turn, reason: { kind: 'completed' } } })
@@ -331,15 +391,16 @@ function mainLog(): {
 
 function oneShotLog(seed: readonly SessionEvent[]): SessionEvent[] {
   const log = new EventLog(CREATED_AT + 100_000, seed)
-  log.add({ type: 'session/end-seed', data: {} })
+  log.add({ type: 'session/end-seed', data: { inherited: true } })
   const turn = HISTORICAL_TURNS + 1
   log.add({ type: 'turn/start', data: { turn } })
   log.add(userMessage('preview-review-user', 'Review whether the preview fixture is isolated from future WebFS data.'))
   log.add({
     type: 'subagent/descriptor',
-    data: snapshotSubagentDescriptor({
+    data: {
+      version: SUBAGENT_DESCRIPTOR_VERSION,
       mode: 'one-shot', provider: 'fork', label: 'Review preview architecture',
-    }),
+    },
   })
   log.add({ type: 'step/start', data: { turn, step: 1 } })
   log.add(assistantMessage('preview-review-assistant', turn, 1, [{
@@ -383,7 +444,7 @@ function header(
   const inheritedEventCount = child?.seedLength ?? SessionLogOffset(0)
   return {
     meta: {
-      version: 0,
+      version: SESSION_FORMAT_VERSION,
       id,
       createdAt,
       cwd: WORKSPACE,
@@ -403,21 +464,77 @@ function renderLog(
   storage: { readonly meta: SessionHeader; readonly inheritedEventCount: SessionLogOffsetType },
   events: readonly SessionEvent[],
 ): string {
-  return `${JSON.stringify(toHeaderLine(storage.meta, storage.inheritedEventCount))}\n${eventLines(events, true)}\n`
+  return `${JSON.stringify(toHeaderLine(storage.meta, storage.inheritedEventCount))}\n${eventLines(events)}\n`
 }
 
-/** Build every committed fixture file as repository-relative UTF-8 text. */
+/**
+ * Host Schedule task rows the preview's `DSH_HOME` carries, keyed by durable
+ * task id.
+ *
+ * The schedule domain opens this whole-unit document at Host startup and
+ * rejects the complete unit on any malformed row, so the fixture spec decodes
+ * every stored task through the production schema. Targets sit in 2099:
+ * the Session row mark, the header clock entry, and the tasks page render them
+ * as scheduled, while the timer clamp (`MAX_TIMER_DELAY_MS`) keeps a preview
+ * session from dispatching them. The daily row carries a saved delivery so the
+ * detail's records tab renders retained content.
+ * @returns Task rows for the schedule domain's `tasks` table.
+ */
+function scheduleTasks(): Readonly<Record<string, unknown>> {
+  const sessionId = VFS_EXAMPLE_SESSION_IDS.main
+  const dailyPrompt = 'Summarize the preview workspace changes and their verification status.'
+  const dailyReceipt = {
+    scheduledAt: '2098-12-31T01:00:00.000Z',
+    deliveredAt: '2098-12-31T01:00:01.000Z',
+    messageId: 'preview-daily-digest-receipt',
+  }
+  return {
+    [VFS_EXAMPLE_SCHEDULE_IDS.daily]: {
+      sessionId,
+      record: {
+        id: VFS_EXAMPLE_SCHEDULE_IDS.daily,
+        kind: 'daily',
+        title: 'Daily preview digest',
+        prompt: dailyPrompt,
+        time: '09:00:00.000',
+        timeZone: 'Asia/Shanghai',
+        scheduledAt: '2099-01-01T01:00:00.000Z',
+      },
+      status: 'active',
+      deliveryHistory: {
+        earlierRecordsUnavailable: false,
+        records: [{ ...dailyReceipt, prompt: dailyPrompt }],
+      },
+      lastDelivery: dailyReceipt,
+    },
+    [VFS_EXAMPLE_SCHEDULE_IDS.once]: {
+      sessionId,
+      record: {
+        id: VFS_EXAMPLE_SCHEDULE_IDS.once,
+        kind: 'at',
+        title: 'Preview release window',
+        prompt: 'Remind the preview owner that the release window opens.',
+        scheduledAt: '2099-01-02T00:00:00.000Z',
+      },
+      status: 'active',
+    },
+  }
+}
+
+/** Build current-generation fixture files as fixture-relative UTF-8 text; committed predecessors remain untouched. */
 export function buildVfsExampleFiles(): ReadonlyMap<string, string> {
   const main = mainLog()
   const project = projectKey(WORKSPACE)
-  const sessionPath = (id: string): string => `home/sessions/${project}/${id}/session.jsonl`
+  const sessionPath = (id: string): string =>
+    `home/sessions/${project}/${id}/${generationLogFilename(SESSION_FORMAT_VERSION, 'none')}`
   const projectionCache = `${JSON.stringify({
-    unit: { name: 'session_projcache', version: 6 },
+    unit: { name: 'session_projcache', version: projectionCacheDomainSpec.version },
     global: null,
     tables: {
       sessions: {
         [VFS_EXAMPLE_SESSION_IDS.main]: {
           identity: {
+            formatVersion: SESSION_FORMAT_VERSION,
             createdAt: CREATED_AT,
             cwd: WORKSPACE,
             isSeeded: false,
@@ -455,5 +572,10 @@ export function buildVfsExampleFiles(): ReadonlyMap<string, string> {
       }),
       continuableLog(),
     )],
+    ['home/storages/schedule.json', `${JSON.stringify({
+      unit: { name: scheduleDomain.name, version: scheduleDomain.version },
+      global: null,
+      tables: { tasks: scheduleTasks() },
+    }, null, 2)}\n`],
   ])
 }

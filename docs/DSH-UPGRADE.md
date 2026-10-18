@@ -1,0 +1,33 @@
+# dsh upgrade: v0.1.2-rc.1 fork → v0.2.1-rc.2 (started 2026-10-18)
+
+Work happens on branch `dsh-upgrade-0.2.1`, worktree `C:\src\shoehorn-upgrade`. The running dsh (`C:\src\shoehorn\agent`) stays untouched until step 6 passes.
+
+## Facts
+
+| Item | Value |
+|---|---|
+| Our fork point upstream | `76fda72979` (Sept 3, v0.1.2-rc.1 era) |
+| Our customizations | 9 fork commits plus 16 shoehorn commits, about 140 files |
+| Target | `dsh-v0.2.1-rc.2` (Oct 17), remote `dsh-upstream` |
+| Upstream commits since the fork | 7,414 |
+| Text conflicts | 48. Resolved in favor of our hunks (`merge-tree -X ours`, base = the fork point); each is reviewed as the build reaches it |
+
+## Known breaking changes upstream
+
+- **Presets.** `packages/preset/agent-presets` and the `minimal-compact` preset are gone; the replacements are `agent-preset`, `agent-preset-registry` and `persona`. These need porting: `~/.dsh` settings, the integrations defaults (`agentPreset: minimal-compact`), and the webhook and Telegram defaults.
+- **Webhooks moved.** `packages/webhook/*` moved to `packages/experimental/webhook*`; our integrations import `@deepseek-ai/dsh-webhook`.
+- **Heavy churn in patched packages:** agent-loop (187 commits), llm-pi-ai (122), compaction-basic (78), mcp-client (57). Keep our version only where it is better; otherwise take upstream's.
+
+## Steps
+
+1. [x] Create the branch and worktree, merge rc.2 into `agent/` with our side kept on conflicts.
+2. [ ] Run `pnpm install`, then `pnpm run build:lib`; fix the compile errors (new APIs, moved packages).
+3. [ ] Port presets: our presets to the new preset system, and the defaults in integrations, webhooks and Telegram.
+4. [ ] Run the tests for every package we changed. Review each of the 48 conflict files: keep ours or take upstream's.
+5. [ ] Run the full build (`pnpm run build`) and start a test dsh on another port with a copy of `~/.dsh`.
+6. [ ] Live checks: a long session with compaction, tool edge cases, vision, the browser MCP service, Telegram (fake API), webhooks.
+7. [ ] Switch: merge to main, update `~/.dsh` (backup first), restart dsh. Roll back with `git checkout <old>` plus a rebuild.
+
+## Log
+
+- 2026-10-18: step 1 done. The merge produced 0 remaining conflicts after `-X ours`.

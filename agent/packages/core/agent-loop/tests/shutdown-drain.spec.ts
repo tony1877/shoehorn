@@ -12,7 +12,7 @@ import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { MockAdapter, textResponse } from './mock-adapter.ts'
 
@@ -61,7 +61,7 @@ describe.each(['backend-first', 'loop-first'] as const)('root shutdown drain (%s
     const verify = new Context()
     await verify.plugin(JsonlSessionPersistence, { root })
     const reader = await verify.sessionPersistence.open(sessionId, 'read')
-    const events = await reader.read()
+    const { events } = await reader.read()
     await reader.close()
     expect(events.at(-1)).toMatchObject({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
     await verify.fiber.dispose()
