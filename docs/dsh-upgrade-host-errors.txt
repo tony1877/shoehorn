@@ -1,0 +1,184 @@
+packages/mcp/mcp-client/src/tools.ts(180,3): error TS1005: 'while' expected.
+packages/core/agent-loop/src/agent.ts(293,11): error TS6133: 'context' is declared but its value is never read.
+packages/core/agent-loop/src/agent.ts(430,51): error TS2339: Property 'prepareRequest' does not exist on type 'ReactLoopAgent'.
+packages/core/agent-loop/src/agent.ts(462,79): error TS2554: Expected 3 arguments, but got 6.
+packages/core/agent-loop/src/agent.ts(473,81): error TS2345: Argument of type 'Promise<{ config: LlmCallConfig; preparedCall?: PreparedLlmCall; }>' is not assignable to parameter of type 'GenerateOptions'.
+packages/core/agent-loop/src/agent.ts(494,39): error TS2339: Property 'provider' does not exist on type 'Promise<{ config: LlmCallConfig; preparedCall?: PreparedLlmCall; }>'.
+packages/core/agent-loop/src/agent.ts(495,36): error TS2339: Property 'model' does not exist on type 'Promise<{ config: LlmCallConfig; preparedCall?: PreparedLlmCall; }>'.
+packages/core/agent-loop/src/agent.ts(535,33): error TS2339: Property 'provider' does not exist on type 'Promise<{ config: LlmCallConfig; preparedCall?: PreparedLlmCall; }>'.
+packages/core/agent-loop/src/agent.ts(552,31): error TS2339: Property 'provider' does not exist on type 'Promise<{ config: LlmCallConfig; preparedCall?: PreparedLlmCall; }>'.
+packages/core/agent-loop/src/agent.ts(553,28): error TS2339: Property 'model' does not exist on type 'Promise<{ config: LlmCallConfig; preparedCall?: PreparedLlmCall; }>'.
+packages/core/agent-loop/src/agent.ts(582,18): error TS2552: Cannot find name 'assembler'. Did you mean 'assembly'?
+packages/core/agent-loop/src/agent.ts(584,29): error TS2339: Property 'provider' does not exist on type 'Promise<{ config: LlmCallConfig; preparedCall?: PreparedLlmCall; }>'.
+packages/core/agent-loop/src/agent.ts(585,26): error TS2339: Property 'model' does not exist on type 'Promise<{ config: LlmCallConfig; preparedCall?: PreparedLlmCall; }>'.
+packages/core/agent-loop/src/agent.ts(586,14): error TS2552: Cannot find name 'assembler'. Did you mean 'assembly'?
+packages/core/agent-loop/src/agent.ts(586,67): error TS2552: Cannot find name 'assembler'. Did you mean 'assembly'?
+packages/core/agent-loop/src/agent.ts(591,9): error TS2345: Argument of type '{ usage?: any; turn: number; step: number; message: AssistantMessage; }' is not assignable to parameter of type '{ turn: number; step: number; message: AssistantMessage; stream: AssistantStreamRecord[]; usage?: TokenUsage; interrupted?: true; }'.
+packages/core/agent-loop/src/agent.ts(595,14): error TS2552: Cannot find name 'assembler'. Did you mean 'assembly'?
+packages/core/agent-loop/src/agent.ts(595,60): error TS2552: Cannot find name 'assembler'. Did you mean 'assembly'?
+packages/core/agent-loop/src/agent.ts(597,49): error TS2304: Cannot find name 'chunkSeqs'.
+packages/core/agent-loop/src/agent.ts(599,11): error TS2304: Cannot find name 'finish'.
+packages/core/agent-loop/src/agent.ts(615,25): error TS2322: Type '"plugin"' is not assignable to type '"user" | "model" | "tool" | "system-prompt" | "model-selection" | "runtime-context" | "user-approval" | "ptc-mode" | "tool-registry"'.
+packages/core/agent-loop/src/agent.ts(638,17): error TS2393: Duplicate function implementation.
+packages/core/agent-loop/src/agent.ts(690,11): error TS2393: Duplicate function implementation.
+packages/core/agent-loop/src/runtime-context.ts(9,54): error TS6196: 'Message' is declared but never used.
+packages/core/agent-loop/src/runtime-context.ts(88,55): error TS2345: Argument of type 'SystemMessage' is not assignable to parameter of type 'UserMessage'.
+packages/fs/fs-local/src/index.ts(189,12): error TS2304: Cannot find name 'readByteWindow'.
+packages/shell/tool-bash-persistent/src/index.ts(101,7): error TS2304: Cannot find name 'truncateWithoutSplittingSurrogatePair'.
+packages/shell/tool-bash-persistent/src/index.ts(550,7): error TS2353: Object literal may only specify known properties, and 'readOutput' does not exist in type 'JobHooks'.
+packages/shell/tool-bash-persistent/src/index.ts(667,62): error TS2322: Type 'Agent' is not assignable to type 'SessionId'.
+packages/shell/tool-pwsh-persistent/src/index.ts(100,7): error TS2304: Cannot find name 'truncateWithoutSplittingSurrogatePair'.
+packages/shell/tool-pwsh-persistent/src/index.ts(484,7): error TS2304: Cannot find name 'promptCompleted'.
+packages/shell/tool-pwsh-persistent/src/index.ts(558,7): error TS2353: Object literal may only specify known properties, and 'readOutput' does not exist in type 'JobHooks'.
+packages/shell/tool-pwsh-persistent/src/index.ts(674,62): error TS2322: Type 'Agent' is not assignable to type 'SessionId'.
+packages/shell/tool-pwsh/src/index.ts(440,8): error TS1005: ':' expected.
+packages/shell/tool-pwsh/src/index.ts(441,7): error TS1005: ',' expected.
+packages/shell/tool-pwsh/src/index.ts(545,11): error TS1136: Property assignment expected.
+packages/shell/tool-pwsh/src/index.ts(576,13): error TS1136: Property assignment expected.
+packages/shell/tool-pwsh/src/index.ts(620,11): error TS1135: Argument expression expected.
+packages/shell/tool-pwsh/src/index.ts(620,12): error TS1135: Argument expression expected.
+packages/shell/tool-pwsh/src/index.ts(621,9): error TS1135: Argument expression expected.
+packages/shell/tool-pwsh/src/index.ts(621,10): error TS1135: Argument expression expected.
+packages/shell/tool-pwsh/src/index.ts(623,15): error TS1005: ',' expected.
+packages/shell/tool-pwsh/src/index.ts(631,25): error TS1005: ',' expected.
+packages/shell/tool-pwsh/src/index.ts(632,7): error TS1135: Argument expression expected.
+packages/shell/tool-pwsh/src/index.ts(632,8): error TS1135: Argument expression expected.
+packages/shell/tool-pwsh/src/index.ts(634,13): error TS1005: ',' expected.
+packages/shell/tool-pwsh/src/index.ts(634,25): error TS1005: ',' expected.
+packages/shell/tool-pwsh/src/index.ts(634,47): error TS1005: ',' expected.
+packages/shell/tool-pwsh/src/index.ts(637,9): error TS1005: ',' expected.
+packages/shell/tool-pwsh/src/index.ts(637,15): error TS1005: ':' expected.
+packages/shell/tool-pwsh/src/index.ts(638,9): error TS1005: ',' expected.
+packages/shell/tool-pwsh/src/index.ts(638,15): error TS1005: ':' expected.
+packages/shell/tool-pwsh/src/index.ts(641,9): error TS1005: ',' expected.
+packages/shell/tool-pwsh/src/index.ts(641,15): error TS1005: ':' expected.
+packages/shell/tool-pwsh/src/index.ts(644,9): error TS1005: ',' expected.
+packages/shell/tool-pwsh/src/index.ts(644,15): error TS1005: ':' expected.
+packages/shell/tool-pwsh/src/index.ts(645,9): error TS1005: ',' expected.
+packages/shell/tool-pwsh/src/index.ts(645,15): error TS1005: ':' expected.
+packages/shell/tool-pwsh/src/index.ts(646,9): error TS1005: ',' expected.
+packages/shell/tool-pwsh/src/index.ts(646,15): error TS1005: ':' expected.
+packages/shell/tool-pwsh/src/index.ts(646,22): error TS1005: ',' expected.
+packages/shell/tool-pwsh/src/index.ts(653,9): error TS1005: ',' expected.
+packages/shell/tool-pwsh/src/index.ts(653,17): error TS1005: ',' expected.
+packages/shell/tool-pwsh/src/index.ts(653,44): error TS1005: ',' expected.
+packages/shell/tool-pwsh/src/index.ts(653,46): error TS1005: ';' expected.
+packages/shell/tool-pwsh/src/index.ts(686,7): error TS1128: Declaration or statement expected.
+packages/shell/tool-pwsh/src/index.ts(686,8): error TS1128: Declaration or statement expected.
+packages/shell/tool-pwsh/src/index.ts(696,5): error TS1109: Expression expected.
+packages/shell/tool-pwsh/src/index.ts(696,6): error TS1128: Declaration or statement expected.
+packages/shell/tool-pwsh/src/index.ts(698,5): error TS1434: Unexpected keyword or identifier.
+packages/shell/tool-pwsh/src/index.ts(698,23): error TS1005: ',' expected.
+packages/shell/tool-pwsh/src/index.ts(698,45): error TS1005: ';' expected.
+packages/shell/tool-pwsh/src/index.ts(761,6): error TS1128: Declaration or statement expected.
+packages/shell/tool-pwsh/src/index.ts(784,18): error TS1005: ';' expected.
+packages/shell/tool-pwsh/src/index.ts(799,3): error TS1109: Expression expected.
+packages/shell/tool-pwsh/src/index.ts(799,4): error TS1128: Declaration or statement expected.
+packages/shell/tool-pwsh/src/index.ts(799,5): error TS1128: Declaration or statement expected.
+packages/shell/tool-pwsh/src/index.ts(800,1): error TS1128: Declaration or statement expected.
+packages/compaction/compaction-tool-result-pruner/src/index.ts(209,41): error TS18048: 'result' is possibly 'undefined'.
+packages/compaction/compaction-tool-result-pruner/src/index.ts(209,48): error TS2339: Property 'content' does not exist on type 'ContentBlock'.
+packages/compaction/compaction-tool-result-pruner/src/index.ts(211,47): error TS2552: Cannot find name 'original'. Did you mean 'origin'?
+packages/compaction/compaction-tool-result-pruner/src/index.ts(214,12): error TS2552: Cannot find name 'original'. Did you mean 'origin'?
+packages/compaction/compaction-tool-result-pruner/src/index.ts(223,65): error TS2552: Cannot find name 'original'. Did you mean 'origin'?
+packages/compaction/compaction-basic/src/condense.ts(93,10): error TS2678: Type '"tool-result"' is not comparable to type '"text" | "reasoning" | "image" | "file" | "tool-call" | "tool-addition" | "tool-removal"'.
+packages/compaction/compaction-basic/src/condense.ts(94,26): error TS2339: Property 'content' does not exist on type 'never'.
+packages/compaction/compaction-basic/src/condense.ts(95,14): error TS7006: Parameter 'inner' implicitly has an 'any' type.
+packages/compaction/compaction-basic/src/condense.ts(97,16): error TS2698: Spread types may only be created from object types.
+packages/compaction/compaction-basic/src/condense.ts(112,65): error TS2367: This comparison appears to be unintentional because the types '"text" | "reasoning" | "image" | "file" | "tool-addition" | "tool-removal"' and '"tool-result"' have no overlap.
+packages/compaction/compaction-basic/src/summarizer.ts(9,1): error TS6133: 'deepFreeze' is declared but its value is never read.
+packages/compaction/compaction-basic/src/summarizer.ts(11,57): error TS6196: 'RequestMessage' is declared but never used.
+packages/compaction/compaction-basic/src/summarizer.ts(228,5): error TS2304: Cannot find name 'createUserMessage'.
+packages/guard/repeat-tool-reminder/src/index.ts(88,7): error TS6133: 'REMINDER_SOURCE' is declared but its value is never read.
+packages/guard/repeat-tool-reminder/src/index.ts(88,42): error TS2322: Type '"repeat-tool-reminder"' is not assignable to type '"user" | "model" | "tool" | "system-prompt" | "model-selection" | "user-approval" | "ptc-mode" | "tool-registry"'.
+packages/guard/repeat-tool-reminder/src/index.ts(278,20): error TS2304: Cannot find name 'PLUGIN_SOURCE'.
+packages/integrations/integrations/src/index.ts(23,15): error TS2614: Module '"@deepseek-ai/dsh-settings"' has no exported member 'SettingsScope'. Did you mean to use 'import SettingsScope from "@deepseek-ai/dsh-settings"' instead?
+packages/integrations/integrations/src/index.ts(226,42): error TS2339: Property 'register' does not exist on type 'SettingsForms'.
+packages/integrations/integrations/src/index.ts(228,44): error TS7006: Parameter 'next' implicitly has an 'any' type.
+apps/cli/tests/profiles/acp/tests/image-offload.expected.e2e.ts(142,11): error TS6133: 'normalizedToolImageHandle' is declared but its value is never read.
+apps/cli/tests/profiles/acp/tests/image-offload.expected.e2e.ts(153,29): error TS2304: Cannot find name 'runtimeContext'.
+apps/cli/tests/profiles/acp/tests/image-offload.expected.e2e.ts(204,29): error TS2304: Cannot find name 'runtimeContext'.
+packages/compaction/compaction-basic/tests/compaction-basic.spec.ts(1530,24): error TS2367: This comparison appears to be unintentional because the types '"image" | "text" | "reasoning" | "file" | "tool-call" | "tool-addition" | "tool-removal" | "plugin:vendor" | undefined' and '"tool-result"' have no overlap.
+packages/compaction/compaction-basic/tests/compaction-basic.spec.ts(1530,73): error TS2339: Property 'content' does not exist on type 'never'.
+packages/compaction/compaction-basic/tests/compaction-basic.spec.ts(1531,20): error TS2339: Property 'content' does not exist on type 'never'.
+packages/compaction/compaction-basic/tests/compaction-basic.spec.ts(1536,12): error TS2367: This comparison appears to be unintentional because the types '"image" | "text" | "reasoning" | "file" | "tool-call" | "tool-addition" | "tool-removal" | "plugin:vendor" | undefined' and '"tool-result"' have no overlap.
+packages/compaction/compaction-basic/tests/compaction-basic.spec.ts(1536,60): error TS2339: Property 'toolCallId' does not exist on type 'never'.
+packages/compaction/compaction-basic/tests/condense.spec.ts(64,9): error TS2367: This comparison appears to be unintentional because the types '"image" | "text" | "reasoning" | "file" | "tool-call" | "tool-addition" | "tool-removal" | "plugin:vendor" | undefined' and '"tool-result"' have no overlap.
+packages/compaction/compaction-basic/tests/condense.spec.ts(65,18): error TS2339: Property 'isError' does not exist on type 'never'.
+packages/compaction/compaction-basic/tests/condense.spec.ts(66,18): error TS2339: Property 'toolCallId' does not exist on type 'never'.
+packages/compaction/compaction-basic/tests/condense.spec.ts(67,18): error TS2339: Property 'content' does not exist on type 'never'.
+packages/compaction/compaction-basic/tests/condense.spec.ts(68,18): error TS2339: Property 'content' does not exist on type 'never'.
+packages/compaction/compaction-basic/tests/condense.spec.ts(68,55): error TS2339: Property 'content' does not exist on type 'never'.
+packages/compaction/compaction-tool-result-pruner/tests/tool-result-pruner.spec.ts(288,41): error TS2345: Argument of type '{ turn: number; step: number; message: { role: "assistant"; content: { type: "tool-call"; id: ToolCallId; name: string; arguments: string; }[]; source: { kind: "model"; provider: string; model: string; }; } & Pick<...>; }' is not assignable to parameter of type '{ turn: number; step: number; message: AssistantMessage; stream: AssistantStreamRecord[]; usage?: TokenUsage; interrupted?: true; }'.
+packages/integrations/integrations/tests/integrations.spec.ts(9,34): error TS2307: Cannot find module '@deepseek-ai/dsh-settings-file' or its corresponding type declarations.
+packages/integrations/integrations/tests/telegram.spec.ts(9,34): error TS2307: Cannot find module '@deepseek-ai/dsh-settings-file' or its corresponding type declarations.
+packages/mcp/mcp-client/tests/negotiation-lifecycle.spec.ts(20,7): error TS2322: Type '{ transport: "stdio"; serverName: string; command: string; args: never[]; env: {}; cwd: string; toolCallTimeoutMs: number; failOnStartupError: false; }' is not assignable to type 'Config'.
+packages/mcp/mcp-client/tests/protocol.spec.ts(19,7): error TS2322: Type '{ transport: "stdio"; serverName: string; command: string; args: never[]; env: {}; cwd: string; toolCallTimeoutMs: number; failOnStartupError: true; }' is not assignable to type 'Config'.
+packages/memory/tool-memory/tests/integration.spec.ts(61,15): error TS2532: Object is possibly 'undefined'.
+packages/memory/tool-memory/tests/integration.spec.ts(61,41): error TS2339: Property 'content' does not exist on type 'ContentBlock'.
+packages/memory/tool-memory/tests/integration.spec.ts(61,53): error TS7006: Parameter 'b' implicitly has an 'any' type.
+packages/shell/tool-bash-persistent/tests/tools.spec.ts(248,14): error TS2339: Property 'largeOutput' does not exist on type 'StubPtySession'.
+packages/shell/tool-bash-persistent/tests/tools.spec.ts(457,13): error TS2339: Property 'largeOutput' does not exist on type 'StubPtySession'.
+packages/shell/tool-bash-persistent/tests/tools.spec.ts(847,33): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-bash-persistent/tests/tools.spec.ts(851,43): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-bash-persistent/tests/tools.spec.ts(858,33): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-bash-persistent/tests/tools.spec.ts(862,43): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-bash-persistent/tests/tools.spec.ts(871,21): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-bash-persistent/tests/tools.spec.ts(874,21): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-bash-persistent/tests/tools.spec.ts(876,43): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-bash-persistent/tests/tools.spec.ts(883,21): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-bash-persistent/tests/tools.spec.ts(886,21): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-bash-persistent/tests/tools.spec.ts(887,36): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-bash-persistent/tests/tools.spec.ts(888,43): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-bash-persistent/tests/tools.spec.ts(895,21): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-bash-persistent/tests/tools.spec.ts(898,31): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-bash-persistent/tests/tools.spec.ts(902,36): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-bash-persistent/tests/tools.spec.ts(907,33): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-bash-persistent/tests/tools.spec.ts(908,36): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-bash-persistent/tests/tools.spec.ts(913,21): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-bash-persistent/tests/tools.spec.ts(922,7): error TS2740: Type 'Promise<Agent>' is missing the following properties from type 'Agent': id, options, session, inbox, and 9 more.
+packages/shell/tool-bash-persistent/tests/tools.spec.ts(927,24): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-pwsh-persistent/tests/loader-composition.spec.ts(188,26): error TS2304: Cannot find name 'ReadinessTimeline'.
+packages/shell/tool-pwsh-persistent/tests/loader-composition.spec.ts(210,70): error TS2304: Cannot find name 'TIMELINE_HEADER'.
+packages/shell/tool-pwsh-persistent/tests/loader-composition.spec.ts(341,7): error TS2740: Type 'Promise<Agent>' is missing the following properties from type 'Agent': id, options, session, inbox, and 9 more.
+packages/shell/tool-pwsh-persistent/tests/tools.spec.ts(232,29): error TS2339: Property 'statusChunks' does not exist on type 'StubTerminalSession'.
+packages/shell/tool-pwsh-persistent/tests/tools.spec.ts(235,24): error TS2339: Property 'statusChunks' does not exist on type 'StubTerminalSession'.
+packages/shell/tool-pwsh-persistent/tests/tools.spec.ts(256,14): error TS2339: Property 'largeOutput' does not exist on type 'StubTerminalSession'.
+packages/shell/tool-pwsh-persistent/tests/tools.spec.ts(430,13): error TS2339: Property 'statusChunks' does not exist on type 'StubTerminalSession'.
+packages/shell/tool-pwsh-persistent/tests/tools.spec.ts(444,13): error TS2339: Property 'statusChunks' does not exist on type 'StubTerminalSession'.
+packages/shell/tool-pwsh-persistent/tests/tools.spec.ts(458,15): error TS2339: Property 'statusChunks' does not exist on type 'StubTerminalSession'.
+packages/shell/tool-pwsh-persistent/tests/tools.spec.ts(555,13): error TS2339: Property 'largeOutput' does not exist on type 'StubTerminalSession'.
+packages/shell/tool-pwsh-persistent/tests/tools.spec.ts(921,33): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-pwsh-persistent/tests/tools.spec.ts(925,43): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-pwsh-persistent/tests/tools.spec.ts(932,33): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-pwsh-persistent/tests/tools.spec.ts(936,43): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-pwsh-persistent/tests/tools.spec.ts(945,21): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-pwsh-persistent/tests/tools.spec.ts(948,21): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-pwsh-persistent/tests/tools.spec.ts(949,36): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-pwsh-persistent/tests/tools.spec.ts(950,43): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-pwsh-persistent/tests/tools.spec.ts(957,21): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-pwsh-persistent/tests/tools.spec.ts(960,31): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-pwsh-persistent/tests/tools.spec.ts(964,36): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-pwsh-persistent/tests/tools.spec.ts(969,33): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-pwsh-persistent/tests/tools.spec.ts(970,36): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-pwsh-persistent/tests/tools.spec.ts(975,21): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-pwsh-persistent/tests/tools.spec.ts(984,7): error TS2740: Type 'Promise<Agent>' is missing the following properties from type 'Agent': id, options, session, inbox, and 9 more.
+packages/shell/tool-pwsh-persistent/tests/tools.spec.ts(989,24): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-pwsh/tests/background.spec.ts(502,34): error TS2353: Object literal may only specify known properties, and 'promoteOnTimeout' does not exist in type 'Config'.
+packages/shell/tool-pwsh/tests/integration.spec.ts(73,34): error TS2353: Object literal may only specify known properties, and 'promoteOnTimeout' does not exist in type 'Config'.
+packages/shell/tool-pwsh/tests/integration.spec.ts(168,26): error TS2304: Cannot find name 'ToolTasks'.
+packages/shell/tool-pwsh/tests/tools.spec.ts(991,9): error TS2741: Property 'observed' is missing in type '{ status: "running"; exitCode: null; signal: null; done: Promise<void>; readOutput: () => { delta: string; lossy: false; }; kill: () => boolean; }' but required in type 'ShellProcess'.
+packages/shell/tool-pwsh/tests/tools.spec.ts(1022,33): error TS2304: Cannot find name 'setupWithTasks'.
+packages/shell/tool-pwsh/tests/tools.spec.ts(1027,45): error TS7006: Parameter 's' implicitly has an 'any' type.
+packages/shell/tool-pwsh/tests/tools.spec.ts(1032,33): error TS2304: Cannot find name 'setupWithTasks'.
+packages/shell/tool-pwsh/tests/tools.spec.ts(1048,33): error TS2304: Cannot find name 'setupWithTasks'.
+packages/shell/tool-pwsh/tests/tools.spec.ts(1074,33): error TS2304: Cannot find name 'setupWithTasks'.
+packages/shell/tool-pwsh/tests/tools.spec.ts(1078,90): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-pwsh/tests/tools.spec.ts(1080,55): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-pwsh/tests/tools.spec.ts(1081,83): error TS2345: Argument of type 'Promise<Agent>' is not assignable to parameter of type 'Agent'.
+packages/shell/tool-pwsh/tests/tools.spec.ts(1087,33): error TS2304: Cannot find name 'setupWithTasks'.
+packages/shell/tool-pwsh/tests/tools.spec.ts(1107,33): error TS2304: Cannot find name 'setupWithTasks'.
+packages/shell/tool-pwsh/tests/tools.spec.ts(1118,33): error TS2304: Cannot find name 'setupWithTasks'.
+packages/shell/tool-pwsh/tests/tools.spec.ts(1138,27): error TS2304: Cannot find name 'setupWithTasks'.
+packages/shell/tool-pwsh/tests/tools.spec.ts(1139,45): error TS7006: Parameter 's' implicitly has an 'any' type.
+packages/shell/tool-pwsh/tests/tools.spec.ts(1155,33): error TS2304: Cannot find name 'setupWithTasks'.

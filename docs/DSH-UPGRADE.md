@@ -21,7 +21,11 @@ Work happens on branch `dsh-upgrade-0.2.1`, worktree `C:\src\shoehorn-upgrade`. 
 ## Steps
 
 1. [x] Create the branch and worktree, merge rc.2 into `agent/` with our side kept on conflicts.
-2. [ ] Run `pnpm install`, then `pnpm run build:lib`; fix the compile errors (new APIs, moved packages).
+2. [ ] Run `pnpm install` (done), then `pnpm run build:lib`; fix the compile errors. **In progress:** the host typecheck has 184 errors; the full list is in `docs/dsh-upgrade-host-errors.txt`.
+   - [ ] tool-pwsh (63), tool-pwsh-persistent (30), tool-bash-persistent (24): our auto-background patch on top of upstream's reworked shell tools. Check first whether upstream now has its own background/job support (`packages/jobs`, `tool-jobs`); if it does, drop our patch and keep upstream's, otherwise re-port the patch.
+   - [ ] agent-loop (24): our auto-continue ("announces an action but stops") plus the long-session edits. Re-port onto the new loop.
+   - [ ] compaction-basic (19) and compaction-tool-result-pruner (6): our condensed output, summary template, strip-call-markup and the pruner's protected tail. Compare with upstream's compaction changes and keep the better of each.
+   - [ ] integrations (5), tool-memory (3), mcp-client (3), repeat-tool-reminder (3), fs-local (1), apps/cli tests (3): small API changes.
 3. [ ] Port presets: our presets to the new preset system, and the defaults in integrations, webhooks and Telegram.
 4. [ ] Run the tests for every package we changed. Review each of the 48 conflict files: keep ours or take upstream's.
 5. [ ] Run the full build (`pnpm run build`) and start a test dsh on another port with a copy of `~/.dsh`.
@@ -33,4 +37,5 @@ Work happens on branch `dsh-upgrade-0.2.1`, worktree `C:\src\shoehorn-upgrade`. 
 - 2026-10-18: step 1 done. The merge produced 0 remaining conflicts after `-X ours`.
 - 2026-10-18: conflicted config files resolved as upstream's version plus our additions (package.json files, tsconfig references). Generated files taken from upstream: pnpm-lock, the docs catalogs, tsconfig.base.json (aliases regenerated, plus hand-written ones for ui-integrations, ui-shoehorn and integrations/types).
 - 2026-10-18: integrations and the webhook session now point at `dsh-agent-preset-registry` (same `ctx.agentPresets` service) and `packages/experimental/webhook`. `pnpm install` is OK.
+- 2026-10-18: first host typecheck: 184 errors (see step 2). Stopped here for the quota; resume from step 2.
 - TODO: `dsh-settings-file` is gone upstream, and the integrations tests (settings-yaml based) still need porting to the new settings provider.
