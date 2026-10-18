@@ -225,29 +225,53 @@ function toolResult(callId: string, text: string, isError = false) {
 }
 
 describe('built-in conversation node Definitions', () => {
-  it('publishes a file-only argument stream before the completed tool call', () => {
-    const value = assembler([
-      at(1, 'turn/start', { turn: 1 }),
-      at(2, 'step/start', { turn: 1, step: 1 }),
-      at(3, 'assistant/chunk', { turn: 1, step: 1,
-        chunk: { type: 'tool-call-delta', index: 0, id: 'file-1', name: 'write', argumentsDelta: '{"file_path":"a.py","content":"print(1)' },
-      }),
-    ])
+  it.each(['replay', 'live', 'prepend'] as const)('keeps developer tool changes visible while hiding ordinary Context (%s)', (mode) => {
+    const entries = [
+      at(0, 'request/header', { reason: 'initial', header: {
+        config: { provider: 'test', model: 'test' },
+        tools: ['search', 'read_file'].map(name => ({ name, description: '', parameters: {} })),
+      } }),
+      at(1, 'user/message', {
+        ...textMessage('context', 'workspace context'),
+        source: { kind: 'context' },
+      }, { surfaceOp: 'append' }),
+      at(2, 'developer/message', { turn: 1, step: 1, message: {
+        id: 'developer', role: 'developer', source: { kind: 'tool-registry' },
+        content: [{ type: 'tool-addition', toolName: 'search' }, { type: 'tool-removal', toolName: 'old_search' }],
+      } }, { surfaceOp: 'append' }),
+      at(3, 'request/header', { reason: 'change', header: { config: { provider: 'test', model: 'test' }, tools: [] } }),
+    ]
+    const value = assembler(mode === 'replay' ? entries : [])
+    if (mode === 'live') {
+      for (const entry of entries) {
+        value.append(entry)
+        value.flush()
+      }
+    } else if (mode === 'prepend') {
+      value.replaceWindow(entries.slice(2), true)
+      value.prepend(entries.slice(0, 2), false)
+      value.flush()
+    }
     const current = snapshot(value)
-    const assistant = node(current, 'assistant-step')
-    expect(assistant?.visibility).toBe('visible')
-    expect(current.legacy.partial?.blocks).toMatchInlineSnapshot(`
-      [
-        {
-          "argsRaw": "{\"file_path\":\"a.py\",\"content\":\"print(1)",
-          "callId": "file-1",
-          "kind": "tool-call",
-          "name": "write",
-        },
-      ]
-    `)
-    expect(node(current, 'tool-call')).toBeUndefined()
+    const visible = current.order.map(key => current.nodes.get(key))
+    expect(visible.map(candidate => candidate?.kind)).toEqual(['context'])
+    expect(visible[0]?.data).toMatchObject({
+      kind: 'context', content: [{ type: 'tool-addition', toolName: 'search' }, { type: 'tool-removal', toolName: 'old_search' }],
+    })
+    expect(current.nodes.values().filter(candidate => candidate.kind === 'context')).toHaveLength(2)
   })
+
+  it('preserves tool removals without a loaded header', () => {
+    const value = assembler([at(1, 'developer/message', { turn: 1, step: 1, message: {
+      id: 'developer', role: 'developer', source: { kind: 'tool-registry' },
+      content: [{ type: 'tool-removal', toolName: 'old_search' }],
+    } }, { surfaceOp: 'append' })], true)
+    const current = snapshot(value)
+    const removal = node(current, 'context')
+    expect(removal?.data).toMatchObject({ content: [{ type: 'tool-removal', toolName: 'old_search' }] })
+    expect(current.order).toContain(removal?.key)
+  })
+
   it('rejects an unrelated event passed directly to the request-prompt start', () => {
     const input = at(1, 'turn/start', { turn: 1 })
     const invalidStart = {

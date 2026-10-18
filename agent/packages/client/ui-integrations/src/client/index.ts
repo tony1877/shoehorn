@@ -1,5 +1,6 @@
 /** Integrations settings section: MCP servers, inbound webhooks, notification targets. */
 
+import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
@@ -23,7 +24,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 export const NS = 'settings.integrations'
 
 /** Services required by the section registration and its Remote face. */
-export const inject = ['slots', 'locale', 'remote', 'remote.integrations', 'sessions']
+export const inject = ['slots', 'locale', 'remote', 'remote.integrations', 'sessions', 'uiWorkspace']
 
 type Result<T> = { ok: true; value: T } | { ok: false; error: { code: string; message: string } }
 
@@ -66,7 +67,7 @@ export function apply(ctx: ClientContext): void {
     const sessions = ctx.sessions
     const openWanted = (): boolean => {
       if (sessions.list.getSnapshot().phase === 'pending') return false
-      sessions.open(wanted as Parameters<typeof sessions.open>[0])
+      ctx.uiWorkspace.openSession(wanted as Parameters<typeof ctx.uiWorkspace.openSession>[0])
       const url = new URL(window.location.href)
       url.searchParams.delete('session')
       window.history.replaceState(window.history.state, '', url)

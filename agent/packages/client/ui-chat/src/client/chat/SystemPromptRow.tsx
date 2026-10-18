@@ -8,8 +8,8 @@ import css from './ContextInjectionRow.module.css'
 export interface SystemPromptRowProps {
   /** Complete model-visible prompt text. */
   text: string
-  /** The same prompt again at a rewritten conversation's new request series. */
-  repeat?: boolean
+  /** True when the prompt replaced an earlier one from this position in the history. */
+  update?: boolean
   /** The owning view's locale seat. */
   t: ChatViewSlotProps['t']
 }
@@ -22,14 +22,14 @@ export interface SystemPromptRowProps {
  * @param props - Complete prompt text, whether it is an update, and the locale seat.
  * @returns The system-prompt disclosure row.
  */
-export function SystemPromptRow({ text, repeat = false, t }: SystemPromptRowProps) {
+export function SystemPromptRow({ text, update = false, t }: SystemPromptRowProps) {
   const [open, setOpen] = useState(false)
   return (
     <DisclosureRow
       className={css.root}
       icon={<IconBrowseOutlineRegular size={14} />}
       chevronClassName={css.chevron}
-      title={t(repeat ? 'message.systemPromptRepeat' : 'message.systemPrompt')}
+      title={t(update ? 'message.systemPromptUpdate' : 'message.systemPrompt')}
       open={open}
       expandable
       expandOnRowClick
@@ -46,5 +46,5 @@ export function SystemPromptRow({ text, repeat = false, t }: SystemPromptRowProp
 export const SystemPromptNodeView = memo(function SystemPromptNodeView({
   node, t,
 }: Pick<ChatNodeViewProps<'system-prompt'>, 'node' | 't'>) {
-  return <SystemPromptRow text={node.data.text} repeat={node.data.repeat === true} t={t} />
+  return <SystemPromptRow text={node.data.text} update={node.data.update === true} t={t} />
 })

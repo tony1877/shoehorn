@@ -8,18 +8,14 @@ import { chatNode } from './common.ts'
 
 declare module '../contract/chat-nodes.ts' {
   interface ChatNodeDataMap {
-    /**
-     * Complete system prompt rendered for one model request. `repeat`: an unchanged prompt at the start of a new
-     * request series (the conversation was rewritten: pruned or compacted), labelled as such.
-     */
-    'system-prompt': { readonly text: string, readonly repeat?: boolean }
+    /** Complete system prompt rendered for one model request, or an in-history prompt update at its own position. */
+    'system-prompt': { readonly text: string; readonly update?: true }
   }
 }
 
 interface RequestPromptState extends ReturnType<RequestPromptInspector> {
   readonly anchorSeq: number
   readonly showsPrompt: boolean
-  readonly repeat: boolean
   readonly turn?: number
   readonly step?: number
 }
@@ -130,12 +126,7 @@ export function requestPromptDefinition(inspect: RequestPromptInspector): Conver
           || match.event.data.reason !== 'change'
           || match.event.data.startsSeries === true
           || change === 'system'
-          || change === 'system-and-tools',
-        repeat: previous !== undefined
-          && match.event.data.reason === 'series'
-          && change !== 'system'
-          && change !== 'system-and-tools'
-          && previous.prompt.system === inspection.prompt.system,
+          || change === 'system-and-tools'),
         ...location,
         ...inspection,
       }
@@ -143,11 +134,17 @@ export function requestPromptDefinition(inspect: RequestPromptInspector): Conver
     update: context => context.state,
     buildViewNode: (context) => {
       const state = context.state
-      if (state === undefined || !state.showsPrompt || state.prompt.system === '') return null
-      return chatNode(context, 'system-prompt', state.anchorSeq, {
-        text: state.prompt.system,
-        ...state.repeat ? { repeat: true } : {},
-      })
+      if (state === undefined) return null
+      const current = context.current.get('chat') as ChatNode | null | undefined
+      const visible = state.showsPrompt && state.prompt.system !== ''
+      if (!visible && current?.kind !== 'system-prompt') return null
+      return chatNode(
+        context,
+        'system-prompt',
+        state.anchorSeq,
+        { text: state.prompt.system },
+        { visibility: visible ? 'visible' : 'hidden' },
+      )
     },
   }
 }
