@@ -2583,6 +2583,10 @@ int serve(const std::vector<std::string> & args_in) {
     // hardware sensors: GPU (NVML), drive temperatures, and, when LibreHardwareMonitor's web server answers, its
     // temperature and voltage sensors (CPU, memory modules, GPU memory, board); every 2 s, so /stats never waits on them
     std::thread([sp] {
+        // a sensor server without a snapshot stamp (LibreHardwareMonitor, older shoehorn-hwmon) that stops sampling
+        // keeps answering with the same bytes; live readings always move, so an unchanged body for 30 s is stale
+        size_t                                body_hash = 0;
+        std::chrono::steady_clock::time_point body_since = std::chrono::steady_clock::now();
         for (;;) {
             json h = json::object();
             const sys::GpuSensors g = sys::gpu_sensors();
@@ -2625,8 +2629,30 @@ int serve(const std::vector<std::string> & args_in) {
                             for (const auto & ch : n["Children"]) walk(ch, depth + 1, here);
                     };
                     try {
-                        walk(json::parse(r->body), 0, "");
-                        h["sensors"] = sensors;
+                        const json root = json::parse(r->body);
+                        // shoehorn-hwmon stamps each snapshot ("Updated", Unix ms); a stalled sampler would otherwise
+                        // keep serving its last values. LibreHardwareMonitor's own server has no stamp: taken as fresh.
+                        const long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                     std::chrono::system_clock::now().time_since_epoch()).count();
+                        const size_t hash = std::hash<std::string>{}(r->body);
+                        if (hash != body_hash) {
+                            body_hash  = hash;
+                            body_since = std::chrono::steady_clock::now();
+                        }
+                        const long long unchanged_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                           std::chrono::steady_clock::now() - body_since).count();
+                        const long long age_ms = root.contains("Updated") && root["Updated"].is_number()
+                                                     ? now_ms - root["Updated"].get<long long>()
+                                                     : (unchanged_ms > 30000 ? unchanged_ms : 0);
+                        if (age_ms > 10000) {
+                            h["sensors_stale_s"] = age_ms / 1000;
+                            h["sensors"]         = json::array();
+                        } else {
+                            walk(root, 0, "");
+                            h["sensors"] = sensors;
+                            if (root.contains("Skipped") && root["Skipped"].is_array() && !root["Skipped"].empty())
+                                h["sensors_skipped"] = root["Skipped"];
+                        }
                     } catch (...) {}
                 }
             }
@@ -2636,6 +2662,8 @@ int serve(const std::vector<std::string> & args_in) {
                     sensors.push_back({ { "kind", b.kind }, { "hw", b.hw }, { "name", b.name }, { b.volt ? "v" : "c", b.value } });
                 if (!sensors.empty()) h["sensors"] = sensors;
             }
+            // when this snapshot was taken: the pages flag readings that stop updating (a hung sensor query here)
+            h["at"] = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
             {
                 std::lock_guard<std::mutex> lk(sp->hw_mu);
                 sp->hw = std::move(h);

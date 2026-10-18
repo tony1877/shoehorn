@@ -2,6 +2,7 @@
 // /data.json on 127.0.0.1 (port 8085, or the first argument), in the tree shape of LibreHardwareMonitor's own web
 // server: root > computer > hardware > sensors, each sensor with SensorId, Type, Text and Value. Sub-hardware sensors
 // are listed under their hardware. Only temperatures and voltages are served; nothing listens beyond this machine.
+// The root also carries "Updated" (Unix ms of the snapshot) so a reader can tell fresh data from a stalled sampler.
 
 using System.Diagnostics;
 using System.Globalization;
@@ -21,6 +22,7 @@ if (!args.Contains("--worker"))
     {
         var psi = new ProcessStartInfo(self) { UseShellExecute = false };
         psi.ArgumentList.Add("--worker");
+        psi.ArgumentList.Add(Environment.ProcessId.ToString(CultureInfo.InvariantCulture));
         foreach (string a in args) psi.ArgumentList.Add(a);
         using var child = Process.Start(psi);
         child?.WaitForExit();
@@ -28,7 +30,15 @@ if (!args.Contains("--worker"))
     }
 }
 
-string? portArg = args.FirstOrDefault(a => a != "--worker");
+// worker arguments: --worker <supervisor pid> [port]
+int workerAt = Array.IndexOf(args, "--worker");
+Process? supervisor = null;
+try
+{
+    supervisor = Process.GetProcessById(int.Parse(args[workerAt + 1], CultureInfo.InvariantCulture));
+}
+catch { }
+string? portArg = args.Where((_, i) => i != workerAt && i != workerAt + 1).FirstOrDefault();
 int port = portArg != null && int.TryParse(portArg, out var p) ? p : 8085;
 
 var computer = new Computer
@@ -40,6 +50,74 @@ var computer = new Computer
     IsStorageEnabled = true,
     IsControllerEnabled = true,
 };
+// Sampling can hang inside a sensor library (a driver call that never returns): the old snapshot would then be served
+// forever. A watchdog kills this worker when no sample has finished for StallMs, so the supervisor starts a fresh one;
+// the hardware that was updating at the time is logged and skipped for SkipMinutes, so one bad device cannot keep the
+// rest stale. The log and the skip list live in %ProgramData%\shoehorn-hwmon.
+const int StallMs = 20_000, FirstSampleMs = 90_000, SkipMinutes = 30;
+string stateDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "shoehorn-hwmon");
+Directory.CreateDirectory(stateDir);
+string logPath = Path.Combine(stateDir, "hwmon.log"), skipPath = Path.Combine(stateDir, "skip.txt");
+
+void Log(string line)
+{
+    try
+    {
+        if (File.Exists(logPath) && new FileInfo(logPath).Length > 256 * 1024) File.Move(logPath, logPath + ".1", true);
+        File.AppendAllText(logPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} [{Environment.ProcessId}] {line}{Environment.NewLine}");
+    }
+    catch { }
+}
+
+// identifier -> skip until (UTC)
+Dictionary<string, DateTime> LoadSkips()
+{
+    var skips = new Dictionary<string, DateTime>();
+    try
+    {
+        foreach (string l in File.Exists(skipPath) ? File.ReadAllLines(skipPath) : [])
+        {
+            string[] f = l.Split('\t');
+            if (f.Length == 2 && long.TryParse(f[1], out long until) && DateTimeOffset.FromUnixTimeSeconds(until).UtcDateTime > DateTime.UtcNow)
+                skips[f[0]] = DateTimeOffset.FromUnixTimeSeconds(until).UtcDateTime;
+        }
+    }
+    catch { }
+    return skips;
+}
+var skips = LoadSkips();
+foreach (var (id, until) in skips) Log($"skipping {id} until {until.ToLocalTime():HH:mm} (it stalled sampling)");
+
+long lastSample = Environment.TickCount64;  // the watchdog's clock: end of the last finished sample, or start
+bool sampledOnce = false;
+string current = "opening the sensor libraries";  // what the sampler is doing right now, for the stall log
+string currentDevice = "";  // top-level hardware being updated (a hung sub-device quarantines its parent)
+new Thread(() =>
+{
+    while (true)
+    {
+        Thread.Sleep(1000);
+        // a worker whose supervisor is gone (the task was ended) must not keep the port from the next one
+        if (supervisor == null || supervisor.HasExited) Process.GetCurrentProcess().Kill();
+        long age = Environment.TickCount64 - Interlocked.Read(ref lastSample);
+        if (age < (Volatile.Read(ref sampledOnce) ? StallMs : FirstSampleMs)) continue;
+        string what = Volatile.Read(ref current), device = Volatile.Read(ref currentDevice);
+        Log($"sampling stalled for {age / 1000} s in: {what}; restarting{(device != "" ? $", skipping {device} for {SkipMinutes} min" : "")}");
+        if (device != "")
+        {
+            try
+            {
+                var next = LoadSkips();
+                next[device] = DateTime.UtcNow.AddMinutes(SkipMinutes);
+                File.WriteAllLines(skipPath, next.Select(kv => $"{kv.Key}\t{new DateTimeOffset(kv.Value).ToUnixTimeSeconds()}"));
+            }
+            catch { }
+        }
+        // TerminateProcess: a thread stuck in a driver call would keep a graceful exit waiting
+        Process.GetCurrentProcess().Kill();
+    }
+}) { IsBackground = true, Name = "watchdog" }.Start();
+
 computer.Open();
 
 // Board voltage maps LibreHardwareMonitorLib lacks: sensor name -> (new name, factor on the library's value; 0 = drop).
@@ -68,8 +146,17 @@ var gate = new object();
 void Sample()
 {
     var hardware = new List<object>();
+    var skipped = new List<string>();
     foreach (IHardware hw in computer.Hardware)
     {
+        string hwId = hw.Identifier.ToString();
+        if (skips.TryGetValue(hwId, out DateTime until) && until > DateTime.UtcNow)
+        {
+            skipped.Add(Clean(hw.Name));
+            continue;
+        }
+        Volatile.Write(ref currentDevice, hwId);
+        Volatile.Write(ref current, hwId);
         hw.Update();
         var sensors = new List<object>();
         void Add(IHardware h)
@@ -98,14 +185,19 @@ void Sample()
         Add(hw);
         foreach (IHardware sub in hw.SubHardware)
         {
+            Volatile.Write(ref current, sub.Identifier.ToString());
             sub.Update();
             Add(sub);
         }
         hardware.Add(new Dictionary<string, object> { ["Text"] = Clean(hw.Name), ["Children"] = sensors });
     }
+    Volatile.Write(ref currentDevice, "");
+    Volatile.Write(ref current, "serializing");
     var root = new Dictionary<string, object>
     {
         ["Text"] = "Sensor",
+        ["Updated"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+        ["Skipped"] = skipped,
         ["Children"] = new[] { new Dictionary<string, object> { ["Text"] = Environment.MachineName, ["Children"] = hardware } },
     };
     byte[] json = JsonSerializer.SerializeToUtf8Bytes(root);
@@ -116,8 +208,27 @@ void Sample()
 static string Clean(string s) =>
     System.Text.RegularExpressions.Regex.Replace(new string(s.Where(c => c >= ' ' && c <= '~').ToArray()), " {2,}", " ").Trim();
 
-Sample();
-var timer = new Timer(_ => { try { Sample(); } catch { } }, null, 2000, 2000);
+// One sampler thread: a sample never overlaps the previous one (the sensor libraries are not thread-safe), and a slow
+// one delays the next instead of piling up.
+new Thread(() =>
+{
+    while (true)
+    {
+        long t0 = Environment.TickCount64;
+        try
+        {
+            Sample();
+        }
+        catch (Exception e)
+        {
+            Log($"sample failed in {Volatile.Read(ref current)}: {e.GetType().Name}: {e.Message}");
+        }
+        Interlocked.Exchange(ref lastSample, Environment.TickCount64);
+        Volatile.Write(ref sampledOnce, true);
+        Volatile.Write(ref current, "idle");
+        Thread.Sleep((int) Math.Max(100, 2000 - (Environment.TickCount64 - t0)));
+    }
+}) { IsBackground = true, Name = "sampler" }.Start();
 
 var listener = new HttpListener();
 listener.Prefixes.Add($"http://127.0.0.1:{port}/");
