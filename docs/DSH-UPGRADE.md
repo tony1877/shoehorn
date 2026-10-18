@@ -42,7 +42,12 @@ Work happens on branch `dsh-upgrade-0.2.1`, worktree `C:\src\shoehorn-upgrade`. 
    - Startup warning: `tool-ralph` pending (waiting for `workflowEngine`). That is upstream's own base-bundle row (Ralph moved to the base bundle); our presets keep their own `tool-ralph` inside the group that provides the engine.
    - The UI loads with `Minimal + Compaction` as the default preset, full access, the shoehorn 27B, and the copied sessions listed.
    - A real task on the live model passed: write a 36-line file (write tool), count its lines in pwsh, run a 75 s command, report all three (2 min 16 s, 26 tok/s). It wrote `C:\Users\aless\new_project\upgrade-check.txt`.
-6. [ ] Live checks: a long session with compaction, tool edge cases, vision, the browser MCP service, Telegram (fake API), webhooks, a streamed file write (upstream's live preview), the auto-background shell (a slow command becomes a job).
+6. [ ] Live checks (on the test dsh, port 3090, live shoehorn server):
+   - [x] Tools and shell: write, pwsh, a 75 s command (see step 5).
+   - [x] Vision: `read_image` on a test invoice: "#9902, 77.10 USD" in 8 s.
+   - [x] Integrations page: renders under Settings with the imported rows; the `browser` MCP server (Playwright) connects with 25 tools on the new MCP SDK.
+   - [ ] Still to run: a long session through compaction; Telegram against the fake Bot API; a webhook delivery; an image pasted into the chat; upstream's streamed file preview on a large write; the auto-background shell with a command longer than its wait.
+   Original list: a long session with compaction, tool edge cases, vision, the browser MCP service, Telegram (fake API), webhooks, a streamed file write (upstream's live preview), the auto-background shell (a slow command becomes a job).
 7. [ ] Switch: merge to main, update `~/.dsh` (backup first), restart dsh. Roll back with `git checkout <old>` plus a rebuild.
 
 ## Log
@@ -61,3 +66,4 @@ Work happens on branch `dsh-upgrade-0.2.1`, worktree `C:\src\shoehorn-upgrade`. 
 - 2026-10-18: step 2 done: host and client typecheck and `build:lib` pass. Next: step 3 (presets).
 - 2026-10-18: step 3 done (preset converter). Next: step 5 (full build, test dsh on a copy of ~/.dsh), then step 4's review alongside.
 - 2026-10-18: step 5 passed: full build, test dsh on a copied home, a real task end to end. Next: step 6 live checks, step 4 review.
+- 2026-10-18: step 6 partly done (tools, vision, integrations / MCP). Not switched: the live dsh still runs the old version.
