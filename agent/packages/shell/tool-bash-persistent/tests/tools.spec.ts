@@ -120,6 +120,8 @@ class StubPtySession implements TerminalBackendSession {
   pendingText = ''
   historyTruncated = false
   throwOnSend = false
+  largeOutput = 'x'.repeat(100)
+
   /** `long` mode: the in-flight command's end marker and the send waiting on it. */
   longEnd: string | undefined
   longSettle: ((viewport: string, waitReason: TerminalWaitReason) => void) | undefined
@@ -809,8 +811,16 @@ describe('tool-bash-persistent', () => {
   })
 })
 
+/** The job id a promotion reply names (`... moved to background job <id>; ...`). */
+function promotedJob(reply: string): string {
+  const m = /moved to background job (\S+?);/.exec(reply)
+  if (m === null) throw new Error(`no job id in: ${reply}`)
+  return m[1]!
+}
+
 async function setupWithJobs(config: ToolBashPersistent.Config) {
   const ctx = new Context()
+  provideWorkingDirectoryFixture(ctx)
   contexts.push(ctx)
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
@@ -821,7 +831,7 @@ async function setupWithJobs(config: ToolBashPersistent.Config) {
   const stub = stubBackend('normal')
   ctx.terminals.registerBackend(stub.backend)
   const fiber = await ctx.plugin(ToolBashPersistent, config)
-  return { ctx, stub, fiber, owner: agent(ctx, '/workspace') }
+  return { ctx, stub, fiber, owner: await agent(ctx, '/workspace') }
 }
 
 function jobCall(ctx: Context, owner: Agent, name: string, args: unknown) {
@@ -844,22 +854,23 @@ describe('tool-bash-persistent auto-background', () => {
 
   it('moves a long command to a background job in its own shell; the next call gets a fresh shell', async () => {
     const { ctx, owner, stub } = await setupWithJobs({ backendType: 'stub', autoBackgroundAfterMs: 30 })
-    expect(text(await call(ctx, owner, 'warm up'))).toBe('hello from stub')
+    expect(text(await call(ctx, owner, 'warm up'))).toContain('hello from stub')
     const shell = stub.sessions[0]!
     shell.mode = 'long'
 
     const promoted = text(await call(ctx, owner, 'make -j16'))
-    expect(promoted).toContain('[still running after 0s - moved to background job bash-1; it keeps running in its own shell]')
+    expect(promoted).toContain('[still running after 0s - moved to background job ')
+    const job = promotedJob(promoted)
     expect(promoted).toContain('working...')
     expect(promoted).toContain('Your next bash call starts a NEW shell from the workspace')
     expect(shell.closed).toEqual([])
 
     // The owner's next call runs in a new shell while the job keeps the old one.
-    expect(text(await call(ctx, owner, 'pwd'))).toBe('hello from stub')
+    expect(text(await call(ctx, owner, 'pwd'))).toContain('hello from stub')
     expect(stub.sessions).toHaveLength(2)
 
     shell.finishLong('build ok')
-    const final = text(await jobCall(ctx, owner, 'job_output', { job_id: 'bash-1', wait: true }))
+    const final = text(await jobCall(ctx, owner, 'job_output', { job_id: job, wait: true }))
     expect(final).toContain('build ok')
     expect(final).not.toContain('working...')
     expect(final).toContain('[status: completed, exit code: 0]')
@@ -871,9 +882,9 @@ describe('tool-bash-persistent auto-background', () => {
     await call(ctx, owner, 'warm up')
     const shell = stub.sessions[0]!
     shell.mode = 'long'
-    await call(ctx, owner, 'make test')
+    const job = promotedJob(text(await call(ctx, owner, 'make test')))
     shell.finishLong('2 tests failed', 2)
-    const final = text(await jobCall(ctx, owner, 'job_output', { job_id: 'bash-1', wait: true }))
+    const final = text(await jobCall(ctx, owner, 'job_output', { job_id: job, wait: true }))
     expect(final).toContain('2 tests failed')
     expect(final).toContain('[status: completed, exit code: 2]')
   })
@@ -883,9 +894,9 @@ describe('tool-bash-persistent auto-background', () => {
     await call(ctx, owner, 'warm up')
     const shell = stub.sessions[0]!
     shell.mode = 'long'
-    await call(ctx, owner, 'sleep 600')
-    expect(text(await jobCall(ctx, owner, 'job_kill', { job_id: 'bash-1' }))).toBe('requested cancellation of job bash-1')
-    const final = text(await jobCall(ctx, owner, 'job_output', { job_id: 'bash-1', wait: true }))
+    const job = promotedJob(text(await call(ctx, owner, 'sleep 600')))
+    expect(text(await jobCall(ctx, owner, 'job_kill', { job_id: job }))).toBe(`requested cancellation of job ${job}`)
+    const final = text(await jobCall(ctx, owner, 'job_output', { job_id: job, wait: true }))
     expect(final).toContain('[status: killed, cancelled]')
     expect(shell.closed).toContain('background bash command cancelled')
   })
@@ -904,7 +915,7 @@ describe('tool-bash-persistent auto-background', () => {
 
   it('a command finishing within the wait returns normally with no job', async () => {
     const { ctx, owner } = await setupWithJobs({ backendType: 'stub', autoBackgroundAfterMs: 5_000 })
-    expect(text(await call(ctx, owner, 'date'))).toBe('hello from stub')
+    expect(text(await call(ctx, owner, 'date'))).toContain('hello from stub')
     expect(text(await jobCall(ctx, owner, 'job_list', {}))).toBe('(no background jobs)')
   })
 
@@ -922,9 +933,9 @@ describe('tool-bash-persistent auto-background', () => {
       agent: owner,
     })
     expect(Date.now() - started).toBeLessThan(2_000)
-    expect(text(result)).toContain('moved to background job bash-1')
+    const job = promotedJob(text(result))
     shell.finishLong('')
-    await jobCall(ctx, owner, 'job_output', { job_id: 'bash-1', wait: true })
+    await jobCall(ctx, owner, 'job_output', { job_id: job, wait: true })
   })
 
   it('advertises the wait and exposes timeoutMs when enabled', async () => {

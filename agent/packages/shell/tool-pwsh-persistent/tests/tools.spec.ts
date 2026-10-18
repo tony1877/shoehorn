@@ -122,6 +122,9 @@ class StubTerminalSession implements TerminalBackendSession {
   pendingText = ''
   historyTruncated = false
   throwOnSend = false
+  largeOutput = 'x'.repeat(100)
+  statusChunks: string[] = []
+
   /** `long` mode: the in-flight command's end marker and the send waiting on it. */
   longEnd: string | undefined
   longSettle: ((viewport: string, waitReason: TerminalWaitReason) => void) | undefined
@@ -883,8 +886,16 @@ describe('tool-pwsh-persistent', () => {
 })
 
 /** The persistent tool plus the job runtime and its controller (job_output/job_kill/job_list). */
+/** The job id a promotion reply names (`... moved to background job <id>; ...`). */
+function promotedJob(reply: string): string {
+  const m = /moved to background job (\S+?);/.exec(reply)
+  if (m === null) throw new Error(`no job id in: ${reply}`)
+  return m[1]!
+}
+
 async function setupWithJobs(config: ToolPwshPersistent.Config) {
   const ctx = new Context()
+  provideWorkingDirectoryFixture(ctx)
   contexts.push(ctx)
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRegistry)
@@ -895,7 +906,7 @@ async function setupWithJobs(config: ToolPwshPersistent.Config) {
   const stub = stubBackend('normal')
   ctx.terminals.registerBackend(stub.backend)
   const fiber = await ctx.plugin(ToolPwshPersistent, config)
-  return { ctx, stub, fiber, owner: agent(ctx, '/workspace') }
+  return { ctx, stub, fiber, owner: await agent(ctx, '/workspace') }
 }
 
 function jobCall(ctx: Context, owner: Agent, name: string, args: unknown) {
@@ -923,7 +934,8 @@ describe('tool-pwsh-persistent auto-background', () => {
     shell.mode = 'long'
 
     const promoted = text(await call(ctx, owner, './build.ps1'))
-    expect(promoted).toContain('[still running after 0s - moved to background job pwsh-1; it keeps running in its own shell]')
+    expect(promoted).toContain('[still running after 0s - moved to background job ')
+    const job = promotedJob(promoted)
     expect(promoted).toContain('working...')
     expect(promoted).toContain('Your next pwsh call starts a NEW shell from the workspace')
     expect(shell.closed).toEqual([])
@@ -933,7 +945,7 @@ describe('tool-pwsh-persistent auto-background', () => {
     expect(stub.sessions).toHaveLength(2)
 
     shell.finishLong('build ok')
-    const final = text(await jobCall(ctx, owner, 'job_output', { job_id: 'pwsh-1', wait: true }))
+    const final = text(await jobCall(ctx, owner, 'job_output', { job_id: job, wait: true }))
     expect(final).toContain('build ok')
     expect(final).not.toContain('working...')
     expect(final).toContain('[status: completed, exit code: 0]')
@@ -945,9 +957,9 @@ describe('tool-pwsh-persistent auto-background', () => {
     await call(ctx, owner, 'warm up')
     const shell = stub.sessions[0]!
     shell.mode = 'long'
-    await call(ctx, owner, 'Start-Sleep 600')
-    expect(text(await jobCall(ctx, owner, 'job_kill', { job_id: 'pwsh-1' }))).toBe('requested cancellation of job pwsh-1')
-    const final = text(await jobCall(ctx, owner, 'job_output', { job_id: 'pwsh-1', wait: true }))
+    const job = promotedJob(text(await call(ctx, owner, 'Start-Sleep 600')))
+    expect(text(await jobCall(ctx, owner, 'job_kill', { job_id: job }))).toBe(`requested cancellation of job ${job}`)
+    const final = text(await jobCall(ctx, owner, 'job_output', { job_id: job, wait: true }))
     expect(final).toContain('[status: killed, cancelled]')
     expect(shell.closed).toContain('background pwsh command cancelled')
   })
@@ -984,9 +996,9 @@ describe('tool-pwsh-persistent auto-background', () => {
       agent: owner,
     })
     expect(Date.now() - started).toBeLessThan(2_000)
-    expect(text(result)).toContain('moved to background job pwsh-1')
+    const job = promotedJob(text(result))
     shell.finishLong('')
-    await jobCall(ctx, owner, 'job_output', { job_id: 'pwsh-1', wait: true })
+    await jobCall(ctx, owner, 'job_output', { job_id: job, wait: true })
   })
 
   it('advertises the wait and exposes timeoutMs when enabled', async () => {

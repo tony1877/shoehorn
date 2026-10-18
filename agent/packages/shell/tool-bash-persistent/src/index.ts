@@ -8,7 +8,8 @@ import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { JobHooks, JobOutcome, JobRegistry } from '@deepseek-ai/dsh-jobs'
+import { truncateWithoutSplittingSurrogatePair } from '@deepseek-ai/dsh-output-retention'
+import type { JobHandle, JobHooks, JobOutcome, JobRegistry } from '@deepseek-ai/dsh-jobs'
 import type { TerminalReadResult, TerminalSendOperation, TerminalSendResult, TerminalSessionId } from '@deepseek-ai/dsh-terminal'
 import { deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -494,6 +495,7 @@ function clipTail(text: string, maxOutputChars: number): string {
  */
 class BackgroundCommand {
   private emitted = ''
+  private job: JobHandle | undefined
   private final: CapturedOutput | undefined
   private cancelled = false
 
@@ -538,8 +540,9 @@ class BackgroundCommand {
     return this.cancelled
   }
 
-  /** The job hooks; starting them starts the watcher. */
-  hooks(): JobHooks {
+  /** The job hooks; starting them starts the watcher, which appends the command's new output to the job. */
+  hooks(job: JobHandle): JobHooks {
+    this.job = job
     return {
       cancel: () => {
         if (this.cancelled) return
@@ -547,7 +550,6 @@ class BackgroundCommand {
         void this.shells.closeDetached(this.run.id, 'background bash command cancelled')
       },
       done: this.watch(),
-      readOutput: () => this.readNew(),
     }
   }
 
@@ -567,6 +569,8 @@ class BackgroundCommand {
         run.operation = undefined
         // job_kill may have cancelled the job while the send was in flight
         if (this.isCancelled()) break
+        const delta = this.readNew()
+        if (delta.length > 0) this.job?.append(delta)
         const settled = absorbSend(ctx, owner, run, operation, result)
         if (settled?.kind === 'complete') {
           this.final = settled.output
@@ -587,6 +591,10 @@ class BackgroundCommand {
       if (this.cancelled) return { status: 'killed', detail: 'cancelled' }
       return { status: 'failed', detail: `persistent bash shell failed: ${error instanceof Error ? error.message : String(error)}` }
     } finally {
+      try {
+        const rest = this.readNew()  // the tail after the last poll (the final output once settled)
+        if (rest.length > 0) this.job?.append(rest)
+      } catch { /* the shell may already be gone */ }
       await this.shells.closeDetached(run.id, 'background bash command finished')
     }
   }
@@ -664,7 +672,7 @@ async function executeCommandAuto(
         const soFar = background.readNew()
         let jobId: string
         try {
-          jobId = jobs.start({ kind: 'bash', label: command, owner, run: () => background.hooks() })
+          jobId = jobs.start({ kind: 'bash', label: command, owner: owner.id, run: job => background.hooks(job) })
         } catch (error: unknown) {
           await shells.closeDetached(id, 'background registration refused')
           const reason = error instanceof Error ? error.message : String(error)
@@ -754,7 +762,7 @@ function registerPersistentBash(ctx: Context, config: ResolvedConfig): void {
       const owner = exec.agent
       if (owner === undefined) throw new Error('bash requires an owning agent session')
       return serialized(owner, async () => {
-        exec.signal.throwIfAborted()
+        if (exec.signal.aborted) return '' // ToolRuntime publishes ABORTED after settlement.
         const jobs = autoBackground ? ctx.get('jobs') : undefined
         if (jobs !== undefined) {
           const waitMs = Math.min(args.timeoutMs ?? config.autoBackgroundAfterMs, config.maxForegroundMs)

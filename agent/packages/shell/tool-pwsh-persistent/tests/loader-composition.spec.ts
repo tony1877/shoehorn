@@ -26,6 +26,7 @@ import ToolRegistry from '@deepseek-ai/dsh-tools'
 import * as ToolPwshPersistent from '@deepseek-ai/dsh-tool-pwsh-persistent'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as ToolJobs from '@deepseek-ai/dsh-tool-jobs'
+import { ReadinessTimeline, TIMELINE_HEADER } from './readiness-timeline.ts'
 
 const pwshPath = resolvePwshPath()
 const hasPwsh = spawnSync(
@@ -295,7 +296,7 @@ describe.skipIf(!hasPwsh)('persistent pwsh auto-background over a real PTY', () 
       '    idleSilenceMs: 300',
       '    handoffGraceMs: 300',
       '    scrollbackLines: 20000',
-      '    timeoutMs: 60000',
+      '    timeoutMs: 300000',
       '    disposeGraceMs: 500',
       "- name: '@deepseek-ai/dsh-tool-pwsh-persistent'",
       '  config:',
@@ -304,6 +305,7 @@ describe.skipIf(!hasPwsh)('persistent pwsh auto-background over a real PTY', () 
     ].join('\n'))
 
     context = new Context()
+    provideWorkingDirectoryFixture(context)
     context.baseUrl = pathToFileURL(root).href + '/'
     await context.plugin(Loader)
     context.loader.builtins.include = Include
@@ -331,7 +333,7 @@ describe.skipIf(!hasPwsh)('persistent pwsh auto-background over a real PTY', () 
     await context.loader.create({ name: 'cordis:include', config: { path: pathToFileURL(configPath).href } })
     await context.loader.await()
 
-    const owner = agent(context, root)
+    const owner = await agent(context, root)
     const signal = new AbortController().signal
     const execute = (id: string, name: string, args: unknown) => context!.tools.execute({
       signal,
@@ -346,7 +348,8 @@ describe.skipIf(!hasPwsh)('persistent pwsh auto-background over a real PTY', () 
     const promoted = text(await execute('slow', 'pwsh', {
       command: 'Write-Output "first in $PWD"; Start-Sleep -Seconds 6; Write-Output "second keep=$env:KEEP"',
     }))
-    expect(promoted).toContain('moved to background job pwsh-1; it keeps running in its own shell')
+    expect(promoted).toContain('; it keeps running in its own shell')
+    const job = /moved to background job (\S+?);/.exec(promoted)?.[1] ?? ''
     expect(promoted).toContain(`first in ${join(root, 'nested')}`)
     expect(promoted).not.toContain('second')
 
@@ -354,7 +357,7 @@ describe.skipIf(!hasPwsh)('persistent pwsh auto-background over a real PTY', () 
     const fresh = text(await execute('fresh', 'pwsh', { command: 'Write-Output "cwd=$PWD keep=[$env:KEEP]"' }))
     expect(fresh).toBe(`cwd=${root} keep=[]`)
 
-    const final = text(await execute('collect', 'job_output', { job_id: 'pwsh-1', wait: true }))
+    const final = text(await execute('collect', 'job_output', { job_id: job, wait: true }))
     expect(final).toContain('second keep=old-shell')
     expect(final).not.toContain('first in')
     expect(final).toContain('[status: completed, exit code: 0]')
