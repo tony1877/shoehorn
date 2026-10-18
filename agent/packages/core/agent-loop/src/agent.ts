@@ -21,6 +21,7 @@ import {
   LlmError,
   createAssistantMessage,
   createDeveloperMessage,
+  createUserMessage,
   errorChain,
   markAgentLoopRequest,
 } from '@deepseek-ai/dsh-llm'
@@ -38,7 +39,11 @@ import { RuntimeContextProjection } from './runtime-context.ts'
 import { AssistantStreamAttempt } from './assistant-stream.ts'
 import { SystemPromptProjection } from './runtime-context.ts'
 import { executeToolCalls } from './tool-calls.ts'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'auto-continue': { kind: 'auto-continue' }
+  }
+}
 
 /**
  * Whether a reply without tool calls ends by announcing an action it did not take: its last line ends with a
@@ -51,9 +56,9 @@ export function announcesAction(text: string): boolean {
   if (t.length === 0 || t.endsWith('?')) return false
   const lines = t.split('\n').map(l => l.trim()).filter(l => l.length > 0)
   const last = lines[lines.length - 1] ?? ''
-  if (/[:\uFF1A]$/.test(last) && !/^(\*\*)?(summary|result|files|report|output)/i.test(last)) return true
+  if (/[:：]$/.test(last) && !/^(\*\*)?(summary|result|files|report|output)/i.test(last)) return true
   const para = t.split(/\n\s*\n/).pop()?.trim() ?? ''
-  const announces = /^((now|next|then),?\s+(i('|\u2019)ll|i will|let me|let's)|let me|let's|i('|\u2019)ll|i will|i('|\u2019)m going to)\b/i
+  const announces = /^((now|next|then),?\s+(i('|’)ll|i will|let me|let's)|let me|let's|i('|’)ll|i will|i('|’)m going to)\b/i
   return para.length < 400 && announces.test(para)
 }
 
@@ -114,6 +119,9 @@ function abortedCancelCause(signal: AbortSignal): AgentCancelCause | undefined {
 
 /** Drives one session through turn and step boundaries. */
 export class ReactLoopAgent implements Agent {
+  /** Auto-continue nudges sent in the current turn. */
+  private nudgeTurn = -1
+  private nudgeCount = 0
   readonly inbox: ReactLoopInbox
   private phase: Phase
   private activityDone: Promise<void> = Promise.resolve()
@@ -289,13 +297,11 @@ export class ReactLoopAgent implements Agent {
     const claimed = this.inbox.claim(target, position.turn)
     const assembly = await this.loopCtx.systemPrompt.assemble(assembleContextFor(this, signal))
     signal.throwIfAborted()
-    const sections = renderContextSections(assembly)
-    const context = this.runtimeContext.project(joinContextSections(sections), sections, position.step > 1)
     const decision = await this.dispatch.waterfall(
       'agent/pre-step', { messages: claimed, ...position, signal },
       (): Promise<PreStepDecision> => {
         const sections = renderContextSections(assembly)
-        const context = this.runtimeContext.project(joinContextSections(sections), sections)
+        const context = this.runtimeContext.project(joinContextSections(sections), sections, position.step > 1)
         return Promise.resolve<PreStepDecision>({
           kind: 'enter',
           messages: context === undefined ? claimed : [...claimed, context],
@@ -430,7 +436,7 @@ export class ReactLoopAgent implements Agent {
       const { config, preparedCall } = await this.prepareRequest(turn, step, signal)
       const currentContext = this.loopCtx.systemPrompt.refreshContext(assembly, assembleContextFor(this, signal))
       const sections = renderContextSections(currentContext)
-      const context = this.runtimeContext.project(joinContextSections(sections), sections)
+      const context = this.runtimeContext.project(joinContextSections(sections), sections, step > 1)
       signal.throwIfAborted()
       const startsRequestSeries = firstAttempt && decision.startsRequestSeries === true
       const commits = this.systemPrompt.project(renderedPrompt, {
@@ -567,7 +573,26 @@ export class ReactLoopAgent implements Agent {
         if (finish.kind === 'max-tokens') return { kind: 'max-tokens' }
 
         const toolCalls = message.content.filter(block => block.type === 'tool-call')
-        if (toolCalls.length === 0) return { kind: 'completed' }
+        if (toolCalls.length === 0) {
+          // Auto-continue: a reply that announces its next action ("Now I'll update X:") but makes no tool call
+          // would end the task mid-way. Nudge the model to act, at most twice per turn (DSH_AUTO_CONTINUE=0: off).
+          const text = message.content.filter(block => block.type === 'text').map(block => (block as { text: string }).text).join('\n')
+          if (process.env.DSH_AUTO_CONTINUE !== '0' && announcesAction(text)) {
+            if (this.nudgeTurn !== turn) {
+              this.nudgeTurn = turn
+              this.nudgeCount = 0
+            }
+            if (this.nudgeCount < 2) {
+              this.nudgeCount++
+              this.inbox.splice('next-step', this.inbox.nextStep.length, 0, [createUserMessage({
+                content: [{ type: 'text', text: 'Continue: you announced the next step but made no tool call. Make that tool call now. If the task is actually complete, reply with your final answer instead.' }],
+                source: { kind: 'auto-continue' },
+              })])
+              return null
+            }
+          }
+          return { kind: 'completed' }
+        }
         const { concluded } = await executeToolCalls(
           this.loopCtx, turn, step, toolCalls, signal,
           context => this.inbox.splice('next-step', this.inbox.nextStep.length, 0, [context]),
@@ -577,65 +602,11 @@ export class ReactLoopAgent implements Agent {
         if (!live.ended) live.abandon()
         throw error
       }
-
-      const message = createAssistantMessage({
-        content: assembler.blocks(),
-        source: {
-          provider: request.provider,
-          model: request.model,
-          ...assembler.replayState !== undefined ? { replayState: assembler.replayState } : {},
-        },
-      })
-      this.session.append(
-        'assistant/message',
-        {
-          turn,
-          step,
-          message,
-          ...assembler.usage === undefined ? {} : { usage: assembler.usage },
-        },
-        { surfaceOp: 'append', sourceEventSeqs: chunkSeqs },
-      )
-      if (finish.kind === 'max-tokens') return { kind: 'max-tokens' }
-
-      const toolCalls = message.content.filter(block => block.type === 'tool-call')
-      if (toolCalls.length === 0) {
-        // Auto-continue: a reply that announces its next action ("Now I'll update X:") but makes no tool call
-        // would end the task mid-way. Nudge the model to act, at most twice per turn (DSH_AUTO_CONTINUE=0: off).
-        const text = message.content.filter(block => block.type === 'text').map(block => (block as { text: string }).text).join('\n')
-        if (process.env.DSH_AUTO_CONTINUE !== '0' && announcesAction(text)) {
-          if (this.nudgeTurn !== turn) {
-            this.nudgeTurn = turn
-            this.nudgeCount = 0
-          }
-          if (this.nudgeCount < 2) {
-            this.nudgeCount++
-            this.inbox.splice('next-step', this.inbox.nextStep.length, 0, [createUserMessage({
-              content: [{ type: 'text', text: 'Continue: you announced the next step but made no tool call. Make that tool call now. If the task is actually complete, reply with your final answer instead.' }],
-              source: { kind: 'plugin', plugin: 'auto-continue' },
-            })])
-            return null
-          }
-        }
-        return { kind: 'completed' }
-      }
-      const { concluded } = await executeToolCalls(
-        this.loopCtx, turn, step, toolCalls, signal,
-        context => this.inbox.splice('next-step', this.inbox.nextStep.length, 0, [context]),
-      )
-      return concluded ? { kind: 'completed' } : null
     }
   }
 
-  /**
-   * Compose one frozen request and bind it to the adapter registration that
-   * resolved its exact-model defaults.
-   */
-  /** Auto-continue nudges sent in the current turn. */
-  private nudgeTurn = -1
-  private nudgeCount = 0
-
-  private async buildRequest(
+  /** Resolve request config and bind its adapter before admitting model-visible input. */
+  private async prepareRequest(
     turn: number,
     step: number,
     signal: AbortSignal,

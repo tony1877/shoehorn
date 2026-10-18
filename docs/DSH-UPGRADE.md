@@ -21,9 +21,9 @@ Work happens on branch `dsh-upgrade-0.2.1`, worktree `C:\src\shoehorn-upgrade`. 
 ## Steps
 
 1. [x] Create the branch and worktree, merge rc.2 into `agent/` with our side kept on conflicts.
-2. [ ] Run `pnpm install` (done), then `pnpm run build:lib`; fix the compile errors. **In progress:** the host typecheck is down from 184 to 67 errors; the full list is in `docs/dsh-upgrade-host-errors.txt`.
+2. [ ] Run `pnpm install` (done), then `pnpm run build:lib`; fix the compile errors. **In progress:** the host typecheck is down from 184 to 43 errors; the full list is in `docs/dsh-upgrade-host-errors.txt`.
    - [x] tool-pwsh (63), tool-pwsh-persistent (30), tool-bash-persistent (24). tool-pwsh: upstream's version taken (it now moves a timed-out command to a background job itself). The persistent shells: upstream's files plus our auto-background patch replayed (3-way), ported to the new jobs API (output pushed with `job.append`, owner = session id, the prompt check by `waitReason === 'stdin_read'`); tests ported (async `agent()` helper, the working-directory fixture, random job ids, bash's new "[Command finished ...]" line). All 201 shell tests pass, including the real-PowerShell auto-background test.
-   - [ ] agent-loop (24): our auto-continue ("announces an action but stops") plus the long-session edits. Re-port onto the new loop.
+   - [x] agent-loop (24): upstream's files plus our two changes replayed: auto-continue (now its own message source `auto-continue`, as upstream's producers declare theirs) and the mid-turn memory-index deferral in the runtime-context projection. 451 upstream tests and our auto-continue test pass.
    - [ ] compaction-basic (19) and compaction-tool-result-pruner (6): our condensed output, summary template, strip-call-markup and the pruner's protected tail. Compare with upstream's compaction changes and keep the better of each.
    - [ ] integrations (5), tool-memory (3), mcp-client (3), repeat-tool-reminder (3), fs-local (1), apps/cli tests (3): small API changes.
 3. [ ] Port presets: our presets to the new preset system, and the defaults in integrations, webhooks and Telegram.
@@ -40,3 +40,4 @@ Work happens on branch `dsh-upgrade-0.2.1`, worktree `C:\src\shoehorn-upgrade`. 
 - 2026-10-18: first host typecheck: 184 errors (see step 2). Stopped here for the quota; resume from step 2.
 - TODO: `dsh-settings-file` is gone upstream, and the integrations tests (settings-yaml based) still need porting to the new settings provider.
 - 2026-10-18: shells done (184 -> 67 errors). Next: agent-loop (24), then compaction (25).
+- 2026-10-18: agent-loop done (67 -> 43). Next: compaction-basic (19), the pruner (6), then the small ones.

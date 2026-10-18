@@ -35,7 +35,7 @@ function sectionsOf(message: UserMessage): readonly ContextSnapshotSection[] | u
   return Array.isArray(sections) ? sections as readonly ContextSnapshotSection[] : undefined
 }
 
-function textOf(message: UserMessage): string | undefined {
+function textOf(message: Message): string | undefined {
   const [block] = message.content
   return message.content.length === 1 && block?.type === 'text' ? block.text : undefined
 }

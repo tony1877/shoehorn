@@ -1,19 +1,19 @@
 import { describe, expect, it } from 'vitest'
 import { announcesAction } from '../src/agent.ts'
 
-describe('announcesAction', () => {
-  it('catches replies that stop right before the action they announce', () => {
-    expect(announcesAction('Now update the actual logic — total_value skips qty 0, and low_stock excludes qty 0:')).toBe(true)
-    expect(announcesAction('Let me do these edits. I already edited the docstring. Next I\'ll edit the sum line.')).toBe(true)
-    expect(announcesAction('The tests failed on precedence.\n\nI\'ll fix the parser now.')).toBe(true)
-    expect(announcesAction('Now the first chunk of calc.py:')).toBe(true)
+describe('announcesAction (auto-continue)', () => {
+  it('flags a reply that stops right before the action it announced', () => {
+    expect(announcesAction('The tests pass. Now I\'ll update the README:')).toBe(true)
+    expect(announcesAction('Done with the parser.\n\nLet me run the tests next.')).toBe(true)
+    expect(announcesAction('Next, I will add the migration.')).toBe(true)
+    expect(announcesAction('I’m going to rebuild the project')).toBe(true)
   })
 
-  it('leaves final answers and questions alone', () => {
-    expect(announcesAction('All tests pass. Files created: calc.py, test_calc.py.')).toBe(false)
-    expect(announcesAction('Should I also add exact mode now?')).toBe(false)
+  it('leaves finished answers, questions and labelled summaries alone', () => {
     expect(announcesAction('')).toBe(false)
-    expect(announcesAction('first reply')).toBe(false)
-    expect(announcesAction('**Summary:**')).toBe(false)
+    expect(announcesAction('All 12 tests pass and the bug is fixed.')).toBe(false)
+    expect(announcesAction('Should I also update the docs?')).toBe(false)
+    expect(announcesAction('Everything is in place.\n\n**Summary:**')).toBe(false)
+    expect(announcesAction('Files:')).toBe(false)
   })
 })
