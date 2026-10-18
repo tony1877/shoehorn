@@ -13,6 +13,7 @@ import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { PostToolDecision } from '@deepseek-ai/dsh-tools'
 import { publicToolName, syncTools, type ToolBridgeOptions } from '@deepseek-ai/dsh-mcp-client/src/tools.ts'
 import { createTransport } from '@deepseek-ai/dsh-mcp-client/src/transport.ts'
+import { claimMcpState, mcpServerState } from '@deepseek-ai/dsh-mcp-client/src/status.ts'
 import type { Config } from '@deepseek-ai/dsh-mcp-client'
 
 const testToolSignal = new AbortController().signal
@@ -25,6 +26,7 @@ interface MockTool {
   inputSchema: Record<string, unknown>
   outputSchema?: Record<string, unknown>
   execution?: { taskSupport?: 'optional' | 'required' | 'forbidden' }
+  annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean }
 }
 
 interface MockCallResult {
@@ -148,6 +150,9 @@ const defaultOpts: ToolBridgeOptions = {
   registrationFailure: 'contain',
   serverName: 'srv',
   toolCallTimeoutMs: 60_000,
+  includeTools: [],
+  exposure: 'native',
+  state: claimMcpState('srv', 'native'),
 }
 
 // ---- Tests ----
@@ -1129,6 +1134,8 @@ describe('createTransport', () => {
       cwd: '/tmp',
       toolCallTimeoutMs: 60_000,
       failOnStartupError: false,
+      includeTools: [],
+      exposure: 'native',
     }
     const transport = createTransport(config)
     expect(transport).toBeDefined()
@@ -1144,6 +1151,8 @@ describe('createTransport', () => {
       headers: {},
       toolCallTimeoutMs: 60_000,
       failOnStartupError: false,
+      includeTools: [],
+      exposure: 'native',
     }
     const transport = createTransport(config)
     expect(transport).toBeDefined()
@@ -1159,6 +1168,8 @@ describe('createTransport', () => {
       headers: { Authorization: 'Bearer token' },
       toolCallTimeoutMs: 60_000,
       failOnStartupError: false,
+      includeTools: [],
+      exposure: 'native',
     }
     const transport = createTransport(config)
     expect(transport).toBeDefined()
@@ -1183,6 +1194,8 @@ describe('createTransport', () => {
         cwd: '',
         toolCallTimeoutMs: 60_000,
         failOnStartupError: false,
+        includeTools: [],
+        exposure: 'native',
       }
       // StdioClientTransport keeps its env private; the observable contract is
       // that createTransport(config) returns a transport without throwing.
@@ -1209,6 +1222,8 @@ describe('createTransport', () => {
       cwd: '',
       toolCallTimeoutMs: 60_000,
       failOnStartupError: false,
+      includeTools: [],
+      exposure: 'native',
     }
     const transport = createTransport(config)
     expect(transport).toBeDefined()
@@ -1252,5 +1267,53 @@ describe('tool execution — non-object args fallback', () => {
       undefined,
       expect.anything(),
     )
+  })
+})
+
+describe('syncTools — allowlist, deferred exposure, live state', () => {
+  let ctx: Context
+
+  beforeEach(async () => {
+    ctx = await mountRegistry()
+  })
+
+  it('registers only included tools and reports the rest as excluded with their hints', async () => {
+    const state = claimMcpState('pick', 'native')
+    const client = createMockClient([
+      { name: 'read', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } },
+      { name: 'wipe', inputSchema: { type: 'object' }, annotations: { destructiveHint: true } },
+    ])
+
+    const disposers = await syncTools(client as never, ctx, { ...defaultOpts, serverName: 'pick', includeTools: ['read'], state }, new Map())
+
+    expect([...disposers.keys()]).toEqual(['mcp__pick__read'])
+    expect(ctx.tools.get('mcp__pick__wipe')).toBeUndefined()
+    expect(mcpServerState('pick')?.tools).toEqual([
+      { rawName: 'read', publicName: 'mcp__pick__read', description: '', readOnly: true, excluded: false },
+      { rawName: 'wipe', publicName: 'mcp__pick__wipe', description: '', destructive: true, excluded: true },
+    ])
+    state.clear()
+    expect(mcpServerState('pick')).toBeUndefined()
+  })
+
+  it('keeps deferred definitions off the registry but callable from the state', async () => {
+    const state = claimMcpState('lazy', 'deferred')
+    const client = createMockClient([{ name: 'echo', inputSchema: { type: 'object' } }])
+
+    const disposers = await syncTools(client as never, ctx, { ...defaultOpts, serverName: 'lazy', exposure: 'deferred', state }, new Map())
+
+    expect(disposers.size).toBe(0)
+    expect(ctx.tools.get('mcp__lazy__echo')).toBeUndefined()
+    expect([...mcpServerState('lazy')!.deferred.keys()]).toEqual(['mcp__lazy__echo'])
+    state.clear()
+  })
+
+  it('ignores writes from a superseded owner of the same server name', () => {
+    const old = claimMcpState('twice', 'native')
+    const current = claimMcpState('twice', 'native')
+    old.update({ phase: 'failed', error: 'stale' })
+    old.clear()
+    expect(mcpServerState('twice')?.phase).toBe('connecting')
+    current.clear()
   })
 })

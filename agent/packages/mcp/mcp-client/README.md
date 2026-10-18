@@ -54,10 +54,12 @@ Add one entry per server; nothing else is required. After the harness starts, th
 
 | Field | Default | Meaning |
 |---|---|---|
-| `transport` | required | `stdio` or `streamable-http` |
+| `transport` | required | `stdio`, `streamable-http`, or `sse` (the older HTTP+SSE transport) |
 | `serverName` | required | Namespace for the server's tool names; `[A-Za-z0-9_-]{1,32}`, unique inside one registration scope |
 | `command` / `args` / `env` / `cwd` | — | stdio: executable, arguments, extra env merged over scrubbed ambient env, working directory |
 | `url` / `headers` | — | streamable-http: endpoint URL and extra request headers |
+| `includeTools` | `[]` | Raw tool names to expose; empty exposes every tool. Filtered tools are still reported in the live state as excluded |
+| `exposure` | `native` | `native` registers each tool; `deferred` builds the definitions but keeps them off the registry for a proxy tool (see `dsh-integrations`) |
 | `toolCallTimeoutMs` | `60,000` | Timeout per `tools/call` invocation |
 | `failOnStartupError` | `false` | Reject plugin activation when the initial connection or tool synchronization fails |
 | `reconnect.enabled` | `true` | Reconnect automatically after a lost connection |
@@ -188,6 +190,7 @@ Append-only; newly visible content follows the reusable request prefix and does 
 
 These limits describe what you cannot do with this plugin and when it needs operational attention. They are current package constraints, not a comparison with other MCP clients or a task backlog.
 
+- **Live state is module-level.** `mcpServerStates()` / `watchMcpServers()` report phase, last error, discovered tools with their `readOnlyHint`/`destructiveHint`, and deferred definitions per `serverName`; only the newest instance for a name is tracked. HTTP and SSE transports take an OAuth provider from `mcpAuthProviders` when one is installed for the server name.
 - **Tools are the only bridged MCP capability** — Resources and Prompts have no harness consumer mechanism and are deferred.
 - **Startup and discovery timeouts are inherited from the MCP SDK** — the plugin exposes no connection or discovery timeout; each `initialize` and paginated `tools/list` request uses the SDK's 60-second request default, so an unresponsive server or cursor chain can delay both activation and teardown while the initial synchronization settles.
 - **Reconnect triggers on transport close** — a crashed stdio child fires it; Streamable HTTP failures surface per request through the SDK transport's own recovery, so an unreachable HTTP server is retried per call rather than respawned by the supervisor.

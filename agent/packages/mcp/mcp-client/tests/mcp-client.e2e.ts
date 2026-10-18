@@ -106,6 +106,8 @@ describe('fixture server — controlled scenarios', () => {
     cwd: packageDir,
     toolCallTimeoutMs: 15_000,
     failOnStartupError: false,
+    includeTools: [],
+    exposure: 'native',
   }
 
   beforeAll(async () => {
@@ -205,6 +207,8 @@ describe('fixture server — duplicate serverName', () => {
       cwd: packageDir,
       toolCallTimeoutMs: 15_000,
       failOnStartupError: false,
+      includeTools: [],
+      exposure: 'native',
     }
     await apply(ctx, config)
 
@@ -227,6 +231,8 @@ describe('fixture server — disposal', () => {
       cwd: packageDir,
       toolCallTimeoutMs: 15_000,
       failOnStartupError: false,
+      includeTools: [],
+      exposure: 'native',
     })
 
     // Tools are registered before dispose.
@@ -250,6 +256,8 @@ describe('fixture server — crash recovery', () => {
       cwd: packageDir,
       toolCallTimeoutMs: 15_000,
       failOnStartupError: false,
+      includeTools: [],
+      exposure: 'native',
       reconnect,
     }
   }
@@ -334,6 +342,8 @@ describe('server-everything — official test server', () => {
     cwd: '',
     toolCallTimeoutMs: 30_000,
     failOnStartupError: false,
+    includeTools: [],
+    exposure: 'native',
   }
 
   beforeAll(async () => {
@@ -403,6 +413,8 @@ describe('server-filesystem — real filesystem operations', () => {
       cwd: '',
       toolCallTimeoutMs: 30_000,
       failOnStartupError: false,
+      includeTools: [],
+      exposure: 'native',
     }
     await apply(ctx, config)
   }, 60_000)
@@ -520,6 +532,8 @@ describe('streamable-http — in-process MCP server', () => {
       headers: { Authorization: 'Bearer e2e-test-token' },
       toolCallTimeoutMs: 15_000,
       failOnStartupError: false,
+      includeTools: [],
+      exposure: 'native',
     }
     await apply(ctx, config)
   }, 30_000)

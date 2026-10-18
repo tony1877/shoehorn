@@ -102,6 +102,8 @@ function stdioConfig(reconnect?: Config['reconnect']): Config {
     cwd: '',
     toolCallTimeoutMs: 60_000,
     failOnStartupError: false,
+    includeTools: [],
+    exposure: 'native',
     ...reconnect === undefined ? {} : { reconnect },
   }
 }

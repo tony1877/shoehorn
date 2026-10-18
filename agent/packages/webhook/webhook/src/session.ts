@@ -116,6 +116,7 @@ function installInitialModelSelection(agentCtx: Context, selection: ModelSelecti
  * @param ruleId - rule that returned the request.
  * @param request - same-process rule result.
  * @param signal - registration lifetime cancellation through publication.
+ * @returns the created Session's id.
  */
 export async function createWebhookSession(
   ctx: Context,
@@ -123,7 +124,7 @@ export async function createWebhookSession(
   ruleId: WebhookRuleId,
   request: WebhookSessionRequest,
   signal: AbortSignal,
-): Promise<void> {
+): Promise<SessionId> {
   const resolved = resolveRequest(ctx, request)
   ctx.permissionPresets.resolve(resolved.permissionPreset)
   const preset = await ctx.agentPresets.resolve(resolved.agentPreset)
@@ -179,4 +180,5 @@ export async function createWebhookSession(
     }
     throw error
   }
+  return sessionId
 }

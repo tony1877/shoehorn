@@ -25,6 +25,7 @@ import type { ToolDefinition, ToolExecution, ToolExecutionResult } from '@deepse
 import { assertSupportedJsonSchema } from '@deepseek-ai/dsh-tools'
 import type { JsonSchemaNode } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
+import type { McpStateWriter, McpToolInfo } from './status.ts'
 
 /** Resolved options relevant to tool bridging. */
 export interface ToolBridgeOptions {
@@ -32,6 +33,12 @@ export interface ToolBridgeOptions {
   registrationFailure: 'contain' | 'throw'
   serverName: string
   toolCallTimeoutMs: number
+  /** Raw names to expose; empty exposes all. */
+  includeTools: readonly string[]
+  /** Register natively, or keep definitions for a proxy tool. */
+  exposure: 'native' | 'deferred'
+  /** Live state slot this server publishes discovered tools to. */
+  state: McpStateWriter
 }
 
 /** State for one sync generation: the current set of disposers keyed by public name. */
@@ -149,16 +156,31 @@ export async function syncTools(
 ): Promise<ToolDisposers> {
   // Phase 1: fetch and build the next generation without touching the registry.
   const definitions = new Map<string, ToolDefinition>()
+  const infos: McpToolInfo[] = []
+  const seen = new Set<string>()
+  const include = new Set(opts.includeTools)
   let cursor: string | undefined
   do {
     const response = await listToolsUncached(client, cursor)
     for (const tool of response.tools) {
       const publicName = publicToolName(opts.serverName, tool.name)
-      if (definitions.has(publicName)) {
+      const excluded = include.size > 0 && !include.has(tool.name)
+      const annotations = tool.annotations
+      infos.push({
+        rawName: tool.name,
+        publicName,
+        description: tool.description ?? '',
+        ...typeof annotations?.readOnlyHint === 'boolean' ? { readOnly: annotations.readOnlyHint } : {},
+        ...typeof annotations?.destructiveHint === 'boolean' ? { destructive: annotations.destructiveHint } : {},
+        excluded,
+      })
+      if (seen.has(publicName)) {
         throw new Error(
           `mcp-client(${opts.serverName}): server listed tool "${tool.name}" more than once — invalid tool list`,
         )
       }
+      seen.add(publicName)
+      if (excluded) continue
       definitions.set(publicName, createDefinition(
         client,
         ctx,
@@ -176,6 +198,10 @@ export async function syncTools(
 
   // Phase 2: swap generations.
   for (const dispose of previous.values()) dispose()
+  if (opts.exposure === 'deferred') {
+    opts.state.update({ tools: infos, deferred: definitions })
+    return new Map()
+  }
   const disposers: ToolDisposers = new Map()
   try {
     for (const [publicName, definition] of definitions) {
@@ -187,9 +213,11 @@ export async function syncTools(
     // sees either the full generation or none of it — never a partial set.
     for (const dispose of disposers.values()) dispose()
     ctx.logger.error(`mcp-client(${opts.serverName}): tool registration failed, no tools registered: ${String(error)}`)
+    opts.state.update({ tools: infos, deferred: new Map(), error: `tool registration failed: ${String(error)}` })
     if (opts.registrationFailure === 'throw') throw error
     return new Map()
   }
+  opts.state.update({ tools: infos, deferred: new Map() })
   return disposers
 }
 

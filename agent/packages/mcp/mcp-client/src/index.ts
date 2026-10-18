@@ -24,6 +24,10 @@ import type {} from '@deepseek-ai/dsh-tools'
 
 export type { McpResult } from './tools.ts'
 export type { ReconnectConfig, ResolvedReconnectPolicy } from './connection.ts'
+export { mcpAuthProviders, mcpServerState, mcpServerStates, watchMcpServers } from './status.ts'
+export type { McpServerPhase, McpServerState, McpToolInfo } from './status.ts'
+export { publicToolName } from './tools.ts'
+export { createTransport } from './transport.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'mcp-client'
@@ -70,12 +74,22 @@ export interface StdioConfig {
   failOnStartupError: boolean
   /** Automatic reconnect policy after a lost connection; omission uses the defaults. */
   reconnect?: ReconnectConfig
+  /**
+   * Raw MCP tool names to expose; empty exposes every tool the server lists.
+   * Filtered tools stay visible to management surfaces as excluded.
+   */
+  includeTools: string[]
+  /**
+   * `native` registers each tool as a model-visible tool. `deferred` keeps the
+   * built definitions off the model's tool list for a proxy tool to dispatch.
+   */
+  exposure: 'native' | 'deferred'
 }
 
-/** Config for connecting to an MCP server over Streamable HTTP (SSE). */
+/** Config for connecting to an MCP server over Streamable HTTP or the older HTTP+SSE transport. */
 export interface StreamableHttpConfig {
-  /** Selects Streamable HTTP transport. */
-  transport: 'streamable-http'
+  /** Selects Streamable HTTP, or the deprecated HTTP+SSE transport older servers still serve. */
+  transport: 'streamable-http' | 'sse'
   /**
    * Stable local namespace for this server's model-facing tool names
    * (`mcp__<serverName>__<rawName>`). Must match `[A-Za-z0-9_-]{1,32}` and be
@@ -92,15 +106,26 @@ export interface StreamableHttpConfig {
   failOnStartupError: boolean
   /** Automatic reconnect policy after a lost connection; omission uses the defaults. */
   reconnect?: ReconnectConfig
+  /**
+   * Raw MCP tool names to expose; empty exposes every tool the server lists.
+   * Filtered tools stay visible to management surfaces as excluded.
+   */
+  includeTools: string[]
+  /**
+   * `native` registers each tool as a model-visible tool. `deferred` keeps the
+   * built definitions off the model's tool list for a proxy tool to dispatch.
+   */
+  exposure: 'native' | 'deferred'
 }
 
 /** Configuration for one stdio or Streamable HTTP MCP server. */
 export type Config = StdioConfig | StreamableHttpConfig
 
-type StdioConfigInput = Omit<StdioConfig, 'args' | 'env' | 'cwd' | 'toolCallTimeoutMs' | 'failOnStartupError'>
-  & Partial<Pick<StdioConfig, 'args' | 'env' | 'cwd' | 'toolCallTimeoutMs' | 'failOnStartupError'>>
-type StreamableHttpConfigInput = Omit<StreamableHttpConfig, 'headers' | 'toolCallTimeoutMs' | 'failOnStartupError'>
-  & Partial<Pick<StreamableHttpConfig, 'headers' | 'toolCallTimeoutMs' | 'failOnStartupError'>>
+type Defaulted = 'toolCallTimeoutMs' | 'failOnStartupError' | 'includeTools' | 'exposure'
+type StdioConfigInput = Omit<StdioConfig, 'args' | 'env' | 'cwd' | Defaulted>
+  & Partial<Pick<StdioConfig, 'args' | 'env' | 'cwd' | Defaulted>>
+type StreamableHttpConfigInput = Omit<StreamableHttpConfig, 'headers' | Defaulted>
+  & Partial<Pick<StreamableHttpConfig, 'headers' | Defaulted>>
 type ConfigInput = StdioConfigInput | StreamableHttpConfigInput
 
 const Reconnect: z<ReconnectConfig> = z.object({
@@ -121,15 +146,19 @@ export const Config = z.union([
     toolCallTimeoutMs: z.number().default(DEFAULT_TOOL_CALL_TIMEOUT_MS),
     failOnStartupError: z.boolean().default(false),
     reconnect: Reconnect,
+    includeTools: z.array(String).default([]),
+    exposure: z.union(['native', 'deferred'] as const).default('native'),
   }),
   z.object({
-    transport: z.const('streamable-http'),
+    transport: z.union(['streamable-http', 'sse'] as const),
     serverName: z.string().required().pattern(SERVER_NAME_PATTERN),
     url: z.string().required(),
     headers: z.dict(String).default({}),
     toolCallTimeoutMs: z.number().default(DEFAULT_TOOL_CALL_TIMEOUT_MS),
     failOnStartupError: z.boolean().default(false),
     reconnect: Reconnect,
+    includeTools: z.array(String).default([]),
+    exposure: z.union(['native', 'deferred'] as const).default('native'),
   }),
 ]) as unknown as z<ConfigInput, Config>
 

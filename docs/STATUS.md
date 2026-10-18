@@ -13,6 +13,7 @@ One page across the project; details live in the linked documents.
 | Speed research | Measured and dropped: zero-copy GEMM, CPU residual slice, draft alternatives, coupled sampling, prose imatrix, small drafters, EAGLE-3 inputs, tree drafting, verify-level leaves. Kept: Q3_K residual (+7.5%) | [SPEEDUP-PLAN.md](SPEEDUP-PLAN.md), [DECODE-LIMITS.md](DECODE-LIMITS.md) |
 | Vision | Images in chat requests (base64 or http(s) URLs), encoder on the GPU on 24 GB+ cards (0.03 s per image) else the CPU (2 s), prompt reuse image-aware, Models page encoder setting and mmproj download, dsh `read_image` and dropped or pasted images working (no attach button: drop or paste), Linux build checked | [VISION.md](VISION.md) |
 | Server review fixes | Answer-cap check every 256 bytes; `tool_recovery` test runs in Release (`ctest -R tool_recovery`) | `tests/tool_recovery.cpp` |
+| Agent integrations | dsh Settings → Integrations: MCP servers from presets or custom (local, HTTP, older SSE) with live status, per-tool allowlist, look-up-on-demand tools (`mcp_search` / `mcp_call`), approval modes, OAuth sign-in; signed inbound webhooks that start chats, with a delivery log; signed or Discord/Slack/ntfy notifications on finish, approval and questions. Checked live 2026-10-18: the agent logged into a test site through the Playwright browser; a signed webhook started a chat whose finish notification arrived signed; Notion sign-in reached Notion's authorization page | `agent/packages/integrations/integrations/README.md` |
 
 ## Left
 

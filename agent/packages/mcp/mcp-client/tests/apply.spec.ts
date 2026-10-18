@@ -84,6 +84,8 @@ const stdioConfig: Config = {
   cwd: '',
   toolCallTimeoutMs: 60_000,
   failOnStartupError: false,
+  includeTools: [],
+  exposure: 'native',
 }
 
 // ---- Tests ----
@@ -404,6 +406,8 @@ describe('apply (plugin lifecycle)', () => {
       headers: { Authorization: 'Bearer x' },
       toolCallTimeoutMs: 30_000,
       failOnStartupError: false,
+      includeTools: [],
+      exposure: 'native',
     }
 
     await apply(ctx, httpConfig)

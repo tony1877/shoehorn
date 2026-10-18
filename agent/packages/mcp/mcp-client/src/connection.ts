@@ -23,6 +23,7 @@ import { createTransport } from './transport.ts'
 import { syncTools } from './tools.ts'
 import type { ToolBridgeOptions, ToolDisposers } from './tools.ts'
 import type { Config } from './index.ts'
+import { claimMcpState, mcpServerState } from './status.ts'
 
 /** Automatic reconnect policy for one MCP server connection. */
 export interface ReconnectConfig {
@@ -122,10 +123,14 @@ export interface ConnectionHandle {
  */
 export function startConnection(ctx: Context, config: Config, policy: ResolvedReconnectPolicy): ConnectionHandle {
   const label = `mcp-client(${config.serverName})`
+  const state = claimMcpState(config.serverName, config.exposure)
   const opts: ToolBridgeOptions = {
     registrationFailure: 'contain',
     serverName: config.serverName,
     toolCallTimeoutMs: config.toolCallTimeoutMs,
+    includeTools: config.includeTools,
+    exposure: config.exposure,
+    state,
   }
   // The initial sync uses 'throw' when failOnStartupError is configured, so
   // a registration conflict propagates to the startup-await path. Re-syncs
@@ -148,6 +153,8 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
   let connectedAt: number | undefined
   /** The real error from the first connection attempt, for startup-await diagnostics. */
   let firstAttemptError: unknown
+  /** The most recent failed attempt's error, for the live state's diagnostic. */
+  let lastAttemptError: unknown
 
   /** A generation may act only while it is the current one on a live plugin. */
   const isCurrent = (generation: Client): boolean => !disposed && client === generation
@@ -196,6 +203,7 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
         ? 'connection lost and reconnect is disabled — registered tools will fail until an HMR reload or Host restart'
         : 'connection failed and reconnect is disabled — no tools were registered; reload the plugin or restart the Host to connect'
       ctx.logger.error(`${label}: ${message}`)
+      state.update({ phase: 'failed', error: describeFailure(lastAttemptError, message) })
       return
     }
     // A connection that stayed up past the stability window (= maxDelayMs, the
@@ -211,11 +219,16 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
         disposers = new Map()
       })
       ctx.logger.error(`${label}: giving up after ${policy.maxAttempts} consecutive failed reconnect attempts — tools unregistered; reload the plugin or restart the Host to reconnect`)
+      state.update({ phase: 'failed', tools: [], deferred: new Map(), error: describeFailure(lastAttemptError, `gave up after ${policy.maxAttempts} attempts`) })
       return
     }
     const delayMs = Math.min(policy.maxDelayMs, policy.initialDelayMs * 2 ** (failedAttempts - 1))
     const action = lostEstablishedConnection ? 'connection lost; reconnecting' : 'connection failed; retrying'
     ctx.logger.warn(`${label}: ${action} in ${delayMs}ms (attempt ${failedAttempts}/${policy.maxAttempts})`)
+    // An attempt that needs authorization keeps that phase: retrying cannot fix it.
+    if (mcpServerState(config.serverName)?.phase !== 'needs-auth') {
+      state.update({ phase: 'reconnecting', error: describeFailure(lastAttemptError, action) })
+    }
     reconnectTimer = setTimeout(() => {
       reconnectTimer = undefined
       settling = connectGeneration(false)
@@ -278,6 +291,8 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
       await enqueueSync(generation, startup ? startupOpts : opts)
     } catch (error) {
       if (firstAttemptError === undefined) firstAttemptError = error
+      lastAttemptError = error
+      if (isUnauthorized(error)) state.update({ phase: 'needs-auth', error: describeFailure(error, 'authorization required') })
       // Disposal clears current ownership before it closes the generation, so
       // only a live supervisor reports an attempt failure.
       if (isCurrent(generation)) ctx.logger.warn(`${label}: connection attempt failed: ${String(error)}`)
@@ -301,6 +316,8 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
     }
     if (!isCurrent(generation)) return
     connectedAt = Date.now()
+    lastAttemptError = undefined
+    state.update({ phase: 'connected' })
     if (failedAttempts > 0) ctx.logger.info(`${label}: reconnected and re-synced tools (attempt ${failedAttempts}/${policy.maxAttempts})`)
   }
 
@@ -346,6 +363,18 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
       await syncChain
       for (const dispose of disposers.values()) dispose()
       disposers = new Map()
+      state.clear()
     },
   }
+}
+
+/** One-line diagnostic for the live state: the error's message, or a fallback. */
+function describeFailure(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message !== '') return error.message
+  return error === undefined ? fallback : String(error)
+}
+
+/** Whether a connection failure is the SDK's OAuth "authorization required" signal. */
+function isUnauthorized(error: unknown): boolean {
+  return error instanceof Error && (error.name === 'UnauthorizedError' || /\b401\b|unauthori[sz]ed/i.test(error.message))
 }

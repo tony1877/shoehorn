@@ -9,8 +9,10 @@
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
+import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { scrubbedParentEnv } from '@deepseek-ai/dsh-subprocess'
 import type { Config } from './index.ts'
+import { mcpAuthProviders } from './status.ts'
 
 /**
  * The subprocess seam's scrubbed parent env (credential-shaped and stale
@@ -26,7 +28,7 @@ function buildChildEnv(extra: Record<string, string>): Record<string, string> {
  * Create an MCP transport from the resolved plugin config.
  *
  * @param config - Resolved plugin config discriminated on `transport`.
- * @returns A connected-ready MCP Transport (stdio or Streamable HTTP).
+ * @returns A connected-ready MCP Transport (stdio, Streamable HTTP, or HTTP+SSE).
  */
 export function createTransport(config: Config): Transport {
   switch (config.transport) {
@@ -37,14 +39,27 @@ export function createTransport(config: Config): Transport {
         env: buildChildEnv(config.env),
         cwd: config.cwd,
       })
-    case 'streamable-http':
+    case 'streamable-http': {
+      const authProvider = mcpAuthProviders.get(config.serverName)
       // The MCP SDK's StreamableHTTPClientTransport has optional callback
       // properties typed without `| undefined` (exactOptionalPropertyTypes
       // mismatch with the Transport interface); the SDK constructed the
       // object, so the cast records only that widening.
       return new StreamableHTTPClientTransport(
         new URL(config.url),
-        { requestInit: { headers: config.headers } },
+        { requestInit: { headers: config.headers }, ...authProvider === undefined ? {} : { authProvider } },
       ) as Transport
+    }
+    case 'sse': {
+      const authProvider = mcpAuthProviders.get(config.serverName)
+      return new SSEClientTransport(
+        new URL(config.url),
+        {
+          requestInit: { headers: config.headers },
+          eventSourceInit: { fetch: (url, init) => fetch(url, { ...init, headers: { ...init?.headers as Record<string, string>, ...config.headers } }) },
+          ...authProvider === undefined ? {} : { authProvider },
+        },
+      ) as Transport
+    }
   }
 }
