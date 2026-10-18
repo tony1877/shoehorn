@@ -138,9 +138,11 @@ it('pins Messages Files offload and inline fallback in assembled requests', asyn
     const normalizedAccess = accessText(result.cwd)
     const fileImage = { type: 'image', source: { type: 'file', file_id: 'file-api-snapshot-1' } }
     const offloadedImage = `[image omitted to fit request image limits; ${attachmentId}.${normalizedAccess}]`
-    const imageHandle = `Image ${attachmentId}; request preview 1x1px. The image is included here and already visible; do not read it again with read_image.${normalizedAccess}`
-    const normalizedToolImageHandle = `Image "red.png" (${attachmentId}); request preview 1x1px. The image is included here and already visible; do not read it again with read_image.${normalizedAccess}`
-      .replaceAll(result.cwd, '{{cwd}}')
+    const imageHandle = `Image ${attachmentId}; request preview 1x1px.${normalizedAccess}`
+    const runtimeContext = (cwd: string): string => 'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\n'
+      + `Current working directory: ${JSON.stringify(cwd)}.\n\n`
+      + 'Current DSH file policy: danger-full-access. The DSH file sandbox does not restrict file modifications by available operations.\n\n'
+      + 'Approval prompts are disabled in this session: actions that require approval are rejected automatically — do not request sandbox escalation (do not set `sandbox_permissions`).'
     const messages = requests[0]?.messages as { content?: unknown }[] | undefined
     const offloaded = messages?.find(message => JSON.stringify(message.content).includes('[image omitted'))
     expect(offloaded?.content).toEqual([
@@ -198,8 +200,8 @@ it('pins Messages Files offload and inline fallback in assembled requests', asyn
       { type: 'text', text: 'Compare the older image ' },
       { type: 'text', text: `[image omitted to fit request image limits; ${attachmentId}.${fallbackAccess}]` },
       { type: 'text', text: ' with the newer image ' },
-      { type: 'text', text: `\nImage ${attachmentId}; request preview 1x1px. The image is included here and already visible; do not read it again with read_image.${fallbackAccess}` },
-      { type: 'image_url', image_url: { url: `data:image/png;base64,${image}` } },
+      { type: 'text', text: `Image ${attachmentId}; request preview 1x1px.${fallbackAccess}` },
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: image } },
       { type: 'text', text: ', then use read_image on red.png and reply with DONE.' },
       { type: 'text', text: runtimeContext(fallback.cwd) },
     ])

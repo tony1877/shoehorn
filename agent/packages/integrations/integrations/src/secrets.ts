@@ -6,7 +6,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialKey, type CredentialKey } from '@deepseek-ai/dsh-credentials'
-import type { OAuthClientInformationMixed, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js'
+import type { OAuthClientInformationMixed, OAuthTokens } from '@modelcontextprotocol/client'
 
 /** OAuth state for one MCP server. */
 export interface OAuthGrant {

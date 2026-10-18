@@ -10,6 +10,13 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { ContextFormed } from '@deepseek-ai/dsh-llm'
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'repeat-tool-reminder': { kind: 'repeat-tool-reminder' } & ContextFormed
+  }
+}
+
 import type { ContentBlock, MessageSource } from '@deepseek-ai/dsh-llm'
 import type { UserMessage } from '@deepseek-ai/dsh-session'
 import type { PostToolDecision, ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
@@ -275,7 +282,7 @@ export function apply(ctx: Context, config: Config): void {
   function reminderMessage(text: string, summary: string): UserMessage {
     return createUserMessage({
       content: [{ type: 'text', text: reminderSuffix === '' ? text : `${text}\n\n${reminderSuffix}` }],
-      source: { ...PLUGIN_SOURCE, form: 'notice', summary },
+      source: { ...REMINDER_SOURCE, form: 'notice', summary },
     })
   }
 

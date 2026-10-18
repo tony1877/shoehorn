@@ -10,7 +10,7 @@
  * @module
  */
 
-import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
+import type { OAuthClientProvider } from '@modelcontextprotocol/client'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 
 /** Connection phase of one MCP server. */

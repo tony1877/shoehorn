@@ -430,7 +430,7 @@ describe('same-result detection', () => {
     const found = reminders(await runTurn(ctx, ['10000', '10000', 'other', '10000', '10000', '10000']))
     expect(found).toHaveLength(2)
     expect(found[0]!.text).toContain('keep returning the same result')
-    expect(found[0]!.source).toEqual({ kind: 'plugin', plugin: 'repeat-tool-reminder', form: 'notice', summary: 'run same result × 3' })
+    expect(found[0]!.source).toEqual({ kind: 'repeat-tool-reminder', form: 'notice', summary: 'run same result × 3' })
     expect(found[1]!.text).toContain('- tool: run')
     expect(found[1]!.text).toContain('- same_result_count: 5 of the last 6 calls')
     expect(found[1]!.text).toContain('- result: 10000')
@@ -516,8 +516,8 @@ describe('same-result detection', () => {
 
     const found = reminders(agent)
     expect(found.map(r => r.source)).toEqual([
-      { kind: 'plugin', plugin: 'repeat-tool-reminder', form: 'notice', summary: 'shot same result × 2' },
-      { kind: 'plugin', plugin: 'repeat-tool-reminder', form: 'notice', summary: 'shot same result × 3' },
+      { kind: 'repeat-tool-reminder', form: 'notice', summary: 'shot same result × 2' },
+      { kind: 'repeat-tool-reminder', form: 'notice', summary: 'shot same result × 3' },
     ])
     expect(found[1]!.text).toContain('- result: [image content]')
   })

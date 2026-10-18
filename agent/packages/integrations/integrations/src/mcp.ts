@@ -6,7 +6,7 @@
  */
 
 import type { Context, Fiber } from '@deepseek-ai/cordis'
-import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { Client } from '@modelcontextprotocol/client'
 import * as McpClient from '@deepseek-ai/dsh-mcp-client'
 import {
   createTransport,
@@ -300,8 +300,8 @@ export class McpManager {
     const client = new Client({ name: 'dsh-integrations-test', version: '0.0.1' }, { capabilities: {} })
     const stderr: string[] = []
     try {
-      const transport = createTransport(config) as Awaited<ReturnType<typeof createTransport>> & { stderr?: NodeJS.ReadableStream | null }
-      transport.stderr?.on('data', (chunk: Buffer | string) => {
+      const transport = createTransport(config)
+      ;(transport as { stderr?: NodeJS.ReadableStream | null }).stderr?.on('data', (chunk: Buffer | string) => {
         stderr.push(...String(chunk).split(/\r?\n/).filter(line => line.trim() !== ''))
         if (stderr.length > 20) stderr.splice(0, stderr.length - 20)
       })

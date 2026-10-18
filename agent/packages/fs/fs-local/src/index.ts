@@ -31,6 +31,7 @@ import {
   probe,
   probeNoFollow,
   readForEdit,
+  readByteWindow,
   readHeadBytes,
   readTextForDiff,
   readWholeBytes,

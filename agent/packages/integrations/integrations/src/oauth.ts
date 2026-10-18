@@ -9,8 +9,8 @@
 
 import { randomBytes } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
-import { auth, type OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
-import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js'
+import { auth, type OAuthClientProvider } from '@modelcontextprotocol/client'
+import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from '@modelcontextprotocol/client'
 import { modifySecrets, readSecrets } from './secrets.ts'
 
 /** Callback path on this Host. */

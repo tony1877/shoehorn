@@ -15,9 +15,8 @@
  * @module
  */
 
-import { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
-import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
+import { Client, type Transport } from '@modelcontextprotocol/client'
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio'
 import type { Context } from '@deepseek-ai/cordis'
 import { assertNever, type JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { ServerContext } from './server-context.ts'
@@ -129,13 +128,15 @@ export interface ConnectionHandle extends ServerContext {
  */
 export function startConnection(ctx: Context, config: Config, policy: ResolvedReconnectPolicy): ConnectionHandle {
   const label = `mcp-client(${config.serverName})`
-  const state = claimMcpState(config.serverName, config.exposure)
+  const incompleteDisposalMessage = `${label}: transport closure could not be confirmed during disposal — server shutdown may be incomplete`
+  const exposure = config.exposure ?? 'native'
+  const state = claimMcpState(config.serverName, exposure)
   const opts: ToolBridgeOptions = {
     registrationFailure: 'contain',
     serverName: config.serverName,
     toolCallTimeoutMs: config.toolCallTimeoutMs,
-    includeTools: config.includeTools,
-    exposure: config.exposure,
+    includeTools: config.includeTools ?? [],
+    exposure,
     state,
   }
   // The initial sync uses 'throw' when failOnStartupError is configured, so
@@ -318,7 +319,7 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
     }
     let instructions: string
     try {
-      const transport = createTransport(config)
+      transport = createTransport(config)
       if (transport instanceof StdioClientTransport) {
         transport.stderr?.on('data', (chunk: Buffer | string) => state.appendLog(String(chunk)))
       }

@@ -82,12 +82,12 @@ export interface StdioConfig {
    * Raw MCP tool names to expose; empty exposes every tool the server lists.
    * Filtered tools stay visible to management surfaces as excluded.
    */
-  includeTools: string[]
+  includeTools?: string[]
   /**
    * `native` registers each tool as a model-visible tool. `deferred` keeps the
    * built definitions off the model's tool list for a proxy tool to dispatch.
    */
-  exposure: 'native' | 'deferred'
+  exposure?: 'native' | 'deferred'
 }
 
 /** Config for connecting to an MCP server over Streamable HTTP or the older HTTP+SSE transport. */
@@ -116,12 +116,12 @@ export interface StreamableHttpConfig {
    * Raw MCP tool names to expose; empty exposes every tool the server lists.
    * Filtered tools stay visible to management surfaces as excluded.
    */
-  includeTools: string[]
+  includeTools?: string[]
   /**
    * `native` registers each tool as a model-visible tool. `deferred` keeps the
    * built definitions off the model's tool list for a proxy tool to dispatch.
    */
-  exposure: 'native' | 'deferred'
+  exposure?: 'native' | 'deferred'
 }
 
 /** Configuration for one stdio or Streamable HTTP MCP server. */

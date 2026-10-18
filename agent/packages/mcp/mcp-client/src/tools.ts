@@ -128,40 +128,29 @@ export async function syncTools(
   const infos: McpToolInfo[] = []
   const seen = new Set<string>()
   const include = new Set(opts.includeTools)
-  let cursor: string | undefined
-  do {
-    const response = await listToolsUncached(client, cursor)
-    for (const tool of response.tools) {
-      const publicName = publicToolName(opts.serverName, tool.name)
-      const excluded = include.size > 0 && !include.has(tool.name)
-      const annotations = tool.annotations
-      infos.push({
-        rawName: tool.name,
-        publicName,
-        description: tool.description ?? '',
-        ...typeof annotations?.readOnlyHint === 'boolean' ? { readOnly: annotations.readOnlyHint } : {},
-        ...typeof annotations?.destructiveHint === 'boolean' ? { destructive: annotations.destructiveHint } : {},
-        excluded,
-      })
-      if (seen.has(publicName)) {
-        throw new Error(
-          `mcp-client(${opts.serverName}): server listed tool "${tool.name}" more than once — invalid tool list`,
-        )
-      }
-      seen.add(publicName)
-      if (excluded) continue
-      definitions.set(publicName, createDefinition(
-        client,
-        ctx,
-        publicName,
-        tool.name,
-        tool.description ?? '',
-        tool.inputSchema,
-        supportedOutputSchema(tool.outputSchema),
-        tool.execution?.taskSupport === 'required',
-        opts,
-      ))
+  const response = client.getServerCapabilities()?.tools === undefined
+    ? { tools: [] }
+    : await client.listTools(undefined, { cacheMode: 'refresh' })
+  for (const tool of response.tools) {
+    const publicName = publicToolName(opts.serverName, tool.name)
+    const excluded = include.size > 0 && !include.has(tool.name)
+    const annotations = tool.annotations
+    infos.push({
+      rawName: tool.name,
+      publicName,
+      description: tool.description ?? '',
+      ...typeof annotations?.readOnlyHint === 'boolean' ? { readOnly: annotations.readOnlyHint } : {},
+      ...typeof annotations?.destructiveHint === 'boolean' ? { destructive: annotations.destructiveHint } : {},
+      excluded,
+    })
+    if (seen.has(publicName)) {
+      throw new Error(
+        `mcp-client(${opts.serverName}): server listed tool "${tool.name}" more than once — invalid tool list`,
+      )
     }
+    seen.add(publicName)
+    // a tool outside the server's allowlist (includeTools) is listed for the diagnostics page but not registered
+    if (excluded) continue
     definitions.set(publicName, createMcpToolDefinition(ctx, {
       name: publicName,
       rawName: tool.name,
