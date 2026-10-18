@@ -8,7 +8,9 @@ import type {
   NotificationEvent,
   NotificationSettings,
   NotificationView,
+  TelegramSettings,
   WebhookDeliveryView,
+  WebhookPreset,
   WebhookSettings,
   WebhookView,
 } from '@deepseek-ai/dsh-integrations/types'
@@ -33,6 +35,9 @@ export interface IntegrationsApi {
   removeNotification(id: string): Promise<void>
   testNotification(id: string): Promise<{ ok: boolean; detail: string }>
   setPublicBaseUrl(url: string): Promise<void>
+  saveTelegram(settings: TelegramSettings, token?: string | null): Promise<void>
+  telegramPairingCode(): Promise<{ code: string; link?: string }>
+  removeTelegramChat(chatId: string): Promise<void>
 }
 
 /** Registration-side face. */
@@ -387,6 +392,22 @@ function ServerCard({ view, api, t, onChanged, onEdit }: {
         ? (
             <div className={css.cardBody}>
               <p className={css.meta}>{settings.transport === 'stdio' ? [settings.command, ...settings.args].join(' ') : settings.url}</p>
+              {view.calls === 0
+                ? null
+                : (
+                    <p className={css.meta}>
+                      {t('mcpStats', { calls: view.calls, failures: view.failures })}
+                      {view.lastCallAt === undefined ? '' : ` · ${t('mcpLastCall', { time: new Date(view.lastCallAt).toLocaleTimeString() })}`}
+                    </p>
+                  )}
+              {view.log.length === 0
+                ? null
+                : (
+                    <details>
+                      <summary className={css.meta}>{t('showLog', { count: view.log.length })}</summary>
+                      <pre className={css.pre}>{view.log.join('\n')}</pre>
+                    </details>
+                  )}
               {view.tools.length === 0
                 ? null
                 : (
@@ -469,12 +490,15 @@ function McpPanel({ overview, api, t, reload }: { overview: IntegrationsOverview
 
 // ---- Webhooks ----
 
-function emptyHook(id: string): WebhookSettings {
+function emptyHook(id: string, preset?: WebhookPreset): WebhookSettings {
+  if (preset !== undefined) return { ...preset.settings, id, workspacePath: '' }
   return {
     id,
     enabled: true,
     title: '',
+    authMode: 'hmac',
     signatureHeader: 'X-Signature-256',
+    chatMode: 'new',
     matchPath: '',
     matchValues: [],
     workspacePath: '',
@@ -522,7 +546,7 @@ function HookEditor({ initial, isNew, api, t, onDone }: {
         </Field>
       </div>
       <Field label={t('fieldWorkspace')}>
-        <Input value={hook.workspacePath} placeholder="C:\\src\\project" onChange={event => set({ workspacePath: event.target.value })} />
+        <Input value={hook.workspacePath} placeholder={'C:\\src\\project'} onChange={event => set({ workspacePath: event.target.value })} />
       </Field>
       <Field label={t('fieldPrompt')}>
         <TextArea rows={5} value={hook.promptTemplate} onChange={promptTemplate => set({ promptTemplate })} />
@@ -539,8 +563,24 @@ function HookEditor({ initial, isNew, api, t, onDone }: {
         </Field>
       </div>
       <div className={css.grid}>
-        <Field label={t('fieldSignatureHeader')}>
+        <Field label={t('hookAuth')}>
+          <Select
+            label={t('hookAuth')}
+            value={hook.authMode}
+            onChange={authMode => set({ authMode, signatureHeader: authMode === 'token' ? 'Authorization' : 'X-Signature-256' })}
+            options={(['hmac', 'token'] as const).map(value => ({ value, label: t(`hookAuth_${value}`) }))}
+          />
+        </Field>
+        <Field label={t(`hookAuthHeader_${hook.authMode}`)}>
           <Input value={hook.signatureHeader} onChange={event => set({ signatureHeader: event.target.value })} />
+        </Field>
+        <Field label={t('hookChat')}>
+          <Select
+            label={t('hookChat')}
+            value={hook.chatMode}
+            onChange={chatMode => set({ chatMode })}
+            options={(['new', 'same'] as const).map(value => ({ value, label: t(`hookChat_${value}`) }))}
+          />
         </Field>
         <Field label={t('fieldRate')}>
           <Input type="number" value={String(hook.ratePerMinute)} onChange={event => set({ ratePerMinute: Math.max(1, Number(event.target.value) || 1) })} />
@@ -591,7 +631,7 @@ function HooksPanel({ overview, api, t, reload }: { overview: IntegrationsOvervi
         ? null
         : (
             <div className={css.secretBox}>
-              <p>{t('newSecretShown', { header: header(secret.id) })}</p>
+              <p>{t(overview.webhooks.find(view => view.settings.id === secret.id)?.settings.authMode === 'token' ? 'newSecretShownToken' : 'newSecretShown', { header: header(secret.id) })}</p>
               <code className={css.secret}>{secret.secret}</code>
             </div>
           )}
@@ -634,7 +674,30 @@ function HooksPanel({ overview, api, t, reload }: { overview: IntegrationsOvervi
               <HookEditor initial={editing.hook} isNew api={api} t={t} onDone={(created) => { setEditing(undefined); if (created !== undefined) setSecret(created); reload() }} />
             </div>
           )
-        : <Button size="sm" variant="outline" onClick={() => setEditing({ hook: emptyHook(`hook-${overview.webhooks.length + 1}`), isNew: true })}>{t('addHook')}</Button>}
+        : (
+            <div className={css.addRow}>
+              <span className={css.label}>{t('addHook')}</span>
+              <div className={css.presets}>
+                {overview.webhookPresets.map(preset => (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    className={css.preset}
+                    title={preset.description}
+                    onClick={() => {
+                      const taken = new Set(overview.webhooks.map(view => view.settings.id))
+                      let id = preset.id === 'custom' ? 'hook' : preset.id
+                      for (let index = 2; taken.has(id); index += 1) id = `${preset.id === 'custom' ? 'hook' : preset.id}-${index}`
+                      setEditing({ hook: emptyHook(id, preset), isNew: true })
+                    }}
+                  >
+                    <strong>{preset.title}</strong>
+                    <span>{preset.description}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
       <h4 className={css.subTitle}>{t('deliveries')}</h4>
       {overview.deliveries.length === 0
         ? <p className={css.meta}>{t('deliveriesEmpty')}</p>
@@ -714,6 +777,13 @@ function NotifyEditor({ initial, isNew, view, api, t, onDone }: {
           ))}
         </div>
       </Field>
+      {target.events.includes('finished')
+        ? (
+            <Field label={t('fieldMinTurn')} hint={t('fieldMinTurnHint')}>
+              <Input type="number" value={String(target.minTurnSeconds)} onChange={event => setTarget({ ...target, minTurnSeconds: Math.max(0, Number(event.target.value) || 0) })} />
+            </Field>
+          )
+        : null}
       {error === undefined ? null : <p className={css.error}>{error}</p>}
       <div className={css.actions}>
         <Button variant="primary" size="sm" disabled={busy || target.id.trim() === '' || (isNew && url.trim() === '')} onClick={() => { void save() }}>{busy ? t('saving') : t('save')}</Button>
@@ -801,10 +871,164 @@ function NotifyPanel({ overview, api, t, reload }: { overview: IntegrationsOverv
             <Button
               size="sm"
               variant="outline"
-              onClick={() => setEditing({ target: { id: `notify-${overview.notifications.length + 1}`, enabled: true, title: '', format: 'ntfy', events: ['finished', 'approval', 'question'] }, isNew: true })}
+              onClick={() => setEditing({ target: { id: `notify-${overview.notifications.length + 1}`, enabled: true, title: '', format: 'ntfy', events: ['finished', 'approval', 'question'], minTurnSeconds: 20 }, isNew: true })}
             >
               {t('addNotify')}
             </Button>
+          )}
+    </section>
+  )
+}
+
+// ---- Telegram ----
+
+const TELEGRAM_DOT: Record<IntegrationsOverview['telegram']['status']['phase'], StateDotState | undefined> = {
+  off: undefined,
+  'needs-token': 'warning',
+  connecting: 'ongoing',
+  running: 'done',
+  error: 'error',
+}
+
+function TelegramPanel({ overview, api, t, reload }: { overview: IntegrationsOverview; api: IntegrationsApi; t: Translate; reload: () => void }): ReactNode {
+  const view = overview.telegram
+  const [draft, setDraft] = useState(view.settings)
+  const [token, setToken] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [note, setNote] = useState<{ tone: 'ok' | 'error'; text: string } | undefined>()
+  const [pairing, setPairing] = useState<{ code: string; link?: string } | undefined>()
+  const dirty = token.trim() !== '' || JSON.stringify(draft) !== JSON.stringify(view.settings)
+  // Server-side changes (a chat just paired) flow in while nothing is being edited here.
+  const settingsKey = JSON.stringify(view.settings)
+  useEffect(() => {
+    if (!dirty) setDraft(view.settings)
+  }, [settingsKey])
+  const run = async (action: () => Promise<unknown>): Promise<void> => {
+    setBusy(true)
+    setNote(undefined)
+    try {
+      await action()
+    } catch (failure) {
+      setNote({ tone: 'error', text: message(failure) })
+    } finally {
+      setBusy(false)
+      reload()
+    }
+  }
+  const status = view.status
+  const statusText = status.phase === 'running'
+    ? t('tgPhase_running', { username: status.username ?? '?' })
+    : status.phase === 'error' ? t('tgPhase_error', { error: status.error ?? '' }) : t(`tgPhase_${status.phase}`)
+  const dot = TELEGRAM_DOT[status.phase]
+  const toggleEvent = (event: NotificationEvent, on: boolean): void =>
+    setDraft(current => ({ ...current, notifyEvents: on ? [...new Set([...current.notifyEvents, event])] : current.notifyEvents.filter(item => item !== event) }))
+  return (
+    <section className={css.group}>
+      <h3 className={css.groupTitle}>{t('tgTitle')}</h3>
+      <p className={css.intro}>{t('tgIntro')}</p>
+      <div className={css.cardTitle}>
+        {dot === undefined ? <span className={css.dotOff} /> : <StateDot state={dot} size={8} />}
+        <span className={status.phase === 'error' ? css.error : css.meta}>{statusText}</span>
+      </div>
+      {view.tokenSet ? null : <p className={css.meta}>{t('tgSteps')}</p>}
+      <div className={css.card}>
+        <div className={css.editor}>
+          <label className={css.check}>
+            <input type="checkbox" checked={draft.enabled} onChange={event => setDraft({ ...draft, enabled: event.target.checked })} />
+            {t('tgEnabled')}
+          </label>
+          <Field label={t('tgToken')} hint={view.tokenSet ? t('tgTokenStored') : t('secretHint')}>
+            <Input type="password" value={token} placeholder="123456789:AA…" onChange={event => setToken(event.target.value)} autoComplete="off" />
+          </Field>
+          <Field label={t('tgFolder')}>
+            <Input value={draft.workspacePath} placeholder={'C:\\src\\project'} onChange={event => setDraft({ ...draft, workspacePath: event.target.value })} />
+          </Field>
+          <div className={css.grid}>
+            <Field label={t('fieldAgentPreset')}>
+              <Input value={draft.agentPreset} onChange={event => setDraft({ ...draft, agentPreset: event.target.value })} />
+            </Field>
+            <Field label={t('fieldPermissionPreset')}>
+              <Input value={draft.permissionPreset} onChange={event => setDraft({ ...draft, permissionPreset: event.target.value })} />
+            </Field>
+          </div>
+          <label className={css.check}>
+            <input type="checkbox" checked={draft.answerInTelegram} onChange={event => setDraft({ ...draft, answerInTelegram: event.target.checked })} />
+            {t('tgAnswerHere')}
+          </label>
+          <Field label={t('tgNotify')}>
+            <div className={css.inline}>
+              {(['finished', 'approval', 'question'] as const).map(event => (
+                <label key={event} className={css.check}>
+                  <input type="checkbox" checked={draft.notifyEvents.includes(event)} onChange={change => toggleEvent(event, change.target.checked)} />
+                  {t(`event_${event}`)}
+                </label>
+              ))}
+            </div>
+          </Field>
+          {draft.notifyEvents.includes('finished')
+            ? (
+                <Field label={t('fieldMinTurn')} hint={t('fieldMinTurnHint')}>
+                  <Input type="number" value={String(draft.minTurnSeconds)} onChange={event => setDraft({ ...draft, minTurnSeconds: Math.max(0, Number(event.target.value) || 0) })} />
+                </Field>
+              )
+            : null}
+          {note === undefined ? null : <p className={note.tone === 'ok' ? css.ok : css.error}>{note.text}</p>}
+          <div className={css.actions}>
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={busy || !dirty}
+              onClick={() => {
+                void run(async () => {
+                  await api.saveTelegram(draft, token.trim() === '' ? undefined : token.trim())
+                  setToken('')
+                })
+              }}
+            >
+              {busy ? t('saving') : t('save')}
+            </Button>
+            {view.tokenSet
+              ? <Button variant="ghost" size="sm" disabled={busy} onClick={() => { void run(() => api.saveTelegram({ ...draft, enabled: false }, null)) }}>{t('tgRemoveToken')}</Button>
+              : null}
+          </div>
+        </div>
+      </div>
+      <h4 className={css.subTitle}>{t('tgChats')}</h4>
+      {view.chats.length === 0
+        ? <p className={css.meta}>{t('tgNoChats')}</p>
+        : (
+            <ul className={css.cards}>
+              {view.chats.map(chat => (
+                <li key={chat.chatId} className={css.card}>
+                  <div className={css.cardHead}>
+                    <div className={css.cardTitle}>
+                      <strong>{chat.name}</strong>
+                      <span className={css.meta}>{chat.chatTitle === undefined ? chat.chatId : t('tgChatTalksTo', { title: chat.chatTitle })}</span>
+                    </div>
+                    <Button size="sm" variant="ghost" onClick={() => { void run(() => api.removeTelegramChat(chat.chatId)) }}>{t('tgUnpair')}</Button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+      {status.phase === 'running'
+        ? (
+            <div className={css.inline}>
+              <Button size="sm" variant="outline" disabled={busy} onClick={() => { void run(async () => setPairing(await api.telegramPairingCode())) }}>{t('tgPair')}</Button>
+            </div>
+          )
+        : null}
+      {pairing === undefined
+        ? null
+        : (
+            <div className={css.secretBox}>
+              <p>
+                {pairing.link === undefined
+                  ? t('tgPairingNoLink', { code: pairing.code })
+                  : t('tgPairing', { code: pairing.code })}
+              </p>
+              {pairing.link === undefined ? null : <a href={pairing.link} target="_blank" rel="noreferrer">{pairing.link}</a>}
+            </div>
           )}
     </section>
   )
@@ -840,6 +1064,7 @@ export function IntegrationsSection({ t, api }: IntegrationsSectionProps): React
     return (
       <>
         <McpPanel overview={overview} api={api} t={t} reload={reload} />
+        <TelegramPanel overview={overview} api={api} t={t} reload={reload} />
         <HooksPanel overview={overview} api={api} t={t} reload={reload} />
         <NotifyPanel overview={overview} api={api} t={t} reload={reload} />
       </>

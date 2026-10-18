@@ -38,6 +38,8 @@ export function createTransport(config: Config): Transport {
         args: config.args,
         env: buildChildEnv(config.env),
         cwd: config.cwd,
+        // Piped, not inherited: the supervisor keeps the tail for diagnostics (and must read it, or the child blocks).
+        stderr: 'pipe',
       })
     case 'streamable-http': {
       const authProvider = mcpAuthProviders.get(config.serverName)

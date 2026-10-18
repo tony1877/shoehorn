@@ -86,8 +86,15 @@ function toolViews(state: McpServerState | undefined): McpToolView[] {
   return (state?.tools ?? []).map(tool => ({ ...tool }))
 }
 
-/** One server's view, given its stored secrets. */
-export function serverView(settings: McpServerSettings, secrets: IntegrationSecrets): McpServerView {
+/** Per-server tool-call counters since the Host started. */
+export interface CallStats {
+  calls: number
+  failures: number
+  lastCallAt?: number
+}
+
+/** One server's view, given its stored secrets and call counters. */
+export function serverView(settings: McpServerSettings, secrets: IntegrationSecrets, stats?: CallStats): McpServerView {
   const state = settings.enabled ? mcpServerState(settings.id) : undefined
   return {
     settings,
@@ -99,6 +106,10 @@ export function serverView(settings: McpServerSettings, secrets: IntegrationSecr
       : state?.phase ?? (settings.auth === 'oauth' && settings.transport !== 'stdio' && secrets.oauth?.tokens === undefined ? 'needs-auth' : 'stopped'),
     ...state?.error === undefined ? {} : { error: state.error },
     tools: toolViews(state),
+    log: [...state?.log ?? []],
+    calls: stats?.calls ?? 0,
+    failures: stats?.failures ?? 0,
+    ...stats?.lastCallAt === undefined ? {} : { lastCallAt: stats.lastCallAt },
   }
 }
 
@@ -167,6 +178,7 @@ export class McpManager {
   private proxyDispose: (() => void) | undefined
   private proxySignature = ''
   private reconciling: Promise<void> = Promise.resolve()
+  private readonly stats = new Map<string, CallStats>()
 
   constructor(private readonly ctx: Context) {
     ctx.effect(() => watchMcpServers(() => this.refreshProxies()), 'integrations.mcp.watch')
@@ -182,6 +194,30 @@ export class McpManager {
       this.running.clear()
     }, 'integrations.mcp.servers')
     ctx.on('tools/pre-execute', (exec, next) => this.gate(exec, next))
+    ctx.on('tools/post-execute', async (exec, result, next) => {
+      const server = this.serverOf(exec)
+      if (server !== undefined) {
+        const current = this.stats.get(server) ?? { calls: 0, failures: 0 }
+        this.stats.set(server, { calls: current.calls + 1, failures: current.failures + (result.isError ? 1 : 0), lastCallAt: Date.now() })
+      }
+      return next()
+    })
+  }
+
+  /** Call counters of one server. */
+  statsOf(id: string): CallStats | undefined {
+    return this.stats.get(id)
+  }
+
+  /** The server a call goes to, direct or through the proxy. */
+  private serverOf(exec: ToolExecution): string | undefined {
+    let publicName: string | undefined
+    if (exec.name.startsWith('mcp__')) publicName = exec.name
+    else if (exec.name === CALL_TOOL) {
+      const tool = (exec.arguments as { tool?: unknown } | null)?.tool
+      if (typeof tool === 'string') publicName = tool
+    }
+    return publicName === undefined ? undefined : locate(publicName)?.state.serverName
   }
 
   /** Current settings rows. */
@@ -262,8 +298,13 @@ export class McpManager {
     const previousProvider = mcpAuthProviders.get(settings.id)
     if (provider !== undefined) mcpAuthProviders.set(settings.id, provider)
     const client = new Client({ name: 'dsh-integrations-test', version: '0.0.1' }, { capabilities: {} })
+    const stderr: string[] = []
     try {
-      const transport = createTransport(config)
+      const transport = createTransport(config) as Awaited<ReturnType<typeof createTransport>> & { stderr?: NodeJS.ReadableStream | null }
+      transport.stderr?.on('data', (chunk: Buffer | string) => {
+        stderr.push(...String(chunk).split(/\r?\n/).filter(line => line.trim() !== ''))
+        if (stderr.length > 20) stderr.splice(0, stderr.length - 20)
+      })
       await client.connect(transport)
       const tools: McpToolView[] = []
       let cursor: string | undefined
@@ -289,7 +330,8 @@ export class McpManager {
         ...info?.version === undefined ? {} : { serverVersion: info.version },
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
+      const detail = error instanceof Error ? error.message : String(error)
+      const message = stderr.length === 0 ? detail : [detail, ...stderr.slice(-8)].join('\n')
       return { ok: false, error: message, needsAuth: /unauthori[sz]ed|\b401\b/i.test(message) || (error as Error)?.name === 'UnauthorizedError' }
     } finally {
       try { await client.close() } catch { /* already closed */ }

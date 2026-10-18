@@ -3,6 +3,7 @@
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
+import type {} from '@deepseek-ai/dsh-api-session-controller/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { IntegrationsSection, type IntegrationsApi, type IntegrationsSectionInjected } from './IntegrationsSection.tsx'
@@ -22,7 +23,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 export const NS = 'settings.integrations'
 
 /** Services required by the section registration and its Remote face. */
-export const inject = ['slots', 'locale', 'remote', 'remote.integrations']
+export const inject = ['slots', 'locale', 'remote', 'remote.integrations', 'sessions']
 
 type Result<T> = { ok: true; value: T } | { ok: false; error: { code: string; message: string } }
 
@@ -54,6 +55,31 @@ export function apply(ctx: ClientContext): void {
     removeNotification: id => unwrap(remote.removeNotification({ id })),
     testNotification: id => unwrap(remote.testNotification({ id })),
     setPublicBaseUrl: url => unwrap(remote.setPublicBaseUrl({ url })),
+    saveTelegram: (settings, token) => unwrap(remote.saveTelegram({ settings, ...token === undefined ? {} : { token } })),
+    telegramPairingCode: () => unwrap(remote.telegramPairingCode()),
+    removeTelegramChat: chatId => unwrap(remote.removeTelegramChat({ chatId })),
+  }
+
+  // Notification links open `?session=<id>`: select that chat once the session list has loaded, then drop the parameter.
+  const wanted = new URLSearchParams(window.location.search).get('session')
+  if (wanted !== null && wanted !== '') {
+    const sessions = ctx.sessions
+    const openWanted = (): boolean => {
+      if (sessions.list.getSnapshot().phase === 'pending') return false
+      sessions.open(wanted as Parameters<typeof sessions.open>[0])
+      const url = new URL(window.location.href)
+      url.searchParams.delete('session')
+      window.history.replaceState(window.history.state, '', url)
+      return true
+    }
+    if (!openWanted()) {
+      ctx.effect(() => {
+        const stop = sessions.list.subscribe(() => {
+          if (openWanted()) stop()
+        })
+        return stop
+      }, 'ui-integrations: open linked session')
+    }
   }
   const injected = (): IntegrationsSectionInjected => ({ api })
 

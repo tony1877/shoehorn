@@ -40,8 +40,13 @@ export interface McpServerState {
   readonly tools: readonly McpToolInfo[]
   /** Definitions of the included tools when exposure is `deferred`. */
   readonly deferred: ReadonlyMap<string, ToolDefinition>
+  /** Last lines the server process wrote to stderr (stdio servers), oldest first. */
+  readonly log: readonly string[]
   readonly updatedAt: number
 }
+
+/** Lines of server stderr kept per server. */
+const LOG_LINES = 60
 
 type Listener = (state: McpServerState | undefined, serverName: string) => void
 
@@ -83,7 +88,9 @@ function publish(serverName: string): void {
 
 /** Writer handle owned by one connection supervisor. */
 export interface McpStateWriter {
-  update(patch: Partial<Omit<McpServerState, 'serverName' | 'updatedAt'>>): void
+  update(patch: Partial<Omit<McpServerState, 'serverName' | 'updatedAt' | 'log'>>): void
+  /** Append stderr text; split into lines, the oldest dropped beyond the bound. */
+  appendLog(text: string): void
   clear(): void
 }
 
@@ -100,6 +107,7 @@ export function claimMcpState(serverName: string, exposure: 'native' | 'deferred
     exposure,
     tools: [],
     deferred: new Map(),
+    log: [],
     updatedAt: Date.now(),
   })
   publish(serverName)
@@ -114,6 +122,15 @@ export function claimMcpState(serverName: string, exposure: 'native' | 'deferred
         delete (next as { error?: string }).error
       }
       states.set(serverName, next)
+      publish(serverName)
+    },
+    appendLog(text) {
+      if (owners.get(serverName) !== owner) return
+      const previous = states.get(serverName)
+      if (previous === undefined) return
+      const lines = text.split(/\r?\n/).map(line => line.trimEnd()).filter(line => line !== '')
+      if (lines.length === 0) return
+      states.set(serverName, { ...previous, log: [...previous.log, ...lines].slice(-LOG_LINES), updatedAt: Date.now() })
       publish(serverName)
     },
     clear() {

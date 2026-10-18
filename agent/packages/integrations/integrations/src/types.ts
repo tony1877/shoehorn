@@ -69,6 +69,14 @@ export interface McpServerView {
   phase: McpPhase
   error?: string
   tools: McpToolView[]
+  /** Last lines the server process wrote to stderr (stdio servers). */
+  log: string[]
+  /** Tool calls since the Host started. */
+  calls: number
+  /** Failed tool calls since the Host started. */
+  failures: number
+  /** When the last tool call finished (Unix ms). */
+  lastCallAt?: number
 }
 
 /** A ready-made server row the page offers with one click. */
@@ -87,14 +95,30 @@ export type McpTestResult =
   | { ok: true; tools: McpToolView[]; serverName?: string; serverVersion?: string }
   | { ok: false; error: string; needsAuth: boolean }
 
+/**
+ * How a sender proves a delivery is genuine: an HMAC-SHA256 signature of the
+ * raw body (GitHub-style), or the secret itself as a bearer token (for senders
+ * that cannot sign: Home Assistant, Zapier, IFTTT, curl).
+ */
+export type WebhookAuthMode = 'hmac' | 'token'
+
+/** Whether each delivery starts a new chat or continues one chat per endpoint. */
+export type WebhookChatMode = 'new' | 'same'
+
 /** One configured inbound webhook endpoint. */
 export interface WebhookSettings {
   /** Stable id; also the URL segment (`/hooks/<id>`). */
   id: string
   enabled: boolean
   title: string
-  /** Request header carrying `sha256=<hex HMAC>` of the raw body. */
+  authMode: WebhookAuthMode
+  /**
+   * `hmac`: request header carrying `sha256=<hex HMAC>` of the raw body.
+   * `token`: request header carrying `Bearer <secret>` (or the secret alone);
+   * `?token=<secret>` in the URL is accepted too.
+   */
   signatureHeader: string
+  chatMode: WebhookChatMode
   /** Dot path into the JSON body; empty matches every delivery. */
   matchPath: string
   /** Values `matchPath` may hold; empty matches any present value. */
@@ -151,6 +175,51 @@ export interface NotificationSettings {
   title: string
   format: NotificationFormat
   events: NotificationEvent[]
+  /** "Chat finished" only after turns that ran at least this long (seconds), so quick replies you watched do not ping you. */
+  minTurnSeconds: number
+}
+
+/** The Telegram bot's settings; its token is a secret. */
+export interface TelegramSettings {
+  enabled: boolean
+  /** Paired chat ids; only these are served. */
+  allowedChats: string[]
+  /** Folder new Telegram chats work in. */
+  workspacePath: string
+  agentPreset: string
+  permissionPreset: string
+  /** Answer approvals and questions of Telegram chats with buttons in Telegram (off: in the web page). */
+  answerInTelegram: boolean
+  /** Also tell paired chats about other chats: when they finish, need approval, or ask a question. */
+  notifyEvents: NotificationEvent[]
+  /** "Chat finished" notifications about other chats only after turns at least this long (seconds). */
+  minTurnSeconds: number
+}
+
+/** Connection state of the Telegram bot. */
+export interface TelegramStatus {
+  phase: 'off' | 'needs-token' | 'connecting' | 'running' | 'error'
+  username?: string
+  error?: string
+  lastPollAt?: number
+}
+
+/** One paired Telegram chat. */
+export interface TelegramChatView {
+  chatId: string
+  name: string
+  /** Title of the agent chat it currently talks to. */
+  chatTitle?: string
+  sessionId?: string
+}
+
+/** The Telegram section of the page. */
+export interface TelegramView {
+  settings: TelegramSettings
+  tokenSet: boolean
+  status: TelegramStatus
+  chats: TelegramChatView[]
+  pairing?: { code: string; expiresAt: number }
 }
 
 /** One notification target as the settings page shows it. */
@@ -170,6 +239,8 @@ export interface IntegrationsOverview {
   webhooks: WebhookView[]
   deliveries: WebhookDeliveryView[]
   notifications: NotificationView[]
+  telegram: TelegramView
+  webhookPresets: WebhookPreset[]
   /** Base URL senders reach this Host at; empty when unset. */
   publicBaseUrl: string
 }
@@ -202,6 +273,14 @@ export interface SaveWebhookRequest {
   settings: WebhookSettings
 }
 
+/** A ready-made webhook row the page offers with one click. */
+export interface WebhookPreset {
+  id: string
+  title: string
+  description: string
+  settings: Omit<WebhookSettings, 'id' | 'workspacePath'>
+}
+
 /** A newly generated webhook secret, shown once. */
 export interface WebhookSecretResult {
   secret: string
@@ -220,4 +299,20 @@ export interface TestNotificationResult {
 
 export interface SetPublicBaseUrlRequest {
   url: string
+}
+
+export interface SaveTelegramRequest {
+  settings: TelegramSettings
+  /** New bot token; `null` removes it; omitted keeps it. */
+  token?: string | null
+}
+
+export interface TelegramPairingResult {
+  code: string
+  /** t.me deep link that sends the code, once the bot's username is known. */
+  link?: string
+}
+
+export interface ChatIdRequest {
+  chatId: string
 }

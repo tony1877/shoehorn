@@ -7,7 +7,8 @@ import { brandString } from '@deepseek-ai/dsh-brand'
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-presets'
-import { boundContextSummary, createUserMessage, errorChain, type LlmCallConfig } from '@deepseek-ai/dsh-llm'
+import { boundContextSummary, createUserMessage, errorChain, type LlmCallConfig, type MessageSource } from '@deepseek-ai/dsh-llm'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-permission-presets'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-title'
@@ -107,9 +108,8 @@ function installInitialModelSelection(agentCtx: Context, selection: ModelSelecti
 }
 
 /**
- * Create, attach, title, configure, and prompt one ordinary root Session.
- * Successful prompt admission ends webhook ownership of the operation; the
- * Agent remains lifecycle-owned by `ctx` and follows normal Session behavior.
+ * Create, attach, title, configure, and prompt one ordinary root Session for
+ * a verified webhook delivery.
  *
  * @param ctx - untraced runtime context that owns the resulting Agent.
  * @param delivery - exact verified provider delivery used for provenance.
@@ -125,6 +125,46 @@ export async function createWebhookSession(
   request: WebhookSessionRequest,
   signal: AbortSignal,
 ): Promise<SessionId> {
+  const { sessionId } = await createPromptedSession(ctx, request, signal, webhookSource(delivery, ruleId))
+  return sessionId
+}
+
+/**
+ * The message source of a prompt admitted from one verified delivery.
+ * @param delivery - exact verified provider delivery used for provenance.
+ * @param ruleId - rule that produced the prompt.
+ * @returns the `webhook` source for that delivery.
+ */
+export function webhookSource(delivery: VerifiedWebhookDelivery, ruleId: WebhookRuleId): MessageSource {
+  return {
+    kind: 'webhook',
+    provider: delivery.kind,
+    source: delivery.source,
+    deliveryId: delivery.deliveryId,
+    ruleId,
+    form: 'notice',
+    summary: boundContextSummary(`${delivery.kind} webhook handled by ${ruleId}`),
+  }
+}
+
+/**
+ * Create, attach, title, configure, and prompt one ordinary root Session whose
+ * first message carries `source`. Successful prompt admission ends the
+ * caller's ownership of the operation; the Agent remains lifecycle-owned by
+ * `ctx` and follows normal Session behavior.
+ *
+ * @param ctx - untraced runtime context that owns the resulting Agent.
+ * @param request - workspace, title, prompt, presets, and optional model.
+ * @param signal - cancellation through publication.
+ * @param source - provenance of the first message (a webhook, or a person on another channel).
+ * @returns the created Session's id and its live Agent.
+ */
+export async function createPromptedSession(
+  ctx: Context,
+  request: WebhookSessionRequest,
+  signal: AbortSignal,
+  source: MessageSource,
+): Promise<{ sessionId: SessionId; agent: Agent }> {
   const resolved = resolveRequest(ctx, request)
   ctx.permissionPresets.resolve(resolved.permissionPreset)
   const preset = await ctx.agentPresets.resolve(resolved.agentPreset)
@@ -155,15 +195,7 @@ export async function createWebhookSession(
     ctx.sessionTitle.rename(handle.agent.session, resolved.title)
     handle.agent.followup(createUserMessage({
       content: [{ type: 'text', text: resolved.prompt }],
-      source: {
-        kind: 'webhook',
-        provider: delivery.kind,
-        source: delivery.source,
-        deliveryId: delivery.deliveryId,
-        ruleId,
-        form: 'notice',
-        summary: boundContextSummary(`${delivery.kind} webhook handled by ${ruleId}`),
-      },
+      source,
     }))
   } catch (error: unknown) {
     if (attached) {
@@ -180,5 +212,5 @@ export async function createWebhookSession(
     }
     throw error
   }
-  return sessionId
+  return { sessionId, agent: handle.agent }
 }

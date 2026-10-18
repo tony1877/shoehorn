@@ -55,6 +55,27 @@
     },
     {
       "path": "../../core/session"
+    },
+    {
+      "path": "../../util/home-paths"
+    },
+    {
+      "path": "../../util/brand"
+    },
+    {
+      "path": "../../attachment/attachment"
+    },
+    {
+      "path": "../../preset/agent-presets"
+    },
+    {
+      "path": "../../core/agent-default-model"
+    },
+    {
+      "path": "../../workspace/workspace"
+    },
+    {
+      "path": "../../interaction/permission-presets"
     }
   ]
 }

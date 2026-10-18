@@ -11,6 +11,11 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import Integrations, {
   approvalFor,
+  authenticate,
+  markdownToHtml,
+  sniffImage,
+  splitMarkdown,
+  WEBHOOK_PRESETS,
   fillTemplate,
   formatNotification,
   matches,
@@ -57,7 +62,7 @@ async function mount(): Promise<{ ctx: Context; service: Integrations }> {
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(LocalCredentialProvider, { path: join(dir, '.credentials.yaml'), watch: false })
   await ctx.plugin(FileSettingsProvider, { path: join(dir, 'settings.yaml'), watch: false })
-  await ctx.plugin(Integrations, {})
+  await ctx.plugin(Integrations, { stateDirectory: join(dir, 'state') })
   const service = ctx.get('integrations') as Integrations
   return { ctx, service }
 }
@@ -80,7 +85,9 @@ describe('webhook helpers', () => {
     id: 'gh',
     enabled: true,
     title: '',
+    authMode: 'hmac',
     signatureHeader: 'X-Signature-256',
+    chatMode: 'new',
     matchPath: 'action',
     matchValues: ['opened'],
     workspacePath: '/w',
@@ -108,6 +115,67 @@ describe('webhook helpers', () => {
 
   it('signs like GitHub', () => {
     expect(sign('s3cret', Buffer.from('{}'))).toMatch(/^sha256=[0-9a-f]{64}$/)
+  })
+
+  it('accepts a matching HMAC signature and refuses a wrong or missing one', () => {
+    const body = Buffer.from('{"a":1}')
+    expect(authenticate(hook, 'k', body, { 'x-signature-256': [sign('k', body)] }, '/hooks/gh')).toBeUndefined()
+    expect(authenticate(hook, 'k', body, { 'x-signature-256': [sign('other', body)] }, '/hooks/gh')).toBe('signature does not match')
+    expect(authenticate(hook, 'k', body, {}, '/hooks/gh')).toBe('missing X-Signature-256 header')
+  })
+
+  it('accepts the secret as a bearer token or a token parameter in token mode', () => {
+    const token = { ...hook, authMode: 'token' as const, signatureHeader: 'Authorization' }
+    const body = Buffer.from('x')
+    expect(authenticate(token, 'tok', body, { authorization: ['Bearer tok'] }, '/hooks/gh')).toBeUndefined()
+    expect(authenticate(token, 'tok', body, {}, '/hooks/gh?token=tok')).toBeUndefined()
+    expect(authenticate(token, 'tok', body, { authorization: ['Bearer nope'] }, '/hooks/gh')).toBe('token does not match')
+    expect(authenticate(token, 'tok', body, {}, '/hooks/gh')).toMatch(/missing Authorization/)
+  })
+
+  it('ships webhook presets whose templates fill from a sample payload', () => {
+    const github = WEBHOOK_PRESETS.find(preset => preset.id === 'github-issues')!
+    const payload = { action: 'opened', issue: { number: 7, title: 'Crash', body: 'It crashes', user: { login: 'ana' }, html_url: 'u' }, repository: { full_name: 'o/r' } }
+    expect(matches({ ...hook, ...github.settings }, payload)).toBe(true)
+    expect(fillTemplate(github.settings.titleTemplate, payload)).toBe('Issue #7: Crash')
+    expect(fillTemplate(github.settings.promptTemplate, payload)).toContain('opened in o/r by ana')
+  })
+})
+
+describe('Telegram formatting', () => {
+  it('converts the Markdown models write into Telegram HTML, escaping the rest', () => {
+    expect(markdownToHtml('**Bold** and `a<b>` and [link](https://x.y/?a=1&b=2)'))
+      .toBe('<b>Bold</b> and <code>a&lt;b&gt;</code> and <a href="https://x.y/?a=1&amp;b=2">link</a>')
+    expect(markdownToHtml('# Title\n- item <x>')).toBe('<b>Title</b>\n• item &lt;x&gt;')
+    expect(markdownToHtml('```ts\nconst a = 1 < 2\n```')).toBe('<pre><code class="language-ts">const a = 1 &lt; 2</code></pre>')
+  })
+
+  it('splits long answers under the limit and keeps code blocks balanced in every piece', () => {
+    const fence = '```'
+    const code = Array.from({ length: 400 }, (_, i) => `line ${i} of the code block`).join('\n')
+    const pieces = splitMarkdown(`Intro\n\n${fence}js\n${code}\n${fence}\nOutro`)
+    expect(pieces.length).toBeGreaterThan(1)
+    for (const piece of pieces) {
+      expect(piece.length).toBeLessThanOrEqual(3600)
+      expect((piece.match(/^\s*```/gm) ?? []).length % 2).toBe(0)
+      expect(markdownToHtml(piece).length).toBeLessThanOrEqual(4096)
+    }
+    expect(pieces.join('\n')).toContain('line 399 of the code block')
+    expect(pieces.at(-1)).toContain('Outro')
+  })
+
+  it('tells image types from their bytes, not their labels', () => {
+    expect(sniffImage(Uint8Array.from([0xFF, 0xD8, 0xFF, 0xE0]))).toBe('image/jpeg')
+    expect(sniffImage(Uint8Array.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]))).toBe('image/png')
+    expect(sniffImage(new TextEncoder().encode('GIF89a'))).toBe('image/gif')
+    expect(sniffImage(new TextEncoder().encode('RIFF\0\0\0\0WEBPVP8 '))).toBe('image/webp')
+    expect(sniffImage(new TextEncoder().encode('%PDF-1.7'))).toBeUndefined()
+  })
+
+  it('cuts a single overlong line', () => {
+    const pieces = splitMarkdown('x'.repeat(9000))
+    expect(pieces.length).toBe(3)
+    expect(pieces.join('')).toBe('x'.repeat(9000))
   })
 })
 

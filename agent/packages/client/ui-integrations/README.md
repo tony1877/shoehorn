@@ -10,26 +10,36 @@ kind: "package-reference"
 `dsh-client-ui-integrations` adds the **Integrations** section to Web Settings. Everything it shows and changes goes through the `integrations` Remote of [`dsh-integrations`](../../integrations/integrations/README.md).
 
 **Connected services (MCP)**
-- Each server card shows its live phase, its tools with read-only and can-delete badges, and any error.
-- Buttons: Enabled, Reconnect, Sign in / Sign out, Edit, Remove.
+- Each server card shows:
+  - its live phase, tools with read-only / may-change badges, and its error;
+  - call counts and the time of the last call;
+  - the server's recent output;
+  - Enabled, Reconnect, Sign in / Sign out, Edit and Remove.
 - Editor:
   - transport, command and arguments or URL;
-  - secrets written in place, never read back;
-  - exposure, approval mode, sign-in;
+  - write-only secrets;
+  - exposure, approval mode and sign-in;
   - per-tool checkboxes;
-  - Test, which connects once and lists the tools.
-- Presets fill the editor.
+  - Test, which shows the server's stderr on failure.
+
+**Telegram**
+- Token, folder, presets and approval handling.
+- Notifications about other chats.
+- Live bot status.
+- A pairing code with its `t.me` link, and the list of paired chats.
 
 **Webhooks**
-- Public base URL.
-- Endpoint cards with their full URL.
-- A one-time secret box on creation or rotation.
+- Presets: GitHub issues, GitHub CI failures, Home Assistant / Zapier / IFTTT, custom.
+- Auth mode (signature or token) and chat mode (new or same).
+- The public base URL, and a one-time secret box with instructions for the chosen mode.
 - The delivery log, with "Run again".
 
 **Notifications**
-- Target cards with format, events and last send status.
-- Test sends a sample message.
-- A JSON target's signing secret is shown once.
+- Targets with format, events and a minimum turn length.
+- Test.
+
+**Deep links**
+- The plugin also opens `?session=<id>` (the links in notifications) once the session list has loaded, then removes the parameter.
 
 The section polls the overview every 3 seconds while open, and reloads when an OAuth tab reports back.
 

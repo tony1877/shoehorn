@@ -8,6 +8,7 @@
  */
 
 import { randomBytes } from 'node:crypto'
+import { isAbsolute } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -27,9 +28,14 @@ import { Notifier } from './notify.ts'
 import { OAUTH_CALLBACK_PATH, OAuthSignIns } from './oauth.ts'
 import { MCP_PRESETS, SERVER_DEFAULTS } from './presets.ts'
 import { deleteSecrets, modifySecrets, readSecrets } from './secrets.ts'
-import { HOOK_PREFIX, WebhookEndpoints } from './webhooks.ts'
+import { TelegramBot } from './telegram.ts'
+import { HOOK_PREFIX, WEBHOOK_DEFAULTS, WEBHOOK_PRESETS, WebhookEndpoints } from './webhooks.ts'
 import type {
   AuthorizeServerRequest,
+  ChatIdRequest,
+  SaveTelegramRequest,
+  TelegramPairingResult,
+  TelegramSettings,
   AuthorizeServerResult,
   IdRequest,
   IntegrationsOverview,
@@ -51,7 +57,9 @@ import type {
 
 export type * from './types.ts'
 export { MCP_PRESETS } from './presets.ts'
-export { fillTemplate, matches, readPath, sign } from './webhooks.ts'
+export { authenticate, fillTemplate, matches, readPath, sign, WEBHOOK_PRESETS } from './webhooks.ts'
+export { markdownToHtml, splitMarkdown } from './telegram-api.ts'
+export { sniffImage } from './telegram.ts'
 export { formatNotification } from './notify.ts'
 export { approvalFor } from './mcp.ts'
 
@@ -65,6 +73,7 @@ export interface IntegrationsSettings {
   servers: McpServerSettings[]
   webhooks: WebhookSettings[]
   notifications: NotificationSettings[]
+  telegram: TelegramSettings
   /** Base URL webhook senders and notification links use to reach this Host. */
   publicBaseUrl: string
 }
@@ -88,7 +97,9 @@ const WebhookSchema: z<WebhookSettings> = z.object({
   id: z.string().required(),
   enabled: z.boolean().default(true),
   title: z.string().default(''),
-  signatureHeader: z.string().default('X-Signature-256'),
+  authMode: z.union(['hmac', 'token'] as const).default(WEBHOOK_DEFAULTS.authMode),
+  signatureHeader: z.string().default(WEBHOOK_DEFAULTS.signatureHeader),
+  chatMode: z.union(['new', 'same'] as const).default(WEBHOOK_DEFAULTS.chatMode),
   matchPath: z.string().default(''),
   matchValues: z.array(String).default([]),
   workspacePath: z.string().required(),
@@ -106,22 +117,43 @@ const NotificationSchema: z<NotificationSettings> = z.object({
   title: z.string().default(''),
   format: z.union(['json', 'discord', 'slack', 'ntfy'] as const).default('json'),
   events: z.array(z.union(['finished', 'approval', 'question'] as const)).default(['finished', 'approval', 'question']),
+  minTurnSeconds: z.number().min(0).max(86_400).default(20),
 }) as z<NotificationSettings>
+
+const TelegramSchema: z<TelegramSettings> = z.object({
+  enabled: z.boolean().default(false),
+  allowedChats: z.array(String).default([]),
+  workspacePath: z.string().default(''),
+  agentPreset: z.string().default('minimal-compact'),
+  permissionPreset: z.string().default('workspace-write'),
+  answerInTelegram: z.boolean().default(true),
+  notifyEvents: z.array(z.union(['finished', 'approval', 'question'] as const)).default(['approval', 'question']),
+  minTurnSeconds: z.number().min(0).max(86_400).default(20),
+}) as z<TelegramSettings>
 
 export const SettingsSchema: z<IntegrationsSettings> = z.object({
   servers: z.array(ServerSchema).default([]),
   webhooks: z.array(WebhookSchema).default([]),
   notifications: z.array(NotificationSchema).default([]),
+  telegram: TelegramSchema,
   publicBaseUrl: z.string().default(''),
 }) as z<IntegrationsSettings>
 
 /** Composition config: the deployment's starting rows, below the user's edits. */
-export type Config = Partial<IntegrationsSettings>
+export type Config = Partial<IntegrationsSettings> & {
+  /** Folder for the bot's and the webhook log's state files; default `$DSH_HOME/integrations`. */
+  stateDirectory?: string
+  /** Telegram Bot API server; default `https://api.telegram.org` (a self-hosted Bot API server also works). */
+  telegramApiBase?: string
+}
 export const Config: z<Config> = z.object({
   servers: z.array(ServerSchema),
   webhooks: z.array(WebhookSchema),
   notifications: z.array(NotificationSchema),
+  telegram: TelegramSchema,
   publicBaseUrl: z.string(),
+  stateDirectory: z.string(),
+  telegramApiBase: z.string(),
 }) as z<Config>
 
 function assertUniqueIds(kind: string, rows: ReadonlyArray<{ id: string }>): void {
@@ -176,18 +208,22 @@ export class Integrations extends TypertRemoteService {
   private readonly webhooks: WebhookEndpoints
   private readonly notifier: Notifier
   private readonly signIns: OAuthSignIns
+  private readonly telegram: TelegramBot
 
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'integrations')
-    this.composed = SettingsSchema(config as IntegrationsSettings)
+    const { stateDirectory, telegramApiBase, ...base } = config
+    this.composed = SettingsSchema(base as IntegrationsSettings)
     validate(this.composed)
     this.mcp = new McpManager(ctx)
-    this.webhooks = new WebhookEndpoints(ctx)
+    this.webhooks = new WebhookEndpoints(ctx, stateDirectory)
     this.notifier = new Notifier(ctx)
     this.signIns = new OAuthSignIns(ctx)
+    this.telegram = new TelegramBot(ctx, chatId => this.pairTelegramChat(chatId), stateDirectory, telegramApiBase)
+    ctx.effect(() => this.notifier.addSink(message => this.telegram.notify(message)), 'integrations.telegram.notify')
 
     ctx.inject(['settings'], (settingsCtx) => {
-      const scope = settingsCtx.settings.register(NAMESPACE, SettingsSchema, { base: config as IntegrationsSettings, validate })
+      const scope = settingsCtx.settings.register(NAMESPACE, SettingsSchema, { base: base as IntegrationsSettings, validate })
       this.scope = scope
       settingsCtx.effect(() => scope.watch(next => this.applyAll(next)), 'integrations.settings.watch')
       settingsCtx.effect(() => () => {
@@ -206,6 +242,7 @@ export class Integrations extends TypertRemoteService {
 
     ctx.inject(['webServer', 'agents', 'agentDefaultModel', 'agentPresets', 'permissionPresets', 'sessionTitle', 'workspaceRegistry'], (hookCtx) => {
       this.webhooks.mount(hookCtx)
+      this.telegram.mount(hookCtx)
     })
   }
 
@@ -220,7 +257,14 @@ export class Integrations extends TypertRemoteService {
   private async applyAll(value: IntegrationsSettings): Promise<void> {
     this.webhooks.apply(value.webhooks)
     this.notifier.apply(value.notifications, value.publicBaseUrl)
+    await this.telegram.apply(value.telegram)
     await this.mcp.apply(value.servers)
+  }
+
+  private async pairTelegramChat(chatId: string): Promise<void> {
+    const telegram = this.value.telegram
+    if (telegram.allowedChats.includes(chatId)) return
+    await this.write({ ...this.value, telegram: { ...telegram, allowedChats: [...telegram.allowedChats, chatId] } })
   }
 
   private async write(next: IntegrationsSettings): Promise<void> {
@@ -253,7 +297,7 @@ export class Integrations extends TypertRemoteService {
   @Remote('overview')
   async overview(): Promise<IntegrationsOverview> {
     const value = this.value
-    const servers = await Promise.all(value.servers.map(async settings => serverView(settings, await readSecrets(this.ctx, 'mcp', settings.id))))
+    const servers = await Promise.all(value.servers.map(async settings => serverView(settings, await readSecrets(this.ctx, 'mcp', settings.id), this.mcp.statsOf(settings.id))))
     const webhooks: WebhookView[] = await Promise.all(value.webhooks.map(async settings => ({
       settings,
       path: `${HOOK_PREFIX}${settings.id}`,
@@ -273,12 +317,21 @@ export class Integrations extends TypertRemoteService {
         ...status === undefined ? {} : status,
       }
     }))
+    const bot = this.telegram.view()
     return {
       servers,
       presets: [...MCP_PRESETS],
       webhooks,
+      webhookPresets: [...WEBHOOK_PRESETS],
       deliveries: this.webhooks.deliveries(),
       notifications,
+      telegram: {
+        settings: value.telegram,
+        tokenSet: (await readSecrets(this.ctx, 'channel', 'telegram')).secret !== undefined,
+        status: bot.status,
+        chats: bot.chats,
+        ...bot.pairing === undefined ? {} : { pairing: bot.pairing },
+      },
       publicBaseUrl: value.publicBaseUrl,
     }
   }
@@ -356,6 +409,7 @@ export class Integrations extends TypertRemoteService {
   async removeWebhook(request: IdRequest): Promise<void> {
     await this.write({ ...this.value, webhooks: this.value.webhooks.filter(row => row.id !== request.id) })
     await deleteSecrets(this.ctx, 'hook', request.id)
+    await this.webhooks.forget(request.id)
   }
 
   /** Replace one endpoint's secret; the new one is returned once. */
@@ -399,6 +453,39 @@ export class Integrations extends TypertRemoteService {
   @Remote('testNotification')
   async testNotification(request: IdRequest): Promise<TestNotificationResult> {
     return this.notifier.test(request.id)
+  }
+
+  /** Save the Telegram bot's settings and, optionally, its token. */
+  @Remote('saveTelegram')
+  async saveTelegram(request: SaveTelegramRequest): Promise<void> {
+    const settings = TelegramSchema(request.settings)
+    if (settings.workspacePath.trim() !== '' && !isAbsolute(settings.workspacePath)) {
+      throw new Error('the Telegram chat folder must be an absolute path')
+    }
+    if (request.token !== undefined) {
+      const token = request.token === null ? null : request.token.trim()
+      if (token !== null && !/^\d+:[\w-]{30,}$/.test(token)) {
+        throw new Error('that does not look like a bot token from @BotFather (digits, a colon, then a long code)')
+      }
+      await this.telegram.setToken(token)
+    }
+    const previous = this.value.telegram.allowedChats
+    await this.write({ ...this.value, telegram: settings })
+    for (const chatId of previous) if (!settings.allowedChats.includes(chatId)) await this.telegram.forgetChat(chatId)
+  }
+
+  /** A one-time code that pairs the Telegram chat it is sent from. */
+  @Remote('telegramPairingCode')
+  async telegramPairingCode(): Promise<TelegramPairingResult> {
+    return this.telegram.newPairingCode()
+  }
+
+  /** Unpair one Telegram chat. */
+  @Remote('removeTelegramChat')
+  async removeTelegramChat(request: ChatIdRequest): Promise<void> {
+    const telegram = this.value.telegram
+    await this.write({ ...this.value, telegram: { ...telegram, allowedChats: telegram.allowedChats.filter(id => id !== request.chatId) } })
+    await this.telegram.forgetChat(request.chatId)
   }
 
   /** Set the base URL senders and links use. */

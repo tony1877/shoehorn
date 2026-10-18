@@ -32,6 +32,8 @@ export interface NotificationMessage {
   text: string
   /** Link that opens the chat, when the public base URL is known. */
   link?: string
+  /** How long the finished turn ran (seconds); only on `finished`. */
+  turnSeconds?: number
 }
 
 /** Format one message for a target. */
@@ -83,11 +85,23 @@ export class Notifier {
   private targets: readonly NotificationSettings[] = []
   private readonly status = new Map<string, { lastStatus: string; lastSentAt: number }>()
   private publicBaseUrl = ''
+  /** session id -> when its current turn started */
+  private readonly turnStarted = new Map<string, number>()
+  /** Extra receivers (the Telegram bot), each deciding for itself what to send. */
+  private readonly sinks = new Set<(message: NotificationMessage) => Promise<void>>()
 
   constructor(private readonly ctx: Context) {
     ctx.on('agent/status', ({ agent, status }) => {
-      if (status !== 'idle' || !this.topLevel(agent)) return
-      this.emit({ event: 'finished', ...this.describe(agent), text: excerpt(agent) })
+      if (!this.topLevel(agent)) return
+      const sessionId = String(agent.session.id)
+      if (status === 'running') {
+        this.turnStarted.set(sessionId, Date.now())
+        return
+      }
+      const started = this.turnStarted.get(sessionId)
+      this.turnStarted.delete(sessionId)
+      const turnSeconds = started === undefined ? 0 : Math.round((Date.now() - started) / 1000)
+      this.emit({ event: 'finished', ...this.describe(agent), text: excerpt(agent), turnSeconds })
     })
     ctx.on('approval/request', async (request, next) => {
       if (request.agent !== undefined && this.topLevel(request.agent)) {
@@ -101,6 +115,15 @@ export class Notifier {
       }
       return next()
     })
+  }
+
+  /**
+   * Add a receiver for every notification.
+   * @returns its disposer.
+   */
+  addSink(sink: (message: NotificationMessage) => Promise<void>): () => void {
+    this.sinks.add(sink)
+    return () => void this.sinks.delete(sink)
   }
 
   apply(targets: readonly NotificationSettings[], publicBaseUrl: string): void {
@@ -136,12 +159,19 @@ export class Notifier {
     const sessionId = String(agent.session.id)
     const title = this.ctx.get('sessionTitle')?.get(agent.session)?.title ?? 'Untitled chat'
     const base = this.publicBaseUrl.replace(/\/+$/, '')
+    // The web client opens `?session=<id>` (ui-integrations reads it on load).
     return { sessionId, title, ...base === '' ? {} : { link: `${base}/?session=${encodeURIComponent(sessionId)}` } }
   }
 
   private emit(message: NotificationMessage): void {
+    for (const sink of this.sinks) {
+      void sink(message).catch((error: unknown) => {
+        this.ctx.logger.warn(`integrations: notification sink failed: ${error instanceof Error ? error.message : String(error)}`)
+      })
+    }
     for (const target of this.targets) {
       if (!target.enabled || !target.events.includes(message.event)) continue
+      if (message.event === 'finished' && (message.turnSeconds ?? 0) < target.minTurnSeconds) continue
       void this.send(target, message, ATTEMPTS).catch((error: unknown) => {
         this.ctx.logger.warn(`integrations: notification to ${target.id} failed: ${error instanceof Error ? error.message : String(error)}`)
       })
