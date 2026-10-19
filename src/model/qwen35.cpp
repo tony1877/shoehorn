@@ -1647,6 +1647,19 @@ bool Qwen35::load_residual(const std::string & path, std::string & err) {
         if (!base || std::string(ggml_get_name(m)).rfind("blk." + std::to_string(hp_.n_layer) + ".", 0) == 0) {
             continue;  // MTP tensors: drafting uses the base alone
         }
+        // E8_RES_SKIP=prefix[,prefix...] (measurements): tensors whose name starts with a prefix keep the base alone,
+        // e.g. "blk.5." for one layer's KLD share
+        if (const char * skip = std::getenv("E8_RES_SKIP")) {
+            bool        hit = false;
+            std::string s(skip), name(ggml_get_name(m));
+            for (size_t a = 0; a <= s.size() && !hit;) {
+                size_t b = s.find(',', a);
+                if (b == std::string::npos) b = s.size();
+                if (b > a && name.rfind(s.substr(a, b - a), 0) == 0) hit = true;
+                a = b + 1;
+            }
+            if (hit) continue;
+        }
         if (!ggml_are_same_shape(base, m)) {
             err = std::string("residual shape mismatch for ") + ggml_get_name(m);
             return false;
