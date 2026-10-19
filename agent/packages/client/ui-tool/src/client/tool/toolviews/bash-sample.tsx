@@ -21,6 +21,7 @@ import { formatToolBody, toolRowModel, type ToolRowState } from '../models/tool-
 import { CONVERSATION_NS as NS } from '../../locale.ts'
 import { ExitCodeBadge } from '../components/ExitCodeBadge.tsx'
 import css from './bash-sample.module.css'
+import { LivePreview } from './live-preview.tsx'
 
 type BashRowProps = ToolCallViewProps & PropsLocale<'conversation'>
 
@@ -39,7 +40,8 @@ function stateStatus(state: ToolRowState, t: BashRowProps['t']): string | null {
 
 /**
  * Render expandable Bash output with an accessible lifecycle label. While the
- * call is preparing the row shows the description streamed so far and cannot expand.
+ * call is preparing the row shows the description streamed so far and cannot expand; under it, the command itself
+ * as the model writes it (shoehorn).
  * @param props - tool call, Session sources, locale, and inspection callback.
  * @returns the Bash output row.
  */
@@ -121,6 +123,7 @@ export const BashRow = memo(function BashRow({ toolName, block, sessionId, useSe
           {exitLabel !== null && <ExitCodeBadge label={exitLabel} />}
         </TextShimmer>
       </div>
+      {state === 'preparing' && <LivePreview text={block.args.text('command')} label={t('row.commandArguments')} />}
       {open && (
         <div className={css.bodyWrap}>
           {terminal !== null

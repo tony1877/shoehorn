@@ -17,6 +17,7 @@ import { DetailsRow } from '../src/client/tool/toolviews/details-row.tsx'
 import { TodoRow } from '../src/client/tool/toolviews/todo-row.tsx'
 import { AskQuestionRow } from '../src/client/tool/toolviews/ask-question-row.tsx'
 import { BashRow } from '../src/client/tool/toolviews/bash-sample.tsx'
+import { LivePreview } from '../src/client/tool/toolviews/live-preview.tsx'
 import { parsedToolCall } from '../src/client/tool/models/raw-tool-call.ts'
 import { toolRowModel } from '../src/client/tool/models/tool-call-model.ts'
 
@@ -174,7 +175,8 @@ describe('tool preparation', () => {
     const view = render(<FileMutationRow {...props} />)
     expect(view.getByText('1KB')).toBeTruthy()
     args.append('b'.repeat(424))
-    expect(args.refresh()).toBe(false)
+    // shoehorn: the live preview reads the streamed text, so every append refreshes while preparing
+    expect(args.refresh()).toBe(true)
     args.append('b')
     expect(args.refresh()).toBe(true)
     view.rerender(<FileMutationRow {...props} block={{ ...props.block }} />)
@@ -188,5 +190,43 @@ describe('tool preparation', () => {
     expect(view.container.querySelector('[data-state="preparing"]')).not.toBeNull()
     expect(view.getByText('List files')).toBeTruthy()
     expect(view.queryByRole('button')).toBeNull()
+  })
+})
+
+describe('streamed argument preview (shoehorn)', () => {
+  it.each([['write', 'content'], ['edit', 'new_string']])('%s shows the %s being written', (name, field) => {
+    const args = new PartialArguments()
+    args.append(`{"file_path":"menu.md","${field}":"# Menu\\nCoffee 2.50\\nTea`)
+    const view = render(<FileMutationRow {...preparation(name, args)} />)
+    const preview = view.container.querySelector('[data-live-preview]')
+    expect(preview?.textContent).toBe('# Menu\nCoffee 2.50\nTea')
+  })
+
+  it('bash shows the command being written and follows its end', () => {
+    const args = new PartialArguments()
+    const lines = Array.from({ length: 30 }, (_, i) => `echo ${i + 1}`)
+    args.append(`{"command":"${lines.join('\\n')}`)
+    const view = render(<BashRow {...preparation('bash', args)} sessionId={"s" as never} useSessions={((pick: (list: { byId: Record<string, { cwd: string }> }) => unknown) => pick({ byId: {} })) as never} />)
+    const preview = view.container.querySelector('[data-live-preview]')
+    expect(preview?.textContent?.split('\n')).toEqual(lines.slice(-12))
+  })
+
+  it('renders nothing before any argument text arrives', () => {
+    const view = render(<FileMutationRow {...preparation('write')} />)
+    expect(view.container.querySelector('[data-live-preview]')).toBeNull()
+  })
+})
+
+describe('streamed command preview in the generic card (shoehorn)', () => {
+  it('pwsh shows the command being written', () => {
+    const args = new PartialArguments()
+    args.append('{"command":"Get-ChildItem\\nWrite-Output done')
+    const view = render(<GenericToolCard {...preparation('pwsh', args)} />)
+    expect(view.container.querySelector('[data-live-preview]')?.textContent).toBe('Get-ChildItem\nWrite-Output done')
+  })
+
+  it('renders nothing for a missing or blank value', () => {
+    expect(render(<LivePreview text={undefined} label="x" />).container.firstChild).toBeNull()
+    expect(render(<LivePreview text={'  \n '} label="x" />).container.firstChild).toBeNull()
   })
 })

@@ -1,0 +1,19 @@
+/* shoehorn: streamed tool-argument preview under a preparing row (shell command, file content). Same indent and
+   hairline as the expanded terminal card. The component keeps only the last 12 lines, so the box needs no scrolling;
+   wrapped long lines are clipped at the top. */
+.preview {
+  margin: 4px 0 4px 4px;
+  padding: 6px 10px;
+  max-height: 228px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  border: 0.5px solid var(--dsw-alias-border-l1);
+  border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-bg-l1, transparent);
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-markdown-code-block-small);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

@@ -6,6 +6,7 @@ import { diffCardModel } from '../models/diff-card-model.ts'
 import { toolRowModel } from '../models/tool-call-model.ts'
 import { ToolRow } from '../components/ToolRow.tsx'
 import { CONVERSATION_NS as NS } from '../../locale.ts'
+import { LivePreview } from './live-preview.tsx'
 
 type FileMutationRowProps = ToolCallViewProps & PropsLocale<'conversation'>
 const FILE_MUTATION_ICON = <IconEditOutlineRegular size={14} />
@@ -28,31 +29,38 @@ function contentKilobytes(block: FileMutationRowProps['block']): number | null {
 
 /**
  * Shows the path and decoded input size through preparation, execution, and
- * settlement, with the applied diff available once the call settles.
+ * settlement, with the applied diff available once the call settles. While the call is preparing, the content
+ * being written (write) or the replacement text (edit) streams under the row (shoehorn).
  */
 export function FileMutationRow({ toolName, block, cwd, home, openFile, inspect, useDisclosure, t }: FileMutationRowProps) {
   const model = toolRowModel(toolName, block, cwd, home)
   const diff = diffCardModel(block)
   const kilobytes = contentKilobytes(block)
   const size = kilobytes === null ? null : t('tool.preparing.content', { kilobytes })
+  const streaming = model.state === 'preparing'
+    ? block.args.text('content') ?? block.args.text('new_string')
+    : undefined
   return (
-    <ToolRow
-      useDisclosure={useDisclosure}
-      t={t}
-      variant={model.variant}
-      toolName={toolName}
-      icon={FILE_MUTATION_ICON}
-      title={t(model.titleKey)}
-      summary={model.summary}
-      summarySuffix={size !== null && model.summary !== '' ? size : undefined}
-      output={model.output}
-      errorSummary={model.errorSummary}
-      diff={diff}
-      state={model.state}
-      filePath={model.filePath}
-      onOpenFile={openFile}
-      inspect={inspect}
-    />
+    <>
+      <ToolRow
+        useDisclosure={useDisclosure}
+        t={t}
+        variant={model.variant}
+        toolName={toolName}
+        icon={FILE_MUTATION_ICON}
+        title={t(model.titleKey)}
+        summary={model.summary}
+        summarySuffix={size !== null && model.summary !== '' ? size : undefined}
+        output={model.output}
+        errorSummary={model.errorSummary}
+        diff={diff}
+        state={model.state}
+        filePath={model.filePath}
+        onOpenFile={openFile}
+        inspect={inspect}
+      />
+      {streaming !== undefined && <LivePreview text={streaming} label={t(model.titleKey)} />}
+    </>
   )
 }
 

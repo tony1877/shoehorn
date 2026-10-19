@@ -12,6 +12,7 @@ import { webCardModel } from '../models/web-card-model.ts'
 import { toolRowModel, type ToolRowVariant } from '../models/tool-call-model.ts'
 import { localizeAutoReviewDenial } from '../models/auto-review-denial.ts'
 import { ToolRow } from '../components/ToolRow.tsx'
+import { LivePreview } from './live-preview.tsx'
 
 /** Variant leading icons (figma table); all glyphs render at 14 inside the 16px leading box. */
 const VARIANT_ICONS: Record<ToolRowVariant, ReactNode> = {
@@ -46,30 +47,35 @@ export function GenericToolCard({ toolName, block, cwd, home, openFile, inspect,
     ? 'error'
     : model.state
   const singleFile = model.filePath !== undefined
+  // shoehorn: a shell command (pwsh and other keyless shells) streams under the row while the model writes it
+  const streaming = state === 'preparing' ? block.args.text('command') : undefined
   return (
-    <ToolRow
-      useDisclosure={useDisclosure}
-      t={t}
-      variant={model.variant}
-      toolName={toolName}
-      icon={VARIANT_ICONS[model.variant]}
-      title={t(model.titleKey)}
-      summary={model.summary}
-      // Single-file tools never expose an args body — the path link is the only
-      // args interaction. A card is not an args body: a read/write/edit row is
-      // single-file AND carries a card, so the card expands under the path link.
-      bodyRaw={singleFile || autoReview !== null ? null : model.bodyRaw}
-      output={autoReview?.output ?? model.output}
-      errorSummary={autoReview?.summary ?? model.errorSummary}
-      terminal={terminal}
-      diff={diff}
-      read={read}
-      search={search}
-      web={web}
-      state={state}
-      filePath={model.filePath}
-      onOpenFile={singleFile ? openFile : undefined}
-      inspect={inspect}
-    />
+    <>
+      <ToolRow
+        useDisclosure={useDisclosure}
+        t={t}
+        variant={model.variant}
+        toolName={toolName}
+        icon={VARIANT_ICONS[model.variant]}
+        title={t(model.titleKey)}
+        summary={model.summary}
+        // Single-file tools never expose an args body — the path link is the only
+        // args interaction. A card is not an args body: a read/write/edit row is
+        // single-file AND carries a card, so the card expands under the path link.
+        bodyRaw={singleFile || autoReview !== null ? null : model.bodyRaw}
+        output={autoReview?.output ?? model.output}
+        errorSummary={autoReview?.summary ?? model.errorSummary}
+        terminal={terminal}
+        diff={diff}
+        read={read}
+        search={search}
+        web={web}
+        state={state}
+        filePath={model.filePath}
+        onOpenFile={singleFile ? openFile : undefined}
+        inspect={inspect}
+      />
+      {streaming !== undefined && <LivePreview text={streaming} label={t(model.titleKey)} />}
+    </>
   )
 }
