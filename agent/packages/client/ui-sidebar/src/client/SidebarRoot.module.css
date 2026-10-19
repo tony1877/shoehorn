@@ -380,13 +380,11 @@
   display: inline-flex;
   align-items: center;
   height: 10px;
-  padding: 0 3px;
-  border-radius: 2px;
-  color: var(--dsw-alias-label-primary-inverted);
-  background: var(--dsw-alias-label-primary);
+  /* shoehorn: plain muted text; the 6px inverted pill was unreadable. */
+  color: var(--dsw-alias-label-tertiary);
   font-family: var(--ds-font-family-code);
-  font-size: 6px;
-  font-weight: 500;
+  font-size: 9px;
+  font-weight: 400;
   line-height: 10px;
   white-space: nowrap;
 }

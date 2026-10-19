@@ -56,7 +56,7 @@ describe('elevation tokens', () => {
     }
   })
 
-  it('defines the translucent menu material for both palettes', () => {
+  it('defines the near-opaque menu material for both palettes', () => {
     expect(bodyOnly.get('--dsw-mask-blur')).toBe('none')
     expect(bodyOnly.get('--dsw-menu-backdrop-filter')).toBe('blur(40px) saturate(150%)')
     const platformRules = parseRules(platformCss)
@@ -64,8 +64,8 @@ describe('elevation tokens', () => {
       .filter(rule => rule.selectors.includes(selector))
       .flatMap(rule => rule.declarations)
       .findLast(([property]) => property === token)?.[1]
-    expect(value('body')).toBe('rgba(248, 249, 250, 0.58)')
-    expect(value('body[data-ds-dark-theme]')).toBe('rgba(67, 69, 74, 0.45)')
+    expect(value('body')).toBe('rgba(248, 249, 250, 0.94)')
+    expect(value('body[data-ds-dark-theme]')).toBe('rgba(48, 49, 54, 0.94)')
     expect(value('body', '--dsw-specific-menu')).toBe('var(--dsw-menu-surface-fill)')
     expect(value("html[data-platform='darwin'] body", '--dsw-specific-menu')).toBe('rgba(248, 249, 250, 0.94)')
     expect(value("html[data-platform='darwin'] body[data-ds-dark-theme]", '--dsw-specific-menu')).toBe('rgba(48, 49, 54, 0.94)')
