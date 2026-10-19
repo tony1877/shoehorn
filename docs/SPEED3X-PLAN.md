@@ -109,6 +109,16 @@ guard that stops a run above 15.8 GB.
   What overlap would need to pay: drafting that does not slow the verify (the shadow's GPU work competes with the
   residual matmuls the weight-prefetch patch runs on the GPU), and pre-drafts that survive a partial accept (draft
   from several likely rejection points, as ShadowSpec does with trees).
+- **Overlap with the cycle kept long (`E8_PIPE_MIN=64`, greedy) [M]:** docs 60.5 vs 66.6 tok/s sequential, Webex
+  task 53.1 vs 55.1, code 32.3 vs 30.4. Cycles stay long (35 vs 29.5 tokens on docs) but the verify still runs at
+  306-321 ms instead of ~260.
+- **Overlap with CUDA stream priorities (verify streams highest, shadow lowest; experimental ggml-cuda change,
+  reverted) [M]:** docs 60.3 vs 66.2, Webex task 53.1 vs 59.1; the verify went 308 -> 290 ms on docs, still well
+  above sequential. **The machine hard-reset (Kernel-Power 41, no driver or WHEA event) during the next run (code
+  prompt, overlap + priorities).** Cause not established; the change was reverted and not committed, and concurrent
+  shadow drafting should not be run on this box again without finding out why.
+  Conclusion: the overlap as designed does not pay on this hardware; contention on the verify is not removed by
+  priorities.
 - **Item 4, drafter: DFlash2 (stock, 2B, Q8_0) fails on this model.** No small Qwen3.8 exists (the family is 27B,
   Flash-Next, 2.4T). DFlash2 (z-lab / Inco AI, trained for Qwen3.8-27B, reads target layers 5/19/33/47/61) was run in
   llama.cpp PR #27342 (`E:\shoehorn\llama-dflash`) against `orca27b.base.gguf` (the 4-bit base, i.e. the level it
