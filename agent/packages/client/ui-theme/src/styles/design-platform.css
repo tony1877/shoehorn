@@ -337,9 +337,7 @@ body[data-ds-dark-theme] {
   --dsw-alias-label-primary-dimmed: var(--dsw-static-neutral-bluish-100);
   --dsw-alias-label-primary-foreground: var(--dsw-static-neutral-bluish-1000);
   --dsw-alias-label-primary-inverted: var(--dsw-static-neutral-bluish-800);
-  /* shoehorn: off-white instead of bluish-50 (#f9fafb); near-white thin text
-     on the near-black base halates and reads as glowing. */
-  --dsw-alias-label-primary: rgb(226, 229, 233);
+  --dsw-alias-label-primary: var(--dsw-static-neutral-bluish-50);  /* shoehorn: overridden by soft dark below */
   --dsw-alias-label-secondary: var(--dsw-static-neutral-bluish-300);
   --dsw-alias-label-shimmer: color-mix(in srgb, var(--dsw-static-neutral-00) 45%, transparent);
   --dsw-alias-label-tertiary: var(--dsw-static-neutral-bluish-400);
@@ -408,4 +406,19 @@ html[data-platform='darwin'] body {
 
 html[data-platform='darwin'] body[data-ds-dark-theme] {
   --dsw-specific-menu: rgba(48, 49, 54, 0.94);
+}
+
+/* shoehorn: soft dark. The stock dark theme pairs a near-black base (#151517) with near-white text; that much
+   contrast tires the eyes over long sessions. In the dark theme only, the dark rungs of the neutral ladder are lifted
+   to charcoal (every alias keeps its rung, so elevation and scrollbar rules still hold) and the labels are grey:
+   about 11:1 contrast for body text, well above WCAG AA's 4.5:1, without the glare. */
+body[data-ds-dark-theme] {
+  --dsw-static-neutral-bluish-950: rgb(31, 32, 35);
+  --dsw-static-neutral-bluish-900: rgb(26, 27, 30);
+  --dsw-static-neutral-bluish-875: rgb(38, 39, 43);
+  --dsw-static-neutral-bluish-850: rgb(45, 46, 50);
+  --dsw-static-neutral-bluish-800: rgb(56, 57, 61);
+  --dsw-alias-label-primary: rgb(212, 214, 218);
+  --dsw-alias-label-secondary: rgb(183, 187, 193);
+  --dsw-alias-label-tertiary: rgb(146, 151, 158);
 }
