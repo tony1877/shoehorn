@@ -1,10 +1,17 @@
 /**
- * Live state of the local shoehorn server, polled from its /stats endpoint once a second while anything is
+ * Live state of the shoehorn server (local or configured), polled from its /stats endpoint once a second while anything is
  * subscribed, plus whether the dashboard overlay is open. Plain external stores for useSyncExternalStore.
  */
 
-/** Where shoehorn serves its stats and dashboard: port 8090 on the machine that served this page (also over the LAN). */
-export const SHOEHORN_URL = `http://${typeof location !== 'undefined' && location.hostname ? location.hostname : '127.0.0.1'}:8090`
+import { CONFIG_GLOBAL, shoehornBaseUrl } from '../config.ts'
+
+/**
+ * Where shoehorn serves its stats and dashboard: the host-configured URL (shoehorn on a dedicated machine), else
+ * port 8090 on the machine that served this page (also over the LAN).
+ */
+export const SHOEHORN_URL = shoehornBaseUrl(
+  ((globalThis as Record<string, unknown>)[CONFIG_GLOBAL] as { url?: unknown } | undefined)?.url,
+) || `http://${typeof location !== 'undefined' && location.hostname ? location.hostname : '127.0.0.1'}:8090`
 
 /** What the chip and the footer button show. */
 export interface ShoehornState {

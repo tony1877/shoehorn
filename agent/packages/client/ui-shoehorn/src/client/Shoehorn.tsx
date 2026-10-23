@@ -47,7 +47,7 @@ function Mark({ size = 14 }: { size?: number }) {
 }
 
 function describe(s: ShoehornState): { tone: string; text: string; title: string } {
-  if (!s.up) return { tone: css.off, text: 'shoehorn offline', title: 'The local server is not answering on port 8090.' }
+  if (!s.up) return { tone: css.off, text: 'shoehorn offline', title: `shoehorn is not answering at ${SHOEHORN_URL}.` }
   if (s.writing) {
     return { tone: css.writing, text: `${s.rate != null ? Math.round(s.rate) : '...'} tok/s`, title: `Writing: ${s.gen} tokens so far` }
   }

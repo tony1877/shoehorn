@@ -1,6 +1,6 @@
 /**
  * shoehorn in the Web client: a live status chip in every session header, a sidebar footer button, and the
- * shoehorn dashboard as a frame-wide overlay. Data comes straight from the local server's /stats.
+ * shoehorn dashboard as a frame-wide overlay. Data comes straight from the shoehorn server's /stats (local, or the configured address).
  */
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
