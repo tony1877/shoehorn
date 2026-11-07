@@ -1285,8 +1285,7 @@ loaded:
         std::vector<uint8_t>().swap(b.parked);
         b.parked_owner = nullptr;
         S.active_slot  = slot;
-        fprintf(stderr, "slot %d: state swapped in (%d tokens) in %.0f ms
-", slot, m.n_past(),
+        fprintf(stderr, "slot %d: state swapped in (%d tokens) in %.0f ms\n", slot, m.n_past(),
                 1e3 * std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
     }
     std::optional<DraftLane> dlane;
