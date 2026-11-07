@@ -84,6 +84,7 @@
 #include <random>
 #include <sstream>
 #include <thread>
+#include <unordered_map>
 
 namespace e8::cli {
 
@@ -2072,11 +2073,46 @@ loaded:
             std::vector<int32_t> dr, toks;
             long long            cycles = 0, proposed = 0, accepted = 0;
             double               t_draft = 0, t_verify = 0;
+            long long            e_cycles = 0, e_proposed = 0, e_accepted = 0;
             using sclk = std::chrono::steady_clock;
-            while (!done && m.n_past() + mtp_k + 2 < m.n_ctx()) {
+            static const int echo_n = std::getenv("E8_FLASH_ECHO_N") ? std::atoi(std::getenv("E8_FLASH_ECHO_N")) : 6;
+            const int        echo_k = q4->mtp_max_batch() - 1;
+            auto tok_at = [&](int i) { return i < (int) prompt.size() ? prompt[(size_t) i] : out[(size_t) i - prompt.size()]; };
+            auto key_at = [&](int i) {  // FNV-1a over echo_n tokens from i
+                uint64_t k = 1469598103934665603ull;
+                for (int j = 0; j < echo_n; j++) k = (k ^ (uint32_t) tok_at(i + j)) * 1099511628211ull;
+                return k;
+            };
+            std::unordered_map<uint64_t, int> seen;  // echo_n-gram -> position after its latest occurrence
+            int                               seen_upto = echo_n;
+            auto index_upto = [&]() {  // index every n-gram ending before the last position
+                const int h = (int) (prompt.size() + out.size());
+                for (; seen_upto < h; seen_upto++) seen[key_at(seen_upto - echo_n)] = seen_upto;
+            };
+            while (!done && m.n_past() + echo_k + 2 < m.n_ctx()) {
                 if (!yield()) return false;
                 const auto a = sclk::now();
-                if (!q4->mtp_draft(out.back(), mtp_k, dr, err)) return false;
+                // echo (prompt lookup): when the last echo_n tokens occurred earlier in the prompt or the output, propose
+                // what followed them there (agents re-emit file contents, code and arguments); otherwise the MTP block
+                bool echo = false;
+                if (echo_n > 0) {
+                    index_upto();
+                    const int h = (int) (prompt.size() + out.size());
+                    if (h > echo_n) {
+                        const auto it = seen.find(key_at(h - echo_n));
+                        if (it != seen.end() && it->second < h) {
+                            const int e = it->second;
+                            bool      same = true;
+                            for (int i = 0; i < echo_n && same; i++) same = tok_at(e - echo_n + i) == tok_at(h - echo_n + i);
+                            if (same) {
+                                dr.clear();
+                                for (int i = e; i < h && (int) dr.size() < echo_k; i++) dr.push_back(tok_at(i));
+                                echo = (int) dr.size() > mtp_k;
+                            }
+                        }
+                    }
+                }
+                if (!echo && !q4->mtp_draft(out.back(), mtp_k, dr, err)) return false;
                 const auto b = sclk::now();
                 toks.assign(1, out.back());
                 toks.insert(toks.end(), dr.begin(), dr.end());
@@ -2096,15 +2132,21 @@ loaded:
                 cycles++;
                 proposed += (long long) dr.size();
                 accepted += keep - 1;
+                if (echo) {
+                    e_cycles++;
+                    e_proposed += (long long) dr.size();
+                    e_accepted += keep - 1;
+                }
             }
             while (!done && m.n_past() + 2 < m.n_ctx()) {  // the last few positions of the context
                 if (!yield() || !m.eval_last(&out.back(), 1, last.data(), err)) return false;
                 next();
                 consume();
             }
-            char b[200];
-            snprintf(b, sizeof b, "MTP: %lld cycles, %.2f tokens/cycle, drafts kept %lld/%lld, draft %.0f / verify %.0f ms per cycle",
-                     cycles, cycles ? (double) (accepted + cycles) / cycles : 0.0, accepted, proposed,
+            char b[300];
+            snprintf(b, sizeof b,
+                     "MTP: %lld cycles, %.2f tokens/cycle, drafts kept %lld/%lld (echo %lld cycles, kept %lld/%lld), draft %.0f / verify %.0f ms per cycle",
+                     cycles, cycles ? (double) (accepted + cycles) / cycles : 0.0, accepted, proposed, e_cycles, e_accepted, e_proposed,
                      cycles ? 1e3 * t_draft / cycles : 0.0, cycles ? 1e3 * t_verify / cycles : 0.0);
             R.spec = b;
         } else {
