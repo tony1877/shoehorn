@@ -36,6 +36,15 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
+/** Lines of a pruned middle worth keeping: errors, failures and test/build verdicts. */
+const SIGNAL = /error|fail|✗|exception|fatal|denied|not found|exit code|traceback|assert|panic|warning|passed|\bok\b/i
+
+/** Introduces the kept lines right after the prune marker. */
+const SIGNAL_HEADER = '[lines kept from the pruned middle: errors and results]\n'
+
+/** Longest kept middle line. */
+const SIGNAL_LINE_MAX = 240
+
 /** Limits for one pruning pass; without any, every over-budget result already answered is pruned. */
 export interface PruneOptions {
   /** Leave tool results within this many estimated tokens of the end of the surface untouched. */
@@ -143,12 +152,45 @@ export class ToolResultPruner extends Service {
 
     /* v8 ignore next -- totalChars > threshold and valid budgets guarantee a removed text span. */
     if (!markerInserted) throw new Error('tool-result prune: failed to locate the removed text span')
+    this.keepSignalLines(blocks, pruned, removedStart, removedEnd)
     const charsAfter = this.measureContent(pruned)
     /* v8 ignore next -- config validation fixes the emitted head + marker + tail budget. */
     if (charsAfter > this.config.thresholdChars || charsAfter >= totalChars) {
       throw new Error('tool-result prune: replacement must be smaller and within threshold')
     }
     return pruned
+  }
+
+  /**
+   * Put the removed middle's error and verdict lines (a failed assertion, a compiler error, `N passed`) after the
+   * prune marker, as many as fit in the room the threshold leaves, so a build or test log pruned by head and tail
+   * keeps what it said. Rewrites the marker-bearing block of `pruned` in place.
+   * @param blocks - the original content.
+   * @param pruned - the head/marker/tail content built from it.
+   * @param removedStart - first removed code point (over all text blocks).
+   * @param removedEnd - end of the removed span.
+   */
+  private keepSignalLines(blocks: readonly ContentBlock[], pruned: ContentBlock[], removedStart: number, removedEnd: number): void {
+    const room = this.config.thresholdChars - this.measureContent(pruned) - SIGNAL_HEADER.length - 2
+    if (room < 80 || process.env.DSH_HARNESS_BOOST === '0') return
+    const all = Array.from(blocks.filter(block => block.type === 'text').map(block => block.text).join(''))
+    const middle = all.slice(removedStart, removedEnd).join('').split('\n').slice(1, -1)
+    const kept: string[] = []
+    let used = 0
+    for (const line of middle) {
+      if (!SIGNAL.test(line)) continue
+      const clipped = codePointLength(line) > SIGNAL_LINE_MAX ? `${Array.from(line).slice(0, SIGNAL_LINE_MAX).join('')}…` : line
+      const cost = codePointLength(clipped) + 1
+      if (used + cost > room) break
+      kept.push(clipped)
+      used += cost
+    }
+    if (kept.length === 0) return
+    const index = pruned.findIndex(block => block.type === 'text' && block.text.includes(PRUNE_MARKER))
+    /* v8 ignore next -- pruneContent inserted the marker into one text block. */
+    if (index < 0) return
+    const block = pruned[index] as Extract<ContentBlock, { type: 'text' }>
+    pruned[index] = { ...block, text: block.text.replace(PRUNE_MARKER, `${PRUNE_MARKER}${SIGNAL_HEADER}${kept.join('\n')}\n\n`) }
   }
 
   /**

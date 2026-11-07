@@ -175,8 +175,12 @@ describe('default deployment (with dsh-fs-observation-policy)', () => {
       const result = await call('edit', { file_path: 'a.txt', old_string: 'world', new_string: 'there' })
       expect(result.isError).toBe(true)
       expect(result.error).toMatchObject({ info: { code: 'FS_NOT_OBSERVED' } })
-      expect(text(result)).toBe(notObservedDiagnostic(join(dir, 'a.txt')))
+      expect(text(result)).toBe(`${notObservedDiagnostic(join(dir, 'a.txt'))}\nThe file was re-read for you and is now observed at its current version. old_string matches the current content once, at line 1: send the same edit again.`)
       expect(await readFile(join(dir, 'a.txt'), 'utf8')).toBe('hello world')
+      // the refusal counted as a read: the same edit now lands
+      const retry = await call('edit', { file_path: 'a.txt', old_string: 'world', new_string: 'there' })
+      expect(retry.isError).toBe(false)
+      expect(await readFile(join(dir, 'a.txt'), 'utf8')).toBe('hello there')
     })
 
     it('lets a WINDOWED read authorize an edit when the file is unchanged (freshness, not full-view)', async () => {

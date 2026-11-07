@@ -50,8 +50,8 @@ $auth = @{ Authorization = "Bearer $key" }
 # Every dsh route goes through it. It frees the GPU after 30 min idle, or on
 # POST http://127.0.0.1:8090/unload. Must be running for dsh to work.
 if (Listening 8090) { "shoehorn already running" } else {
-    $e8Args = 'serve E:\shoehorn\orca27b.base.gguf --res E:\shoehorn\orca27b.res.gguf --host 0.0.0.0 --port 8090 ' +
-              '--alias qwen3.8-27b-uncensored-shoehorn --ctx 262144 --kv q8_0 --kv-v q4_0 --spec auto --fast-prefill 4096 --think-after-tool 1 ' +
+    $e8Args = 'serve D:\moved-from-E\shoehorn\orca27b.base.gguf --res D:\moved-from-E\shoehorn\orca27b.res.gguf --host 0.0.0.0 --port 8090 ' +
+              '--alias qwen3.8-27b-uncensored-shoehorn --ctx 262144 --kv q8_0 --kv-v q4_0 --spec auto --fast-prefill 4096 --think-after-tool 1 --keep-reasoning-tail 600 ' +
               '--also qwen3.8-flash-next-uncensored-shoehorn=C:\models\Qwen3.8-Flash-Next-Uncensored\Qwen3.8-Flash-Next-Uncensored-IQ3_XXS-00001-of-00002.gguf ' +
               "--api-key-file `"$keyFile`" --chat-template-file C:\models\templates\qwen-sharp-v22.5.0.jinja " +
               '--idle-unload 1800 --timing-log C:\models\bench\shoehorn-timing.jsonl'

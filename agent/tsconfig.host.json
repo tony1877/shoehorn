@@ -507,6 +507,8 @@
     { "path": "./packages/preset/agent-preset" },
     { "path": "./packages/preset/persona" },
     { "path": "./packages/guard/repeat-tool-reminder" },
+    { "path": "./packages/guard/harness-boost" },
+    { "path": "./packages/guard/admin-shell" },
     { "path": "./packages/extensions/cordis-host-runner" },
     { "path": "./packages/extensions/tool-cordis" },
     { "path": "./packages/experimental/hook-protocol" },

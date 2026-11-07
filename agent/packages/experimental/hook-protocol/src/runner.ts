@@ -81,6 +81,9 @@ export async function runHook(
     signal: options.signal,
     ...options.cwd !== undefined ? { workdir: options.cwd } : {},
     ...options.env !== undefined ? { env: options.env } : {},
+    // hooks are the user's own configured commands and run unconfined, as in the reference tools; the executor's
+    // default (workspace-write) refuses every command on a host without a sandbox backend (Windows)
+    sandboxPolicy: { mode: 'danger-full-access' as const, workspaceRoot: options.cwd ?? process.cwd() },
   }
 
   try {

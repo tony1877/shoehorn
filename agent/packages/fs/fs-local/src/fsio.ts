@@ -762,6 +762,80 @@ function countOccurrences(content: string, needle: string): number {
   }
 }
 
+/** Most file lines quoted in an edit diagnostic. */
+const HINT_MAX_LINES = 24
+
+/** 1-based line numbers where each occurrence of `needle` starts. */
+function occurrenceLines(content: string, needle: string): number[] {
+  const lines: number[] = []
+  let index = 0
+  while (true) {
+    const found = content.indexOf(needle, index)
+    if (found === -1) return lines
+    lines.push(content.slice(0, found).split('\n').length)
+    index = found + needle.length
+  }
+}
+
+/** Render file lines `from`..`to` (0-based, inclusive) with 1-based numbers, the way `read` shows them. */
+function numberedLines(lines: readonly string[], from: number, to: number): string {
+  const end = Math.min(to, from + HINT_MAX_LINES - 1, lines.length - 1)
+  const body = lines.slice(from, end + 1).map((line, i) => `${from + i + 1}: ${line}`)
+  if (end < to) body.push(`[… ${to - end} more lines]`)
+  return body.join('\n')
+}
+
+/**
+ * The file region that `oldString` most likely meant, for a not-found diagnostic: a match that differs only in
+ * leading/trailing whitespace per line when there is exactly one, otherwise the window of the same height whose
+ * lines agree (whitespace-trimmed) with the most of `oldString`'s non-blank lines, when at least half agree.
+ * @returns the hint text, or an empty string when nothing is close.
+ */
+function closestRegionHint(content: string, oldString: string): string {
+  if (process.env.DSH_HARNESS_BOOST === '0') return ''
+  const fileLines = content.split('\n')
+  const wanted = oldString.split('\n')
+  while (wanted.length > 1 && wanted[wanted.length - 1]!.trim() === '') wanted.pop()
+  const trimmed = wanted.map(line => line.trim())
+  const height = wanted.length
+  if (height === 0 || height > fileLines.length) return ''
+  const fileTrimmed = fileLines.map(line => line.trim())
+  const exact: number[] = []
+  let best = -1
+  let bestScore = 0
+  const significant = trimmed.filter(line => line.length > 0).length
+  for (let start = 0; start + height <= fileLines.length; start += 1) {
+    let score = 0
+    let all = true
+    for (let i = 0; i < height; i += 1) {
+      if (fileTrimmed[start + i] === trimmed[i]) {
+        if (trimmed[i]!.length > 0) score += 1
+      } else {
+        all = false
+      }
+    }
+    if (all) exact.push(start)
+    if (score > bestScore) {
+      bestScore = score
+      best = start
+    }
+  }
+  if (exact.length === 1) {
+    const start = exact[0]!
+    return `\nThe same lines exist with different indentation or trailing whitespace at lines ${start + 1}-${start + height}. `
+      + `Copy old_string exactly from them:\n${numberedLines(fileLines, start, start + height - 1)}`
+  }
+  if (exact.length > 1) {
+    return `\nThe same lines exist with different whitespace at lines ${exact.map(s => s + 1).join(', ')}: `
+      + 'read those regions and copy old_string exactly, with enough context to be unique.'
+  }
+  if (best < 0 || significant === 0 || bestScore * 2 < significant) return ''
+  const from = Math.max(0, best - 1)
+  const to = Math.min(fileLines.length - 1, best + height)
+  return `\nClosest region (${bestScore} of ${significant} lines match, whitespace ignored), lines ${from + 1}-${to + 1}. `
+    + `Copy old_string exactly from the current text:\n${numberedLines(fileLines, from, to)}`
+}
+
 /**
  * Read and decode a file for editing: rejects binaries, returns LF-normalized
  * content plus the original line-ending style for write-back.
@@ -873,10 +947,11 @@ export function applyLiteralEdit(
   const newNorm = normalizeLineEndings(newString)
   const replacements = countOccurrences(content, oldNorm)
   if (replacements === 0) {
-    throw new FsError(`old_string was not found in "${displayPath}"`, 'FS_EDIT_NOT_FOUND')
+    throw new FsError(`old_string was not found in "${displayPath}"${closestRegionHint(content, oldNorm)}`, 'FS_EDIT_NOT_FOUND')
   }
   if (!replaceAll && replacements > 1) {
-    throw new FsError(`old_string matched ${replacements} times in "${displayPath}"; provide a more specific old_string or set replace_all to true`, 'FS_AMBIGUOUS_EDIT')
+    const at = process.env.DSH_HARNESS_BOOST === '0' ? '' : ` (starting at lines ${occurrenceLines(content, oldNorm).join(', ')})`
+    throw new FsError(`old_string matched ${replacements} times in "${displayPath}"${at}; provide a more specific old_string or set replace_all to true`, 'FS_AMBIGUOUS_EDIT')
   }
   return { content: content.split(oldNorm).join(newNorm), replacements }
 }

@@ -8,7 +8,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { DiffCallView, DiffResultView, ToolResult } from '@deepseek-ai/dsh-tools'
-import type {} from '@deepseek-ai/dsh-fs'
+import { FsError } from '@deepseek-ai/dsh-fs'
 import { computeHunkDiffs, diffsFromMeta } from './diff.ts'
 import { remediateFsError } from './error.ts'
 import { mutationResult } from './mutation-result.ts'
@@ -62,10 +62,85 @@ export function parseEditArgs(args: { file_path: string; old_string: string; new
  * @param replaceAll - selects the all-occurrences wording over the single-replacement one.
  * @returns the confirmation sentence the model sees as the tool result.
  */
-export function formatEditOutput(displayPath: string, replaceAll: boolean): string {
-  return replaceAll
+export function formatEditOutput(displayPath: string, replaceAll: boolean, before?: string, after?: string): string {
+  const head = replaceAll
     ? `The file ${displayPath} has been updated. All occurrences were successfully replaced.`
     : `The file ${displayPath} has been updated successfully.`
+  const snippet = before === undefined || after === undefined || !harnessBoost() ? '' : editedSnippet(before, after)
+  return snippet === '' ? head : `${head} The edited region now reads:\n${snippet}`
+}
+
+/** `DSH_HARNESS_BOOST=0` restores the plain edit messages (the control arm of tests/agent_eval A/B runs). */
+function harnessBoost(): boolean {
+  return process.env.DSH_HARNESS_BOOST !== '0'
+}
+
+/**
+ * Turn a stale or unread-file refusal into one the model can act on at once. Models answer "file changed since it was
+ * read — re-read the file" by resending the same edit, over and over (typically after changing the file through the
+ * shell). An edit is a literal match, so it cannot clobber text the model has not seen: record the file's current
+ * version as observed and say whether `old_string` matches the current content, so the retry succeeds or the model
+ * knows to copy fresh text. Any other error, or a failed re-read, is returned unchanged.
+ * @returns the error to throw.
+ */
+async function refreshObservation(
+  ctx: Context,
+  target: Parameters<Context['fs']['stat']>[0],
+  input: EditInput,
+  error: unknown,
+  exec: Parameters<Context['emit']>[3],
+): Promise<unknown> {
+  if (!harnessBoost() || !(error instanceof FsError) || (error.code !== 'FS_STALE_VERSION' && error.code !== 'FS_NOT_OBSERVED')) return error
+  try {
+    const info = await ctx.fs.stat(target)
+    if (info === undefined || info.type !== 'file') return error
+    const content = (await ctx.fs.readText(target)).replace(/\r\n/g, '\n')
+    ctx.emit('fs/observed', target, { kind: 'present', version: info.version }, exec)
+    const needle = input.oldString.replace(/\r\n/g, '\n')
+    const lines: number[] = []
+    for (let at = content.indexOf(needle); at !== -1; at = content.indexOf(needle, at + needle.length)) {
+      lines.push(content.slice(0, at).split('\n').length)
+    }
+    const status = lines.length === 1
+      ? `old_string matches the current content once, at line ${lines[0]}: send the same edit again.`
+      : lines.length > 1
+        ? `old_string matches the current content ${lines.length} times (lines ${lines.join(', ')}): add context to make it unique, or set replace_all.`
+        : 'old_string does not match the current content: read the region you want to change and copy old_string from it.'
+    return new FsError(`${error.message}\nThe file was re-read for you and is now observed at its current version. ${status}`, error.code, { cause: error })
+  } catch {
+    return error
+  }
+}
+
+/** Lines of context shown around an edit, and the most lines a success snippet shows. */
+const SNIPPET_CONTEXT = 3
+const SNIPPET_MAX_LINES = 30
+
+/**
+ * The changed region of `after` with a few lines of context and 1-based line numbers (as `read` shows them), so the
+ * model can check indentation and neighbours without reading the file again. Empty when nothing differs.
+ * @param before - the content before the edit.
+ * @param after - the content after the edit.
+ * @returns the numbered snippet, cut at {@link SNIPPET_MAX_LINES}.
+ */
+export function editedSnippet(before: string, after: string): string {
+  if (before === after) return ''
+  const a = before.replace(/\r\n/g, '\n').split('\n')
+  const b = after.replace(/\r\n/g, '\n').split('\n')
+  let start = 0
+  while (start < a.length && start < b.length && a[start] === b[start]) start += 1
+  let endA = a.length - 1
+  let endB = b.length - 1
+  while (endA >= start && endB >= start && a[endA] === b[endB]) {
+    endA -= 1
+    endB -= 1
+  }
+  const from = Math.max(0, start - SNIPPET_CONTEXT)
+  const to = Math.min(b.length - 1, Math.max(endB, start) + SNIPPET_CONTEXT)
+  const last = Math.min(to, from + SNIPPET_MAX_LINES - 1)
+  const lines = b.slice(from, last + 1).map((line, i) => `${from + i + 1}: ${line}`)
+  if (last < to) lines.push(`[… ${to - last} more lines; replace_all or a large edit: read the file to see the rest]`)
+  return lines.join('\n')
 }
 
 /**
@@ -108,7 +183,7 @@ export function applyEditTool(ctx: Context, sandbox: FsSandboxController): void 
       },
       render: (args, value) => [{
         type: 'text',
-        text: formatEditOutput(value.path, args.replace_all ?? false),
+        text: formatEditOutput(value.path, args.replace_all ?? false, value.before, value.after),
       }],
       presentationMeta: (_args, value) => ({
         path: value.path,
@@ -142,7 +217,8 @@ export function applyEditTool(ctx: Context, sandbox: FsSandboxController): void 
         // A sandbox denial becomes the shared [sandbox: …] marker (the model
         // recognizes it from bash); guarded mutation failures receive their
         // stable model-facing diagnostic; anything else passes through.
-        throw remediateFsError(sandbox.mapError(error, sandboxPolicy), target.displayPath)
+        const remediated = remediateFsError(sandbox.mapError(error, sandboxPolicy), target.displayPath)
+        throw await refreshObservation(ctx, target, input, remediated, exec)
       }
       return mutationResult(ctx, target, outcome, exec)
     },

@@ -169,6 +169,17 @@ describe('ToolResultPruner content transform', () => {
     expect(prune.measureContent(result!)).toBeLessThanOrEqual(50)
   })
 
+  it('keeps error and verdict lines from the pruned middle within the threshold', () => {
+    const prune = service({ thresholdChars: 600, headChars: 100, tailChars: 100 })
+    const lines = Array.from({ length: 80 }, (_, i) => `line ${i} compiling module`)
+    lines[40] = 'src/a.c(12): error C2065: undeclared identifier'
+    lines[60] = '3 passed, 1 failed'
+    const result = prune.pruneContent([{ type: 'text', text: lines.join('\n') }])
+    const text = (result![0] as { text: string }).text
+    expect(text).toContain('[lines kept from the pruned middle: errors and results]\nsrc/a.c(12): error C2065: undeclared identifier\n3 passed, 1 failed\n')
+    expect(prune.measureContent(result!)).toBeLessThanOrEqual(600)
+  })
+
   it('supports zero-sized head and tail while still shrinking', () => {
     const prune = service({
       thresholdChars: codePointLength(PRUNE_MARKER),

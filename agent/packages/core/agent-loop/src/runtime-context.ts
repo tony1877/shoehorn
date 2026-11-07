@@ -26,9 +26,10 @@ function isOwned(message: UserMessage): boolean {
 /**
  * Sections whose change alone does not justify a new snapshot in the middle of a turn: the memory index changes when
  * the agent saves a memory itself, and a whole snapshot appended mid-turn (as a user message) for that only
- * distracts it. The next turn's first step brings the snapshot up to date.
+ * distracts it. The next turn's first step brings the snapshot up to date. The same holds for the working notes
+ * (harness-boost): the agent just wrote them and sees them in the `notes` tool result.
  */
-const DEFERRABLE: ReadonlySet<string> = new Set(['memory:index'])
+const DEFERRABLE: ReadonlySet<string> = new Set(['memory:index', 'harness:notes'])
 
 function sectionsOf(message: UserMessage): readonly ContextSnapshotSection[] | undefined {
   const sections = (message.source as { sections?: unknown }).sections

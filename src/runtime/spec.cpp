@@ -31,8 +31,12 @@ double SpecDecoder::verify_ms(int n) const {
     // the prior shape. Below the model's GPU batch the host residual is multiplied on the CPU (cost grows with n);
     // from it on the residual streams to the GPU (about one 14 GB transfer, nearly flat in n). With the weight
     // prefetch that is every size.
-    const int gb    = m_.verify_gpu_min();
-    auto      prior = [gb](int m) { return m < gb ? 250.0 + 38.0 * m : (gb <= 1 ? 255.0 : 340.0) + 0.5 * m; };
+    // With the residual in VRAM nothing crosses PCIe: ~40 ms plus ~0.6 ms per token (RTX PRO 5000, 27B).
+    const int  gb    = m_.verify_gpu_min();
+    const bool vram  = m_.residual_in_vram();
+    auto       prior = [gb, vram](int m) {
+        return vram ? 40.0 + 0.6 * m : m < gb ? 250.0 + 38.0 * m : (gb <= 1 ? 255.0 : 340.0) + 0.5 * m;
+    };
     if (vn_[n] > 0.3) return vt_[n] / vn_[n];
     int near = -1;
     for (int d = 1; d < kMaxK + 1 && near < 0; d++) {
@@ -67,9 +71,15 @@ int SpecDecoder::choose_k() const {
     // predicts); then pick the k with the best expected tokens per millisecond
     const int kmax = std::min(k_, m_.max_verify() - 1);
     // with a flat verify cost (every size streams the residual) at least 24 drafts: shorter verifies look cheap to
-    // the estimate but measured slower (8 seeds x 4 prompts: 41.9 vs 40.8 tok/s mean; 32: 42.9, but prose 27.9)
+    // the estimate but measured slower (8 seeds x 4 prompts: 41.9 vs 40.8 tok/s mean; 32: 42.9, but prose 27.9).
+    // With the residual in VRAM a verify is cheap (~50 ms) and 32 forced drafts so long that most base passes were
+    // thrown away; with no floor the estimate drafts too short on prose. RTX PRO 5000, 27B, greedy, prose / code tok/s:
+    // floor 32: 43.6 / 91.1; none: 60.3 / 89-90; 12: 61.7 / 92.1; 16: 65.0 / 88-89 (fixed k 16: 65.5 / 90; 24: 49.4 / 96.3).
     static const int kmin_env = std::getenv("E8_KMIN") ? std::atoi(std::getenv("E8_KMIN")) : -1;
-    const int        kmin     = kmin_env >= 0 ? kmin_env : (m_.verify_gpu_min() <= 1 ? 32 : 1);
+    const int        kmin     = kmin_env >= 0               ? kmin_env
+                                : m_.residual_in_vram()     ? 16
+                                : m_.verify_gpu_min() <= 1  ? 32
+                                                            : 1;
     int       best = std::min(kmin, kmax);
     double    best_rate = 0, surv = 1, accepted = 0;
     for (int k = 1; k <= kmax; k++) {

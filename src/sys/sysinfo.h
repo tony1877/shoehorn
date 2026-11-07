@@ -40,6 +40,7 @@ struct GpuSensors {
     int    temp_c   = -1;
     double power_w  = -1;
     int    mem_util = -1;  // % of time the memory was busy over the driver's last sample period
+    int    fan_pct  = -1;  // GPU fan speed, % of its maximum (cards without a fan: -1)
     // device-wide VRAM (all processes; cudaMemGetInfo under WDDM sees only the calling process's allocations)
     unsigned long long vram_total = 0, vram_used = 0;
     double             pcie_rx_gbs = -1, pcie_tx_gbs = -1;  // PCIe throughput into / out of the GPU, last ~20 ms sample
@@ -52,7 +53,11 @@ GpuSensors gpu_sensors();
 struct BoardSensor {
     std::string kind, hw, name;
     bool        volt  = false;
-    double      value = 0;  // degrees C or volts
+    bool        fan   = false;
+    bool        power = false;
+    int         pwm   = -1;     // fan: its PWM output, % (-1 = no PWM control file)
+    int         pwm_auto = -1;  // fan: 1 = the chip's automatic curve, 0 = fixed (manual) duty, -1 = unknown
+    double      value = 0;  // degrees C, volts, RPM (fan) or watts (power)
 };
 std::vector<BoardSensor> board_sensors();
 

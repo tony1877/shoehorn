@@ -64,6 +64,8 @@ footer { display: flex; }
 .lim span { font: 11px var(--f-mono); letter-spacing: .04em; border: 1px solid; border-radius: 4px; padding: 1px 7px; }
 .lim .w { color: var(--warn); border-color: rgba(226,176,74,.35); background: rgba(226,176,74,.06); }
 .lim .c { color: var(--bad); border-color: rgba(236,106,94,.35); background: rgba(236,106,94,.06); }
+.fmode { font: 11px var(--f-mono); letter-spacing: .04em; border: 1px solid rgba(76,195,138,.35); color: var(--good, #4cc38a); background: rgba(76,195,138,.06); border-radius: 4px; padding: 1px 7px; }
+.fmode.max { color: var(--warn); border-color: rgba(226,176,74,.35); background: rgba(226,176,74,.06); }
 </style>
 </head>
 <body>
@@ -80,6 +82,7 @@ footer { display: flex; }
   </header>
   <section class="panel" id="temps"></section>
   <section class="panel" id="volts"></section>
+  <section class="panel" id="fans"></section>
   <section class="panel" id="power"></section>
   <footer><span class="live" id="live"><i></i><span id="foot">connecting</span></span></footer>
 </div>
@@ -105,6 +108,8 @@ function render(hw) {
   if (g.temp_c != null && g.temp_c >= 0) T.push({ n: "GPU core", c: g.temp_c });
   const board = pick("lpc", /^Motherboard$/);
   if (board.length) T.push({ n: "Motherboard", c: board[0].c, title: board[0].hw });
+  // VRMs: ASUS's EC names them VRM_E / VRM_W (east / west of the socket) or just VRM; the "HS" heatsink entries are fans
+  pick("lpc", /^VRM(_[A-Z])?$/i).forEach(x => T.push({ n: x.name.replace("_", " "), c: x.c, title: `${x.hw} ${x.name}` }));
   const vram = pick("gpu-nvidia", /Memory/i);
   if (vram.length) T.push({ n: "VRAM", c: Math.max(...vram.map(x => x.c)) });
   const ram = S.filter(x => x.kind === "memory" && /^DIMM/i.test(x.name));  // not the limit / resolution entries
@@ -120,7 +125,7 @@ function render(hw) {
     : (hw.sensors_skipped || []).length ? `<div class="note">Skipped for now because their sensors stalled: ${hw.sensors_skipped.join(", ")}.</div>` : "";
   set("temps", `<div class="mhead"><b>Temperatures</b><span class="lim"><span class="w">WARN 70 C</span><span class="c">CRIT 85 C</span></span></div>
     ${stale}${grid(T, tc)}${grid(D, tc)}
-    ${missing.length && !hw.sensors_stale_s ? `<div class="note">${missing.join(", ")}: ${S.length ? "not reported by the sensor server" : "start shoehorn-hwmon (tools/hwmon) or LibreHardwareMonitor's web server on port 8085"}.</div>` : ""}`);
+    ${missing.length && !S.length && !hw.sensors_stale_s ? `<div class="note">${missing.join(", ")}: start shoehorn-hwmon (tools/hwmon) or LibreHardwareMonitor's web server on port 8085.</div>` : ""}`);
   // voltages: GPU core from NVIDIA's driver, the board's rails as named and scaled by shoehorn-hwmon's board map (the
   // CPU's per-core VID is left out: it stays near 0.3 V under load)
   const pickV = (kind, re) => V.filter(x => x.kind.startsWith(kind) && re.test(x.name));
@@ -132,10 +137,31 @@ function render(hw) {
   const vt = x => tile(x.n, fmt(x.v, x.v < 2 ? 3 : 2), "V");
   set("volts", `<div class="mhead"><b>Voltages</b></div>
     ${VA.length + VB.length ? grid(VA, vt) + grid(VB, vt) : `<div class="note">${hw.sensors_stale_s ? "Hidden while the sensor server is not updating." : "No voltage sensors: start shoehorn-hwmon (tools/hwmon)."}</div>`}`);
+  // fans (RPM, headers with nothing plugged in are left out by the server): the named ones first (ASUS's EC: "VRM_W HS"
+  // = the west VRM heatsink fan, "CPU_Opt"), then the Super I/O chip's numbered headers
+  const fname = n => n.replace(/^VRM_([A-Z]) HS$/i, "VRM $1 heatsink").replace(/_/g, " ");
+  const modeOf = x => x.auto == null ? "" : x.auto ? "auto" : `fixed ${x.pwm ?? "?"}%`;
+  const F = all.filter(x => x.rpm != null && x.rpm > 0)
+    .sort((a, b) => /^Fan #/.test(a.name) - /^Fan #/.test(b.name))
+    .map(x => ({ n: fname(x.name) + (modeOf(x) ? ` · ${modeOf(x)}` : ""), v: fmt(x.rpm, 0), u: "RPM", title: `${x.hw} ${x.name}` }));
+  if (g.fan_pct != null && g.fan_pct >= 0) F.unshift({ n: "GPU fan", v: fmt(g.fan_pct, 0), u: "%", title: "GPU fan speed, % of its maximum" });
+  // the mode badge: the board fans' control (the chip's own curve, or a fixed duty set by a fan service such as rig-fand)
+  const ctl = all.filter(x => x.rpm != null && x.auto != null);
+  const badge = !ctl.length ? "" : ctl.every(x => x.auto) ? `<span class="fmode">automatic</span>`
+    : ctl.every(x => !x.auto && x.pwm >= 99) ? `<span class="fmode max">full speed</span>` : `<span class="fmode">manual</span>`;
+  set("fans", `<div class="mhead"><b>Fans</b>${badge}</div>
+    ${F.length ? grid(F, x => tile(x.n, x.v, x.u, "", x.title)) : `<div class="note">No fan speeds reported.</div>`}`);
+  // power: GPU from NVML, CPU package from the CPU's own counter (amd_hsmp / zenpower on Linux, LibreHardwareMonitor
+  // on Windows); their sum leaves out the board, RAM, drives, fans and PSU losses, so it is not the wall draw
   const P = [];
-  if (g.power_w != null && g.power_w >= 0) P.push(tile("GPU power", fmt(g.power_w, 0), "W"));
+  const gpuW = g.power_w != null && g.power_w >= 0 ? g.power_w : null;
+  const cpuP = all.filter(x => x.w != null && /cpu$/.test(x.kind) && /Package/i.test(x.name));
+  const cpuW = cpuP.length ? cpuP.reduce((s, x) => s + x.w, 0) : null;
+  if (gpuW != null) P.push(tile("GPU power", fmt(gpuW, 0), "W"));
+  if (cpuW != null) P.push(tile("CPU power", fmt(cpuW, 0), "W", "", "CPU package power"));
+  if (gpuW != null && cpuW != null) P.push(tile("CPU + GPU", fmt(gpuW + cpuW, 0), "W", "", "CPU package + GPU board power; excludes motherboard, RAM, drives, fans and PSU losses"));
   if (g.mem_util != null && g.mem_util >= 0) P.push(tile("VRAM busy", fmt(g.mem_util, 0), "%"));
-  set("power", `<div class="mhead"><b>GPU load</b></div>${P.length ? grid(P, x => x) : `<div class="note">No NVIDIA GPU found.</div>`}`);
+  set("power", `<div class="mhead"><b>Power and load</b></div>${P.length ? grid(P, x => x) : `<div class="note">No NVIDIA GPU found.</div>`}`);
 }
 async function poll() {
   try {

@@ -13,6 +13,7 @@ import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SystemPrompt, { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { type ToolResult } from '@deepseek-ai/dsh-tools'
 import { FileSystem, FsError, FsTargetKey, FsVersion } from '@deepseek-ai/dsh-fs'
+import { editedSnippet } from '../src/edit.ts'
 import type {
   FsDirEntry,
   FsEditOutcome,
@@ -465,7 +466,14 @@ describe('edit tool', () => {
     const result = await call(ctx, 'edit', { file_path: 'a.txt', old_string: 'a', new_string: 'b' }, { session })
     if (result.isError) throw new Error('expected edit success')
     expect(result.value).toEqual({ path: '/abs/a.txt', before: 'a', after: 'b' })
-    expect(text(result)).toBe('The file /abs/a.txt has been updated successfully.')
+    expect(text(result)).toBe('The file /abs/a.txt has been updated successfully. The edited region now reads:\n1: b')
+  })
+
+  it('shows the edited region with context and line numbers', () => {
+    const before = ['l1', 'l2', 'l3', 'l4', 'l5', 'l6', 'l7', 'l8', 'l9'].join('\n')
+    const after = before.replace('l5', 'L5a\nL5b')
+    expect(editedSnippet(before, after)).toBe(['2: l2', '3: l3', '4: l4', '5: L5a', '6: L5b', '7: l6', '8: l7', '9: l8'].join('\n'))
+    expect(editedSnippet('same', 'same')).toBe('')
   })
 
   it('formats the replace_all success message distinctly', async () => {
@@ -474,7 +482,7 @@ describe('edit tool', () => {
     fs.files.set('key:a.txt', 'a a a')
     await call(ctx, 'read', { file_path: 'a.txt' }, { session })
     const result = await call(ctx, 'edit', { file_path: 'a.txt', old_string: 'a', new_string: 'b', replace_all: true }, { session })
-    expect(text(result)).toBe('The file /abs/a.txt has been updated. All occurrences were successfully replaced.')
+    expect(text(result)).toBe('The file /abs/a.txt has been updated. All occurrences were successfully replaced. The edited region now reads:\n1: b b b')
   })
 
   it('rejects identical old/new strings', async () => {
@@ -504,6 +512,17 @@ describe('edit tool', () => {
     const result = await call(ctx, 'edit', { file_path: 'a.txt', old_string: 'a', new_string: 'b' }, { session: { header: {} } })
     expect(result.isError).toBe(true)
     expect(result.error).toMatchObject({ info: { code: 'FS_NOT_OBSERVED' } })
+  })
+
+  it('re-reads an unobserved file so the same edit succeeds on retry', async () => {
+    const { ctx, fs } = await setup()
+    const session = { header: {} }
+    fs.files.set('key:a.txt', 'x\nhello\n')
+    const first = await call(ctx, 'edit', { file_path: 'a.txt', old_string: 'hello', new_string: 'bye' }, { session })
+    expect(first.isError).toBe(true)
+    expect(text(first)).toContain('The file was re-read for you and is now observed at its current version. old_string matches the current content once, at line 2: send the same edit again.')
+    const retry = await call(ctx, 'edit', { file_path: 'a.txt', old_string: 'hello', new_string: 'bye' }, { session })
+    expect(retry.isError).toBe(false)
   })
 })
 

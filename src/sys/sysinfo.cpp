@@ -259,6 +259,7 @@ struct Nvml {
     nvml_util_t  util  = nullptr;
     nvml_mem_t   mem   = nullptr;
     nvml_pcie_t  pcie  = nullptr;
+    nvml_power_t fan   = nullptr;  // nvmlDeviceGetFanSpeed: same (device, unsigned *) shape
     ULONGLONG    retry = 0;  // GetTickCount64 time of the next load attempt
 };
 
@@ -276,6 +277,7 @@ int nvml_open(Nvml * n) {
         n->util   = reinterpret_cast<nvml_util_t>(GetProcAddress(n->lib, "nvmlDeviceGetUtilizationRates"));
         n->mem    = reinterpret_cast<nvml_mem_t>(GetProcAddress(n->lib, "nvmlDeviceGetMemoryInfo"));
         n->pcie   = reinterpret_cast<nvml_pcie_t>(GetProcAddress(n->lib, "nvmlDeviceGetPcieThroughput"));
+        n->fan    = reinterpret_cast<nvml_power_t>(GetProcAddress(n->lib, "nvmlDeviceGetFanSpeed"));
         if (!init || !get || init() != 0 || get(0, &n->dev) != 0) {
             n->dev = nullptr;
             return 0;
@@ -298,6 +300,7 @@ int nvml_read(Nvml * n, GpuSensors * s) {
         if (n->power && n->power(n->dev, &v) == 0) s->power_w = v / 1000.0;
         NvmlUtil u{};
         if (n->util && n->util(n->dev, &u) == 0) s->mem_util = (int) u.memory;
+        if (n->fan && n->fan(n->dev, &v) == 0) s->fan_pct = (int) v;
         NvmlMem m{};
         if (n->mem && n->mem(n->dev, &m) == 0) {
             s->vram_total = m.total;
@@ -601,6 +604,7 @@ bool remove_dir(const std::string & path) {
 #include <cerrno>
 #include <chrono>
 #include <climits>
+#include <cmath>
 #include <cstring>
 #include <dirent.h>
 #include <dlfcn.h>
@@ -793,26 +797,76 @@ std::vector<BoardSensor> board_sensors() {
     for (const auto & h : dirs) {
         const std::string drv = read_line(h + "/name");
         std::string       kind;
-        if (drv == "k10temp" || drv == "zenpower") kind = "amdcpu";
+        if (drv == "k10temp" || drv == "zenpower" || drv == "amd_hsmp_hwmon") kind = "amdcpu";
         else if (drv == "coretemp") kind = "intelcpu";
         else if (drv == "spd5118" || drv == "jc42") kind = "memory";
         else if (drv == "amdgpu") kind = "gpu-amd";
         else if (drv.rfind("nct", 0) == 0 || drv.rfind("it8", 0) == 0 || drv.rfind("f718", 0) == 0 || drv.rfind("w83", 0) == 0 ||
-                 drv == "asus_ec_sensors" || drv == "gigabyte_wmi" || drv == "asus_wmi_sensors")
+                 drv == "asus_ec_sensors" || drv == "asusec" || drv == "gigabyte_wmi" || drv == "asus_wmi_sensors")
             kind = "lpc";
         else continue;
         const std::string hw = kind == "lpc" ? drv : read_line(h + "/device/model").empty() ? drv : read_line(h + "/device/model");
-        for (const char * type : { "temp", "in" }) {
+        for (const char * type : { "temp", "in", "fan", "power" }) {
             for (int i = 0; i < 32; i++) {
                 const std::string base = h + "/" + type + std::to_string(i);
-                const std::string v    = read_line(base + "_input");
+                std::string       v    = read_line(base + "_input");
+                if (v.empty() && type[0] == 'p') v = read_line(base + "_average");  // some drivers only average power
                 if (v.empty()) continue;
                 std::string label = read_line(base + "_label");
+                if (type[0] == 'p') {  // CPU package power (amd_hsmp, zenpower), in microwatts
+                    if (kind != "amdcpu" && kind != "intelcpu") continue;
+                    BoardSensor b;
+                    b.kind  = kind;
+                    b.hw    = hw;
+                    b.name  = label.empty() ? "Package" : label;
+                    b.power = true;
+                    b.value = std::atof(v.c_str()) / 1e6;
+                    out.push_back(b);
+                    continue;
+                }
+                if (type[0] == 'f') {  // fans, in RPM; a header with nothing plugged in reads 0 and is left out
+                    if (kind != "lpc" || std::atof(v.c_str()) <= 0) continue;
+                    BoardSensor b;
+                    b.kind  = kind;
+                    b.hw    = hw;
+                    // Super I/O fan inputs have no labels on Linux; boards whose header wiring is known name them
+                    // (key: DMI board name, Super I/O fan index)
+                    static const std::string board = read_line("/sys/class/dmi/id/board_name");
+                    static const std::vector<std::tuple<std::string, int, std::string>> fan_names = {
+                        { "Pro WS TRX50-SAGE WIFI A", 2, "CPU fan" },
+                    };
+                    if (label.empty() && drv.rfind("nct", 0) == 0)
+                        for (const auto & [bd, idx, nm] : fan_names)
+                            if (board == bd && idx == i) label = nm;
+                    b.name  = label.empty() ? "Fan #" + std::to_string(i) : label;
+                    b.fan   = true;
+                    b.value = std::atof(v.c_str());
+                    // its PWM output (Super I/O chips: pwmN drives fanN): duty 0-255; mode 0 = no control (full speed),
+                    // 1 = fixed duty, 2+ = a chip curve (nct6775 reports a fixed 255 as 0)
+                    const std::string pw = read_line(h + "/pwm" + std::to_string(i)), en = read_line(h + "/pwm" + std::to_string(i) + "_enable");
+                    if (!pw.empty()) b.pwm = (int) std::lround(std::atof(pw.c_str()) * 100.0 / 255.0);
+                    if (!en.empty()) {
+                        const int e = std::atoi(en.c_str());
+                        b.pwm_auto  = e >= 2 ? 1 : 0;
+                        if (e == 0) b.pwm = 100;
+                    }
+                    out.push_back(b);
+                    continue;
+                }
                 const bool  volt  = type[0] == 'i';
                 if (kind == "memory") label = "DIMM #" + std::to_string(++dimm);
                 else if (label.empty()) {
-                    if (kind == "lpc" && volt) continue;  // unlabeled board voltages: which rail is which depends on the board
-                    label = kind == "amdcpu" && !volt ? "Tctl" : type + std::to_string(i);
+                    // unlabeled board voltages: which rail is which depends on the board, except the Nuvoton chip's own
+                    // inputs (CPUVCORE, 3VCC, 3VSB, VBAT), which every NCT67xx/NCT6799 board wires the same way
+                    if (kind == "lpc" && volt) {
+                        if (drv.rfind("nct67", 0) != 0) continue;
+                        if (i == 0) label = "Vcore";
+                        else if (i == 3) label = "+3.3V";
+                        else if (i == 7) label = "3VSB";
+                        else if (i == 8) label = "VBAT";
+                        else continue;
+                    } else
+                        label = kind == "amdcpu" && !volt ? "Tctl" : type + std::to_string(i);
                 }
                 // LibreHardwareMonitor's names, which the Sensors page looks for
                 if (label.rfind("Tccd", 0) == 0) label = "CCD" + label.substr(4);
@@ -846,6 +900,7 @@ struct Nvml {
     int (*util)(void *, NvmlUtil *)      = nullptr;
     int (*mem)(void *, NvmlMem *)        = nullptr;
     int (*pcie)(void *, int, unsigned *) = nullptr;
+    int (*fan)(void *, unsigned *)       = nullptr;
     std::chrono::steady_clock::time_point retry{};
 };
 template <class F> void sym(void * lib, const char * name, F & f) {
@@ -873,6 +928,7 @@ static GpuSensors nvml_sensors() {
         sym(n.lib, "nvmlDeviceGetUtilizationRates", n.util);
         sym(n.lib, "nvmlDeviceGetMemoryInfo", n.mem);
         sym(n.lib, "nvmlDeviceGetPcieThroughput", n.pcie);
+        sym(n.lib, "nvmlDeviceGetFanSpeed", n.fan);
         if (!init || !get || init() != 0 || get(0, &n.dev) != 0) {
             n.dev = nullptr;
             return s;
@@ -883,6 +939,7 @@ static GpuSensors nvml_sensors() {
     if (n.power && n.power(n.dev, &v) == 0) s.power_w = v / 1000.0;
     NvmlUtil u{};
     if (n.util && n.util(n.dev, &u) == 0) s.mem_util = (int) u.memory;
+    if (n.fan && n.fan(n.dev, &v) == 0) s.fan_pct = (int) v;
     NvmlMem m{};
     if (n.mem && n.mem(n.dev, &m) == 0) {
         s.vram_total = m.total;

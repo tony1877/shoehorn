@@ -163,8 +163,10 @@ void Sample()
         {
             foreach (ISensor s in h.Sensors)
             {
-                if (s.SensorType is not (SensorType.Temperature or SensorType.Voltage) || s.Value is not float v) continue;
-                bool volt = s.SensorType == SensorType.Voltage;
+                if (s.SensorType is not (SensorType.Temperature or SensorType.Voltage or SensorType.Fan or SensorType.Power) || s.Value is not float v) continue;
+                bool volt = s.SensorType == SensorType.Voltage, fan = s.SensorType == SensorType.Fan, power = s.SensorType == SensorType.Power;
+                if (power && !hw.Identifier.ToString().StartsWith("/amdcpu") && !hw.Identifier.ToString().StartsWith("/intelcpu")) continue;  // CPU package power only
+                if (fan && v <= 0) continue;  // a header with nothing plugged in
                 string name = s.Name;
                 var map = volt ? boardMaps.FirstOrDefault(b => Clean(hw.Name).Contains(b.Key, StringComparison.OrdinalIgnoreCase)).Value : null;
                 if (map != null && map.TryGetValue(name, out var m))
@@ -177,8 +179,10 @@ void Sample()
                 {
                     ["Text"] = name,
                     ["SensorId"] = s.Identifier.ToString(),
-                    ["Type"] = volt ? "Voltage" : "Temperature",
-                    ["Value"] = v.ToString(volt ? "0.000" : "0.0", CultureInfo.InvariantCulture) + (volt ? " V" : " C"),
+                    ["Type"] = power ? "Power" : fan ? "Fan" : volt ? "Voltage" : "Temperature",
+                    ["Value"] = power ? v.ToString("0.0", CultureInfo.InvariantCulture) + " W"
+                              : fan ? v.ToString("0", CultureInfo.InvariantCulture) + " RPM"
+                                    : v.ToString(volt ? "0.000" : "0.0", CultureInfo.InvariantCulture) + (volt ? " V" : " C"),
                 });
             }
         }

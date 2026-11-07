@@ -128,6 +128,7 @@ Both models from one server: `--also ALIAS=PATH[,RES]`; the request's `model` pi
 | `--temp`, `--top-p`, `--top-k`, `--min-p`, `--presence-penalty` | model defaults | sampling defaults (requests can override) |
 | `--tool-temp T` | 0.6 | temperature inside `<tool_call>` blocks |
 | `--think-budget N`, `--think-after-tool 0\|1`, `--drop-reasoning 0\|1` | 32768 | reasoning cap and handling; a request's own `enable_thinking` or `think_after_tool` overrides `--think-after-tool` |
+| `--keep-reasoning-tail N` | 0 | with `--drop-reasoning 1`: keep the last N characters of each earlier reasoning (from a line or sentence start), so a tool loop keeps its plan; the cut is stable, so prompt reuse is unaffected |
 | `--sys-cache N`, `--sys-cache-gb G` | 4, 3 | system prompts kept in RAM for new conversations (one per client or agent persona) |
 | `--hw-monitor URL` | http://127.0.0.1:8085 | sensor server for the dashboard's CPU, RAM, VRAM and board temperatures: [`tools/hwmon`](tools/hwmon) or LibreHardwareMonitor's web server (`""` = off) |
 | `--models-file PATH` | ~/.shoehorn/models.json | models added from the Models page, and the folders it last used |

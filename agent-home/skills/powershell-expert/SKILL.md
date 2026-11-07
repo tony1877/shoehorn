@@ -1,6 +1,17 @@
 ---
 name: powershell-expert
 description: Use before writing any non-trivial PowerShell command, and immediately when a shell command fails, prints nothing, hangs, or shows an error you do not recognise. Covers checking the shell first (version, language mode, dsh sandbox), running native exes and reading their exit codes, quoting and escaping, paths, bounded and untruncated output, real error handling, commands that hang waiting for input, environment variables, background jobs, and the bash habits that break in pwsh.
+triggers:
+  - pattern: ConstrainedLanguage|supported only on core types|Cannot create type\. Only core types|CIM resource was not available
+    section: 2. ConstrainedLanguage
+  - pattern: "is not recognized as (a|the) name of a cmdlet|CommandNotFoundException"
+    section: 12. Bash habits
+  - pattern: Unexpected token|Missing closing|The string is missing the terminator|Variable reference is not valid
+    section: 4. Quoting and escaping
+  - pattern: Cannot find path|because it does not exist|wildcard|LiteralPath
+    section: 5. Paths
+  - pattern: A parameter cannot be found that matches|positional parameter cannot be found
+    section: 12. Bash habits
 ---
 
 # PowerShell 7 like an expert

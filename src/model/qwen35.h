@@ -49,6 +49,11 @@ struct Qwen35Hparams {
     int64_t n_rot          = 0;  // rope.dimension_count (partial rotary)
     int     rope_sections[4] = { 0, 0, 0, 0 };
     float   rope_freq_base = 10000.0f;
+    // YaRN context extension: freq_scale = 1 / factor, ext_factor 1 = on. Taken from the GGUF's rope.scaling.* keys,
+    // or turned on at load when the requested context exceeds n_ctx_train (factor = n_ctx / n_ctx_train).
+    float   rope_freq_scale = 1.0f;
+    float   rope_ext_factor = 0.0f;
+    int64_t n_ctx_orig      = 0;  // context the rope was trained for (rope.scaling.original_context_length)
     float   rms_eps        = 1e-6f;
     int64_t full_attn_interval = 4;
     // Gated DeltaNet
@@ -190,6 +195,9 @@ public:
     bool has_residual() const { return !res_.empty(); }
     uint64_t residual_bytes() const { return res_bytes_; }
     uint64_t residual_gpu_bytes() const { return res_gpu_bytes_; }  // part of residual_bytes() held in VRAM
+    // (nearly) all of the residual in VRAM: a verify reads it from VRAM instead of streaming it over PCIe, so it costs
+    // tens of ms instead of ~250 (24 GB+ cards with --res-gpu-gb)
+    bool     residual_in_vram() const { return res_bytes_ > 0 && res_gpu_bytes_ >= res_bytes_ * 0.9; }
     // ggml type names of the big matrices that have a residual (the base side) and of their residuals, the most
     // common one of each; "" when no residual is loaded
     std::string pack_base_type() const { return pack_type(false); }

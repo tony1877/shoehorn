@@ -957,6 +957,42 @@ describe('applyLiteralEdit', () => {
     expect(applyLiteralEdit('a a a', 'a', 'X', true, 'f')).toEqual({ content: 'X X X', replacements: 3 })
   })
 
+  it('names the line of every match when the edit is ambiguous', () => {
+    expect(() => applyLiteralEdit('x\nfoo\ny\nfoo\n', 'foo', 'X', false, 'f'))
+      .toThrow(/matched 2 times in "f" \(starting at lines 2, 4\)/)
+  })
+
+  it('points a not-found edit at the lines that differ only in whitespace', () => {
+    const content = 'def f():\n    if a:\n        return 1\n    return 2\n'
+    expect(() => applyLiteralEdit(content, 'if a:\n    return 1', 'X', false, 'f'))
+      .toThrow(/different indentation or trailing whitespace at lines 2-3\. Copy old_string exactly from them:\n2:     if a:\n3:         return 1/)
+  })
+
+  it('shows the closest region when most lines of old_string match', () => {
+    const content = 'a = 1\nb = 2\nc = 3\nd = 4\n'
+    expect(() => applyLiteralEdit(content, 'b = 2\nc = 30\nd = 4', 'X', false, 'f'))
+      .toThrow(/Closest region \(2 of 3 lines match, whitespace ignored\), lines 1-5\./)
+  })
+
+  it('gives the plain messages when DSH_HARNESS_BOOST=0 (the eval control arm)', () => {
+    const saved = process.env.DSH_HARNESS_BOOST
+    process.env.DSH_HARNESS_BOOST = '0'
+    try {
+      expect(() => applyLiteralEdit('x\nfoo\nfoo\n', 'foo', 'X', false, 'f'))
+        .toThrow(/^old_string matched 2 times in "f"; provide a more specific old_string or set replace_all to true$/)
+      expect(() => applyLiteralEdit('    if a:\n', 'if a:\nb', 'X', false, 'f')).toThrow(/^old_string was not found in "f"$/)
+    } finally {
+      if (saved === undefined) delete process.env.DSH_HARNESS_BOOST
+      else process.env.DSH_HARNESS_BOOST = saved
+    }
+  })
+
+  it('adds no hint when nothing is close', () => {
+    let message = ''
+    try { applyLiteralEdit('a\nb\n', 'zzz\nyyy', 'X', false, 'f') } catch (error) { message = (error as Error).message }
+    expect(message).toBe('old_string was not found in "f"')
+  })
+
   it('matches across normalized line endings', () => {
     expect(applyLiteralEdit('one\ntwo', 'one\ntwo', 'x', false, 'f').replacements).toBe(1)
   })

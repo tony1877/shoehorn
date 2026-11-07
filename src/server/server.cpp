@@ -163,6 +163,7 @@ struct Server {
     // Earlier assistant reasoning is not resent; subsequent tool-result turns
     // retain the thinking channel unless the request explicitly disables it.
     bool                             drop_reasoning = true, think_after_tool = true;
+    int                              keep_reasoning_tail = 0;  // with drop_reasoning: chars of each earlier reasoning kept
     int                              think_budget = 32768;  // hard cap on reasoning tokens (0 = off); loops are cut earlier
     // first-come-first-served turn taking: each request takes a ticket and runs when `serving` reaches it
     std::mutex                       mu;
@@ -941,8 +942,28 @@ loaded:
         // earlier assistant turns' reasoning: not resent (smaller, steadier prompts; the template may keep it)
         for (auto & mm : msgs) {
             if (!mm.is_object() || mm.value("role", "") != "assistant") continue;
+            // --keep-reasoning-tail N: keep the end of each earlier reasoning (where the model states its next move),
+            // so a tool loop does not lose its plan every step. The cut depends only on the text: the same message
+            // renders the same way in every later request, so the prompt stays a cacheable prefix.
+            std::string tail;
+            if (S.keep_reasoning_tail > 0) {
+                for (const char * k : { "reasoning_content", "reasoning" }) {
+                    if (tail.empty() && mm.contains(k) && mm[k].is_string()) tail = mm[k].get<std::string>();
+                }
+                if (tail.size() > (size_t) S.keep_reasoning_tail) {
+                    size_t from = tail.size() - (size_t) S.keep_reasoning_tail;
+                    while (from < tail.size() && ((unsigned char) tail[from] & 0xC0) == 0x80) from++;  // UTF-8 boundary
+                    const size_t nl = tail.find('\n', from);
+                    const size_t dot = tail.find(". ", from);
+                    const size_t cut = std::min(nl == std::string::npos ? tail.size() : nl + 1,
+                                                dot == std::string::npos ? tail.size() : dot + 2);
+                    if (cut < tail.size()) from = cut;  // start at a line or sentence
+                    tail = "…" + tail.substr(from);
+                }
+            }
             mm.erase("reasoning_content");
             mm.erase("reasoning");
+            if (!tail.empty()) mm["reasoning_content"] = tail;
             if (mm.contains("content") && mm["content"].is_string()) {
                 std::string c = mm["content"].get<std::string>();
                 for (size_t a; (a = c.find("<think>")) != std::string::npos;) {
@@ -2314,6 +2335,7 @@ int serve(const std::vector<std::string> & args_in) {
         else if (a == "--mtp") S->mtp = std::atoi(val().c_str());
         else if (a == "--echo") S->echo = std::atoi(val().c_str()) != 0;
         else if (a == "--drop-reasoning") S->drop_reasoning = std::atoi(val().c_str()) != 0;
+        else if (a == "--keep-reasoning-tail") S->keep_reasoning_tail = std::max(0, std::atoi(val().c_str()));
         else if (a == "--think-after-tool") S->think_after_tool = std::atoi(val().c_str()) != 0;
         else if (a == "--sys-cache") S->sys_cache_max = std::atoi(val().c_str());
         else if (a == "--sys-cache-gb") S->sys_cache_gb = std::atof(val().c_str());
@@ -2591,7 +2613,7 @@ int serve(const std::vector<std::string> & args_in) {
             json h = json::object();
             const sys::GpuSensors g = sys::gpu_sensors();
             if (g.ok) {
-                h["gpu"] = { { "temp_c", g.temp_c }, { "power_w", g.power_w }, { "mem_util", g.mem_util } };
+                h["gpu"] = { { "temp_c", g.temp_c }, { "power_w", g.power_w }, { "mem_util", g.mem_util }, { "fan_pct", g.fan_pct } };
                 if (g.vram_total) {
                     h["gpu"]["vram_total"] = g.vram_total;
                     h["gpu"]["vram_used"]  = g.vram_used;
@@ -2615,7 +2637,7 @@ int serve(const std::vector<std::string> & args_in) {
                         if (!n.is_object()) return;
                         const std::string id = n.value("SensorId", std::string()), here = depth == 2 ? n.value("Text", std::string()) : hw;
                         const std::string type = n.value("Type", std::string());
-                        if (!id.empty() && (type == "Temperature" || type == "Voltage")) {
+                        if (!id.empty() && (type == "Temperature" || type == "Voltage" || type == "Fan" || type == "Power")) {
                             const std::string v = n.value("Value", std::string());
                             char *            end = nullptr;
                             const double      t   = std::strtod(v.c_str(), &end);
@@ -2623,7 +2645,7 @@ int serve(const std::vector<std::string> & args_in) {
                             if (end != v.c_str())
                                 sensors.push_back({ { "kind", id.substr(1, a == std::string::npos ? std::string::npos : a - 1) },
                                                     { "hw", here }, { "name", n.value("Text", std::string()) },
-                                                    { type == "Voltage" ? "v" : "c", t } });
+                                                    { type == "Voltage" ? "v" : type == "Fan" ? "rpm" : type == "Power" ? "w" : "c", t } });
                         }
                         if (n.contains("Children") && n["Children"].is_array())
                             for (const auto & ch : n["Children"]) walk(ch, depth + 1, here);
@@ -2658,8 +2680,12 @@ int serve(const std::vector<std::string> & args_in) {
             }
             if (!h.contains("sensors")) {  // Linux: the hwmon drivers' sensors, under the same names
                 json sensors = json::array();
-                for (const auto & b : sys::board_sensors())
-                    sensors.push_back({ { "kind", b.kind }, { "hw", b.hw }, { "name", b.name }, { b.volt ? "v" : "c", b.value } });
+                for (const auto & b : sys::board_sensors()) {
+                    json s = { { "kind", b.kind }, { "hw", b.hw }, { "name", b.name }, { b.power ? "w" : b.fan ? "rpm" : b.volt ? "v" : "c", b.value } };
+                    if (b.pwm >= 0) s["pwm"] = b.pwm;
+                    if (b.pwm_auto >= 0) s["auto"] = b.pwm_auto == 1;
+                    sensors.push_back(s);
+                }
                 if (!sensors.empty()) h["sensors"] = sensors;
             }
             // when this snapshot was taken: the pages flag readings that stop updating (a hung sensor query here)

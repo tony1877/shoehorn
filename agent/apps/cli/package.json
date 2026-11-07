@@ -106,6 +106,8 @@
     "@deepseek-ai/dsh-experimental-session-search": "workspace:*",
     "@deepseek-ai/dsh-experimental-tool-worktree": "workspace:*",
     "@deepseek-ai/dsh-experimental-plugin-market-bundle": "workspace:*",
+    "@deepseek-ai/dsh-harness-boost": "workspace:^",
+    "@deepseek-ai/dsh-admin-shell": "workspace:^",
     "@deepseek-ai/dsh-tool-memory": "workspace:^",
     "@deepseek-ai/dsh-tool-session-query": "workspace:^"
   },

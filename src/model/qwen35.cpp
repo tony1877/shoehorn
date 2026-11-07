@@ -206,6 +206,11 @@ bool Qwen35Hparams::load(const GgufFile & f, std::string & err) {
     n_ctx_train          = f.i64(key(a, "context_length"), 0);
     n_rot                = f.i64(key(a, "rope.dimension_count"), head_dim);
     rope_freq_base       = f.f32(key(a, "rope.freq_base"), 10000.0f);
+    n_ctx_orig           = f.i64(key(a, "rope.scaling.original_context_length"), n_ctx_train);
+    if (f.str(key(a, "rope.scaling.type"), "") == "yarn") {
+        const float factor = f.f32(key(a, "rope.scaling.factor"), 1.0f);
+        if (factor > 1.0f) { rope_freq_scale = 1.0f / factor; rope_ext_factor = 1.0f; }
+    }
     rms_eps              = f.f32(key(a, "attention.layer_norm_rms_epsilon"), 1e-6f);
     full_attn_interval   = f.i64(key(a, "full_attention_interval"), 4);
     ssm_d_conv           = f.i64(key(a, "ssm.conv_kernel"), 0);
@@ -395,6 +400,13 @@ bool Qwen35::load(const std::string & path, const LoadOptions & opt, std::string
 
     // state: KV cache for attention layers, conv + delta-net state for recurrent layers
     n_ctx_                 = std::max(kKvPad, (opt.n_ctx + kKvPad - 1) / kKvPad * kKvPad);
+    if (hp_.rope_ext_factor == 0.0f && hp_.n_ctx_orig > 0 && opt.n_ctx > hp_.n_ctx_orig) {
+        const float factor   = (float) opt.n_ctx / (float) hp_.n_ctx_orig;
+        hp_.rope_freq_scale  = 1.0f / factor;
+        hp_.rope_ext_factor  = 1.0f;
+        std::fprintf(stderr, "rope: YaRN x%.2f (context %d over the trained %lld)\n", factor, opt.n_ctx,
+                     (long long) hp_.n_ctx_orig);
+    }
     W_                     = n_ctx_;
     int64_t n_attn = 0;
     bool    all_gpu = gpu_ != nullptr;
@@ -2056,9 +2068,9 @@ ggml_cgraph * Qwen35::build_graph(ggml_context * ctx, int n, const EvalOpts & o,
             Qc                 = norm(Qc, L.q_norm);
             Kc                 = norm(Kc, L.k_norm);
             Qc = ggml_rope_multi(ctx, Qc, inp_pos, nullptr, (int) h.n_rot, sections, GGML_ROPE_TYPE_IMROPE,
-                                 (int) h.n_ctx_train, h.rope_freq_base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
+                                 (int) h.n_ctx_orig, h.rope_freq_base, h.rope_freq_scale, h.rope_ext_factor, 1.0f, 32.0f, 1.0f);
             Kc = ggml_rope_multi(ctx, Kc, inp_pos, nullptr, (int) h.n_rot, sections, GGML_ROPE_TYPE_IMROPE,
-                                 (int) h.n_ctx_train, h.rope_freq_base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
+                                 (int) h.n_ctx_orig, h.rope_freq_base, h.rope_freq_scale, h.rope_ext_factor, 1.0f, 32.0f, 1.0f);
 
             // write this batch's K/V at [n_past, n_past + n), then attend over [0, n_kv)
             ggml_tensor * kc = k_cache_[(size_t) il];
@@ -2292,8 +2304,8 @@ ggml_tensor * Qwen35::mtp_layer(ggml_context * ctx, ggml_cgraph * gf, ggml_tenso
     ggml_tensor * cur = norm(x, L.attn_norm);
     ggml_tensor * Kc  = norm(ggml_reshape_3d(ctx, ggml_mul_mat(ctx, L.wk, cur), hd, h.n_head_kv, n), L.k_norm);
     ggml_tensor * Vc  = ggml_reshape_3d(ctx, ggml_mul_mat(ctx, L.wv, cur), hd, h.n_head_kv, n);
-    Kc = ggml_rope_multi(ctx, Kc, pos, nullptr, (int) h.n_rot, sections, GGML_ROPE_TYPE_IMROPE, (int) h.n_ctx_train,
-                         h.rope_freq_base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
+    Kc = ggml_rope_multi(ctx, Kc, pos, nullptr, (int) h.n_rot, sections, GGML_ROPE_TYPE_IMROPE, (int) h.n_ctx_orig,
+                         h.rope_freq_base, h.rope_freq_scale, h.rope_ext_factor, 1.0f, 32.0f, 1.0f);
     const int64_t row = hd * h.n_head_kv;
     ggml_build_forward_expand(gf, ggml_set_rows(ctx, mtp_k_, ggml_reshape_2d(ctx, Kc, row, n), kvidx));
     ggml_build_forward_expand(gf, ggml_set_rows(ctx, mtp_v_, ggml_reshape_2d(ctx, Vc, row, n), kvidx));
@@ -2304,7 +2316,7 @@ ggml_tensor * Qwen35::mtp_layer(ggml_context * ctx, ggml_cgraph * gf, ggml_tenso
     ggml_tensor * gate = ggml_cont_2d(ctx, ggml_view_3d(ctx, qg, hd, h.n_head, n, es * hd * 2, es * hd * 2 * h.n_head, es * hd),
                                       hd * h.n_head, n);
     Qc = ggml_rope_multi(ctx, norm(Qc, L.q_norm), pos, nullptr, (int) h.n_rot, sections, GGML_ROPE_TYPE_IMROPE,
-                         (int) h.n_ctx_train, h.rope_freq_base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
+                         (int) h.n_ctx_orig, h.rope_freq_base, h.rope_freq_scale, h.rope_ext_factor, 1.0f, 32.0f, 1.0f);
     ggml_tensor * K = ggml_view_3d(ctx, mtp_k_, hd, h.n_head_kv, Wm_, ggml_row_size(mtp_k_->type, hd), mtp_k_->nb[1], 0);
     ggml_tensor * V = ggml_view_3d(ctx, mtp_v_, hd, h.n_head_kv, Wm_, ggml_row_size(mtp_v_->type, hd), mtp_v_->nb[1], 0);
     ggml_tensor * a = ggml_flash_attn_ext(ctx, ggml_permute(ctx, Qc, 0, 2, 1, 3), ggml_permute(ctx, K, 0, 2, 1, 3),
@@ -2787,9 +2799,9 @@ bool Qwen35::eval_multi(const std::vector<MultiSeq> & seqs, int topk, float * lo
             ggml_tensor * gate = ggml_cont_2d(ctx, ggml_view_3d(ctx, qg, hd, h.n_head, N, es * hd * 2, es * hd * 2 * h.n_head, es * hd),
                                               hd * h.n_head, N);
             Qc = ggml_rope_multi(ctx, norm(Qc, Lw.q_norm), inp_pos, nullptr, (int) h.n_rot, sections, GGML_ROPE_TYPE_IMROPE,
-                                 (int) h.n_ctx_train, h.rope_freq_base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
+                                 (int) h.n_ctx_orig, h.rope_freq_base, h.rope_freq_scale, h.rope_ext_factor, 1.0f, 32.0f, 1.0f);
             Kc = ggml_rope_multi(ctx, norm(Kc, Lw.k_norm), inp_pos, nullptr, (int) h.n_rot, sections, GGML_ROPE_TYPE_IMROPE,
-                                 (int) h.n_ctx_train, h.rope_freq_base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f);
+                                 (int) h.n_ctx_orig, h.rope_freq_base, h.rope_freq_scale, h.rope_ext_factor, 1.0f, 32.0f, 1.0f);
             Qc = ggml_cont(ctx, Qc);
             Kc = ggml_cont(ctx, Kc);
             // in phases over all sequences (K/V writes, page selections on the GPU, gathers on the CPU, attention on the
@@ -3334,9 +3346,9 @@ bool Qwen35::draft_eval(const std::vector<std::vector<int32_t>> & ins, int topk,
             ggml_tensor * gate = ggml_cont_2d(ctx, ggml_view_3d(ctx, qg, hd, h.n_head, N, es * hd * 2, es * hd * 2 * h.n_head, es * hd),
                                               hd * h.n_head, N);
             Qc = ggml_cont(ctx, ggml_rope_multi(ctx, norm(Qc, Lw.q_norm), inp_pos, nullptr, (int) h.n_rot, sections, GGML_ROPE_TYPE_IMROPE,
-                                                (int) h.n_ctx_train, h.rope_freq_base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f));
+                                                (int) h.n_ctx_orig, h.rope_freq_base, h.rope_freq_scale, h.rope_ext_factor, 1.0f, 32.0f, 1.0f));
             Kc = ggml_cont(ctx, ggml_rope_multi(ctx, norm(Kc, Lw.k_norm), inp_pos, nullptr, (int) h.n_rot, sections, GGML_ROPE_TYPE_IMROPE,
-                                                (int) h.n_ctx_train, h.rope_freq_base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f));
+                                                (int) h.n_ctx_orig, h.rope_freq_base, h.rope_freq_scale, h.rope_ext_factor, 1.0f, 32.0f, 1.0f));
             const int64_t row = hd * nkv;
             ggml_tensor * a   = nullptr;
             for (size_t b = 0; b < members_.size(); b++) {
@@ -3595,15 +3607,15 @@ bool Qwen35::draft_mtp_multi(const std::vector<MtpItem> & items, int topk, bool 
     ggml_tensor * cur = norm(x, L.attn_norm);
     ggml_tensor * Kc  = norm(ggml_reshape_3d(ctx, ggml_mul_mat(ctx, L.wk, cur), hd, h.n_head_kv, M), L.k_norm);
     ggml_tensor * Vc  = ggml_reshape_3d(ctx, ggml_mul_mat(ctx, L.wv, cur), hd, h.n_head_kv, M);
-    Kc = ggml_cont(ctx, ggml_rope_multi(ctx, Kc, inp_p, nullptr, (int) h.n_rot, sections, GGML_ROPE_TYPE_IMROPE, (int) h.n_ctx_train,
-                                        h.rope_freq_base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f));
+    Kc = ggml_cont(ctx, ggml_rope_multi(ctx, Kc, inp_p, nullptr, (int) h.n_rot, sections, GGML_ROPE_TYPE_IMROPE, (int) h.n_ctx_orig,
+                                        h.rope_freq_base, h.rope_freq_scale, h.rope_ext_factor, 1.0f, 32.0f, 1.0f));
     ggml_tensor * qg   = ggml_reshape_3d(ctx, ggml_mul_mat(ctx, L.wq, cur), hd * 2, h.n_head, M);
     const size_t  es   = ggml_element_size(qg);
     ggml_tensor * Qc   = ggml_view_3d(ctx, qg, hd, h.n_head, M, es * hd * 2, es * hd * 2 * h.n_head, 0);
     ggml_tensor * gate = ggml_cont_2d(ctx, ggml_view_3d(ctx, qg, hd, h.n_head, M, es * hd * 2, es * hd * 2 * h.n_head, es * hd),
                                       hd * h.n_head, M);
     Qc = ggml_cont(ctx, ggml_rope_multi(ctx, norm(Qc, L.q_norm), inp_p, nullptr, (int) h.n_rot, sections, GGML_ROPE_TYPE_IMROPE,
-                                        (int) h.n_ctx_train, h.rope_freq_base, 1.0f, 0.0f, 1.0f, 32.0f, 1.0f));
+                                        (int) h.n_ctx_orig, h.rope_freq_base, h.rope_freq_scale, h.rope_ext_factor, 1.0f, 32.0f, 1.0f));
     const int64_t row = hd * h.n_head_kv;
     ggml_tensor * a   = nullptr;
     for (int64_t i = 0; i < M; i++) {
