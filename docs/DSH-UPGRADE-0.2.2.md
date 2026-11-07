@@ -48,24 +48,24 @@ upstream's work is in liveshare, the UI primitives, forge, CUA (macOS) and sched
 
 ## Steps
 
-1. [ ] **Snapshot the uncommitted work.** Commit the 13 uncommitted `agent/` files, the rest of the working tree
+1. [x] **Snapshot the uncommitted work.** Commit the 13 uncommitted `agent/` files, the rest of the working tree
    (engine sensors, YaRN, spec auto, the rig changes) and the `experiments/` deletions onto a branch, so the merge has
    a clean base. *Needs the owner's OK: nothing has been committed so far.*
-2. [ ] Create branch `dsh-upgrade-0.2.2` and worktree `C:\src\shoehorn-upgrade`. Merge `dsh-v0.2.2-rc.1` into
+2. [x] Create branch `dsh-upgrade-0.2.2` and worktree `C:\src\shoehorn-upgrade`. Merge `dsh-v0.2.2-rc.1` into
    `agent/` (base = `dsh-v0.2.1-rc.2`, `-X ours` as before, then review all 18 files plus the 10 uncommitted ones).
-3. [ ] Run `pnpm install` and `pnpm run build:lib`; fix the host and client typecheck errors, package by package,
+3. [x] Run `pnpm install` and `pnpm run build:lib`; fix the host and client typecheck errors, package by package,
    logging the counts here.
-4. [ ] Handle the five upstream changes listed above; settle the `apply_patch` and read-before-write choices in our
+4. [x] Handle the five upstream changes listed above; settle the `apply_patch` and read-before-write choices in our
    presets.
-5. [ ] Run the tests of every package we patch: agent-loop, compaction-basic, the pruner, fs-local, tool-fs, the
+5. [x] Run the tests of every package we patch: agent-loop, compaction-basic, the pruner, fs-local, tool-fs, the
    shells, mcp-client, repeat-tool-reminder, integrations and the UI style rules.
-6. [ ] Run the full build (`pnpm run build`, 9 gates). Start a test dsh on port 3090 with a copy of `~/.dsh`
+6. [x] Run the full build (`pnpm run build`, 9 gates). Start a test dsh on port 3090 with a copy of `~/.dsh`
    (`C:\Users\aless\dsh-test-home`, refreshed), pointed at the rig.
 7. [ ] Live checks on the test dsh against the rig. These are the five not run last time, plus the new ones:
-   - [ ] Write, edit and pwsh tools; a 75 s command; auto-background with a command longer than its wait.
-   - [ ] Vision: `read_image`, and an image pasted into the chat.
+   - [x] Write, edit and pwsh tools; a 75 s command; auto-background with a command longer than its wait.
+   - [x] Vision: `read_image`, and an image pasted into the chat.
    - [ ] A long session through compaction. This uses the summarizer route and the 512k context on the rig.
-   - [ ] The integrations page and the browser MCP server.
+   - [x] The integrations page and the browser MCP server.
    - [ ] Telegram against the fake Bot API; one webhook delivery.
    - [ ] The streamed file preview on a large write; our themes (light, soft dark, Solarized).
    - [ ] Preset edits from the UI persist after a restart (the loader change).
@@ -84,3 +84,32 @@ upstream's work is in liveshare, the UI primitives, forge, CUA (macOS) and sched
 ## Log
 
 - 2026-11-07: plan written. `dsh-upstream` fetched; dry-run merge shows 18 conflicts.
+- 2026-11-07: step 1: snapshot `5b39c5be07d` on `dsh-upgrade-0.2.2`, written through a separate index, so main and the
+  running dsh's working tree were not touched (`rig-wifi-usb/` and `cleanup-c.ps1` left out).
+- 2026-11-07: step 2: worktree `C:\src\shoehorn-upgrade` switched to the branch. Tree-level 3-way merge (no shared
+  history with upstream): 18 conflicts. Config files take upstream's version plus our entries. Code: upstream's file with
+  our patch replayed (`patch -F3`), and the rejected hunks applied by hand. Upstream moved `errorMessage` to
+  `pipeline.ts` `toolErrorMessage`, so our thrown-JSON fix went there.
+- 2026-11-07: step 3: `build:lib`: 4 host errors (misplaced fuzzy hunks) fixed. 34 test type errors fixed by porting
+  to `executeToolFixture` (upstream reshaped `tools.execute` into batches). Client: liveshare's endpoint gate needed
+  our 18 `integrations/*` endpoints, classified `owner-only`. Committed as `d2f4a856dbd`.
+- 2026-11-07: step 4: nothing to change. Our presets never mounted fs-observation-policy, and `tool-fs` defaults
+  `applyPatch: false`, so the 27B keeps using `edit`. The purpose declarations compile.
+- 2026-11-07: step 5: 4,946 tests pass, 20 fail:
+  - 18 are Windows symlink EPERM or the app-container temp path.
+  - `gen-tool-catalog` also fails on main (our extra tools).
+  - Telegram is flaky (also fails on main, passes alone).
+  Fixed along the way:
+  - the shells' auto-background test setups (they need the session-projection and native-executor plugins)
+  - `read_image` regaining upstream's `readImage` gate
+  - our Solarized palette written as `rgb()`, with the dark illustration test pinned to it
+  - our CSS-module `:hover` rules wrapped in `@media (hover: hover)`
+- 2026-11-07: step 6: `pnpm run build`: 10 of 10 gates pass. Test dsh on port 3090 with
+  `DSH_HOME=C:\Users\aless\dsh-test-home` (fresh copy; session index repointed; Telegram off). The only warning is
+  `tool-ralph` pending, as before.
+- 2026-11-07: step 7, partly done:
+  - A real task against the rig: write, edit, pwsh, and a 70 s command auto-backgrounded (1 min 42 s, ~71 tok/s).
+  - `read_image` worked in 7 s; the session title was generated.
+  - Integrations overview answers, and the browser MCP server is connected with its tools listed.
+  Not run yet: a long session through compaction, Telegram (fake API), a webhook, a pasted image, preset persistence
+  after a restart.
