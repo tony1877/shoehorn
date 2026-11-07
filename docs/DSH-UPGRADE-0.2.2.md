@@ -69,7 +69,7 @@ upstream's work is in liveshare, the UI primitives, forge, CUA (macOS) and sched
    - [ ] Telegram against the fake Bot API; one webhook delivery.
    - [ ] The streamed file preview on a large write; our themes (light, soft dark, Solarized).
    - [ ] Preset edits from the UI persist after a restart (the loader change).
-8. [ ] **Switch:**
+8. [x] **Switch:**
    - Back up `~/.dsh` to `~/.dsh/backups/pre-dsh-0.2.2-*`.
    - Merge the branch to main, rebuild the agent and restart dsh. `use-remote-shoehorn.ps1` stays pointed at the rig.
    - Rollback: restore the backup, check out the pre-merge commit, rebuild.
@@ -113,3 +113,10 @@ upstream's work is in liveshare, the UI primitives, forge, CUA (macOS) and sched
   - Integrations overview answers, and the browser MCP server is connected with its tools listed.
   Not run yet: a long session through compaction, Telegram (fake API), a webhook, a pasted image, preset persistence
   after a restart.
+- 2026-11-07: step 8: switched production:
+  - Backup in `~/.dsh/backups/pre-dsh-0.2.2-20261107-170441`, taken without `node_modules`: its junctions loop.
+  - main fast-forwarded to `2349ceb12e7` (previous main: `532cd637a3e`).
+  - `pnpm run build` passed 10 of 10 gates; dsh, SearXNG and the exec bridge are back up on 3080 / 8888 / 9999.
+  - The UI loads with our theme, preset and the rig's model.
+  - Rollback: `git reset --hard 532cd637a3e`, restore the backup, rebuild. The pre-upgrade uncommitted work is in
+    `5b39c5be07d`.
