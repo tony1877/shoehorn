@@ -14,7 +14,9 @@
   font: 500 12px/1 ui-monospace, "Cascadia Mono", Consolas, monospace; font-variant-numeric: tabular-nums;
   cursor: pointer; white-space: nowrap;
 }
-.chip:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.1)); color: var(--dsw-alias-label-primary, inherit); }
+@media (hover: hover) {
+  .chip:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.1)); color: var(--dsw-alias-label-primary, inherit); }
+}
 .chip.writing { color: var(--dsw-alias-label-primary, inherit); border-color: rgba(217,165,74,.55); }
 .dot { width: 7px; height: 7px; border-radius: 50%; corner-shape: round; background: var(--sh-dot); flex: none; }
 .writing .dot { box-shadow: 0 0 0 3px rgba(217,165,74,.2); animation: shBeat 1.2s ease-in-out infinite; }
@@ -29,7 +31,9 @@
   font: inherit; font-size: 13px; cursor: pointer;
 }
 .footerWide { justify-content: flex-start; }
-.footer:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.1)); color: var(--dsw-alias-label-primary, inherit); }
+@media (hover: hover) {
+  .footer:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.1)); color: var(--dsw-alias-label-primary, inherit); }
+}
 .footerIcon { position: relative; display: inline-flex; }
 .footerDot { position: absolute; right: -3px; bottom: -2px; width: 6px; height: 6px; border-radius: 50%; corner-shape: round; background: var(--sh-dot); }
 
@@ -48,12 +52,18 @@
 .barSpacer { flex: 1; }
 .tabs { display: inline-flex; gap: 4px; margin-left: 12px; }
 .tab { font: 12px ui-monospace, "Cascadia Mono", Consolas, monospace; color: #9ba1ab; background: transparent; border: 1px solid transparent; border-radius: var(--dsw-radius-sm); padding: 3px 10px; cursor: pointer; }
-.tab:hover { color: #f2f3f5; }
+@media (hover: hover) {
+  .tab:hover { color: #f2f3f5; }
+}
 .tabOn { color: #f2f3f5; border-color: #1d1f23; background: #0e0f11; }
 .barLink { color: #9ba1ab; text-decoration: none; font-size: 12px; }
-.barLink:hover { color: #f2f3f5; }
+@media (hover: hover) {
+  .barLink:hover { color: #f2f3f5; }
+}
 .close { width: 28px; height: 28px; border: 1px solid #1d1f23; border-radius: var(--dsw-radius-sm); background: #0e0f11; color: #9ba1ab; cursor: pointer; }
-.close:hover { color: #f2f3f5; }
+@media (hover: hover) {
+  .close:hover { color: #f2f3f5; }
+}
 .frame { width: 100%; height: 100%; border: 0; background: #08090a; }
 @keyframes shFade { from { opacity: 0; } }
 @keyframes shRise { from { opacity: 0; transform: translateY(8px) scale(.99); } }

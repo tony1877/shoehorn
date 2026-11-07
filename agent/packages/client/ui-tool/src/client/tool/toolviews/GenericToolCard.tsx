@@ -1,3 +1,4 @@
+import type { ContextMenuTriggerProps } from '@deepseek-ai/dsh-client-ui-context-menu/client'
 import type { ReactNode } from 'react'
 import {
   IconApiOutlineRegular, IconBrowseOutlineRegular, IconCodeOutlineRegular, IconEditOutlineRegular, IconSearchOutlineRegular,
@@ -28,10 +29,14 @@ const VARIANT_ICONS: Record<ToolRowVariant, ReactNode> = {
 /** Card props: the owner payload plus the render site's locale seat (plain prop). */
 export type GenericToolCardProps = ToolCallOwnerProps & {
   t: ToolTreeProps['t']
+  /** Bind the recorded file to the original Session. */
+  getFileTriggerProps: (path: string) => ContextMenuTriggerProps
 }
 
 /** @param props - current tool stage and locale. @returns its preparation or dispatched card. */
-export function GenericToolCard({ toolName, block, cwd, home, openFile, inspect, useDisclosure, t }: GenericToolCardProps) {
+export function GenericToolCard({
+  toolName, block, cwd, home, openFile, getFileTriggerProps, inspect, useDisclosure, t,
+}: GenericToolCardProps) {
   const model = toolRowModel(toolName, block, cwd, home)
   const autoReview = model.autoReviewDenial === null
     ? null
@@ -51,31 +56,32 @@ export function GenericToolCard({ toolName, block, cwd, home, openFile, inspect,
   const streaming = state === 'preparing' ? block.args.text('command') : undefined
   return (
     <>
-      <ToolRow
-        useDisclosure={useDisclosure}
-        t={t}
-        variant={model.variant}
-        toolName={toolName}
-        icon={VARIANT_ICONS[model.variant]}
-        title={t(model.titleKey)}
-        summary={model.summary}
-        // Single-file tools never expose an args body — the path link is the only
-        // args interaction. A card is not an args body: a read/write/edit row is
-        // single-file AND carries a card, so the card expands under the path link.
-        bodyRaw={singleFile || autoReview !== null ? null : model.bodyRaw}
-        output={autoReview?.output ?? model.output}
-        errorSummary={autoReview?.summary ?? model.errorSummary}
-        terminal={terminal}
-        diff={diff}
-        read={read}
-        search={search}
-        web={web}
-        state={state}
-        filePath={model.filePath}
-        onOpenFile={singleFile ? openFile : undefined}
-        inspect={inspect}
-      />
-      {streaming !== undefined && <LivePreview text={streaming} label={t(model.titleKey)} />}
+    <ToolRow
+      fileContextMenuProps={model.filePath === undefined ? undefined : getFileTriggerProps(model.filePath)}
+      useDisclosure={useDisclosure}
+      t={t}
+      variant={model.variant}
+      toolName={toolName}
+      icon={VARIANT_ICONS[model.variant]}
+      title={t(model.titleKey)}
+      summary={model.summary}
+      // Single-file tools never expose an args body — the path link is the only
+      // args interaction. A card is not an args body: a read/write/edit row is
+      // single-file AND carries a card, so the card expands under the path link.
+      bodyRaw={singleFile || autoReview !== null ? null : model.bodyRaw}
+      output={autoReview?.output ?? model.output}
+      errorSummary={autoReview?.summary ?? model.errorSummary}
+      terminal={terminal}
+      diff={diff}
+      read={read}
+      search={search}
+      web={web}
+      state={state}
+      filePath={model.filePath}
+      onOpenFile={singleFile ? openFile : undefined}
+      inspect={inspect}
+    />
+    {streaming !== undefined && <LivePreview text={streaming} label={t(model.titleKey)} />}
     </>
   )
 }

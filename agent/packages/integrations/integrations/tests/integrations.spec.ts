@@ -1,3 +1,4 @@
+import { executeToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -77,7 +78,7 @@ async function until(check: () => boolean | Promise<boolean>, ms = 15_000): Prom
 
 let seq = 0
 function call(ctx: Context, name: string, args: unknown) {
-  return ctx.tools.execute({ signal: new AbortController().signal, callId: ToolCallId(`t${++seq}`), name, arguments: args })
+  return executeToolFixture(ctx, { signal: new AbortController().signal, callId: ToolCallId(`t${++seq}`), name, arguments: args })
 }
 
 describe('webhook helpers', () => {

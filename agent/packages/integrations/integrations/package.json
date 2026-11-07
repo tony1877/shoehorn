@@ -87,6 +87,7 @@
     "@deepseek-ai/dsh-user-approval": "workspace:^",
     "@deepseek-ai/dsh-user-questions": "workspace:^",
     "@deepseek-ai/dsh-util-values": "workspace:^",
-    "@deepseek-ai/dsh-webhook": "workspace:^"
+    "@deepseek-ai/dsh-webhook": "workspace:^",
+    "@deepseek-ai/dsh-tool-testkit": "workspace:*"
   }
 }

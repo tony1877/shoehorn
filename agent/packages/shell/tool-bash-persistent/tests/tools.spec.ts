@@ -1,5 +1,8 @@
+import { executeToolFixture } from '@deepseek-ai/dsh-tool-testkit'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { provideWorkingDirectoryFixture, unsupportedInbox } from '@deepseek-ai/dsh-agent-loop-testkit'
+import { unsupportedModel, provideWorkingDirectoryFixture, unsupportedInbox } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { Context } from '@deepseek-ai/cordis'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SESSION_FORMAT_VERSION, Session, SessionId } from '@deepseek-ai/dsh-session'
@@ -44,6 +47,7 @@ async function agent(ctx: Context, cwd: string | undefined): Promise<Agent> {
     id,
     options: {},
     session,
+    model: unsupportedModel(),
     inbox: unsupportedInbox(),
     status: 'idle',
     ctx: scope.ctx,
@@ -69,7 +73,7 @@ function call(
   command: string,
   signal = new AbortController().signal,
 ) {
-  return ctx.tools.execute({
+  return executeToolFixture(ctx, {
     signal,
     callId: ToolCallId(`persistent-bash-${++callNumber}`),
     name: 'bash',
@@ -351,6 +355,8 @@ async function setup(
   contexts.push(ctx)
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
+  await ctx.plugin(SessionProjectionRegistry)
+  await ctx.plugin(NativeToolExecutor)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(TerminalSessionService)
   const stub = stubBackend(initialMode)
@@ -759,6 +765,8 @@ describe('tool-bash-persistent', () => {
     contexts.push(ctx)
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
+    await ctx.plugin(SessionProjectionRegistry)
+    await ctx.plugin(NativeToolExecutor)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(TerminalSessionService)
     const spawnStarted = Promise.withResolvers<undefined>()
@@ -824,6 +832,8 @@ async function setupWithJobs(config: ToolBashPersistent.Config) {
   contexts.push(ctx)
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
+  await ctx.plugin(SessionProjectionRegistry)
+  await ctx.plugin(NativeToolExecutor)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(TerminalSessionService)
   await ctx.plugin(LocalJobRegistry)
@@ -835,7 +845,7 @@ async function setupWithJobs(config: ToolBashPersistent.Config) {
 }
 
 function jobCall(ctx: Context, owner: Agent, name: string, args: unknown) {
-  return ctx.tools.execute({
+  return executeToolFixture(ctx, {
     signal: new AbortController().signal,
     callId: ToolCallId(`persistent-bash-job-${++callNumber}`),
     name,
@@ -925,7 +935,7 @@ describe('tool-bash-persistent auto-background', () => {
     const shell = stub.sessions[0]!
     shell.mode = 'long'
     const started = Date.now()
-    const result = await ctx.tools.execute({
+    const result = await executeToolFixture(ctx, {
       signal: new AbortController().signal,
       callId: ToolCallId(`persistent-bash-${++callNumber}`),
       name: 'bash',

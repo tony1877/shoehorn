@@ -290,8 +290,10 @@
   cursor: pointer;
 }
 
-.preset:hover {
-  background: var(--dsw-alias-interactive-bg-hover);
+@media (hover: hover) {
+  .preset:hover {
+    background: var(--dsw-alias-interactive-bg-hover);
+  }
 }
 
 .preset span {
