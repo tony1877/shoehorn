@@ -2946,6 +2946,13 @@ int serve(const std::vector<std::string> & args_in) {
             if (S->model) {
                 mem["weights_gpu"] = S->model->gpu_weight_bytes();
                 mem["weights_cpu"] = S->model->cpu_weight_bytes();
+                if (auto * q4 = dynamic_cast<model::Qwen4Exp *>(S->model.get())) {
+                    // the experts are read from the file mapping (the OS file cache, not process memory), the hot ones
+                    // copied into VRAM slots
+                    mem["experts_gpu"]    = q4->expert_cache_bytes();
+                    mem["experts_mapped"] = S->model->cpu_weight_bytes();
+                    mem["weights_cpu"]    = 0;
+                }
             }
             if (S->q35) {
                 mem["residual"]   = S->q35->residual_bytes();
@@ -2963,6 +2970,7 @@ int serve(const std::vector<std::string> & args_in) {
         }
         out["hw"]["vram_read"] = model::traffic::vram_read.load();  // weight bytes read since start (see traffic.h)
         out["hw"]["ram_read"]  = model::traffic::ram_read.load();
+        if (S->model) out["config"]["ctx"] = S->model->n_ctx();  // the loaded model's own context
         if (S->q35) out["config"]["window"] = S->q35->gpu_kv();
         resp.set_header("Cache-Control", "no-store");
         // pages served from this machine or the local network (a client's dashboard, on any LAN device) may read the numbers

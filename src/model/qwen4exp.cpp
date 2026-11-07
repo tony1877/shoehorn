@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <chrono>
 #include <filesystem>
+#include <atomic>
 #include <thread>
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -1113,7 +1114,7 @@ bool Qwen4Exp::run_part(int part, int64_t il, const int32_t * tokens, int n, flo
 bool Qwen4Exp::prefill(const int32_t * tokens, int N, float * logits, std::string & err) {
     const auto & h = hp_;
     // short prompts: the whole-model graph per 512 tokens
-    static const int min_layered = std::getenv("E8_LAYERED_MIN") ? std::atoi(std::getenv("E8_LAYERED_MIN")) : 4096;
+    static const int min_layered = std::getenv("E8_LAYERED_MIN") ? std::atoi(std::getenv("E8_LAYERED_MIN")) : 256;  // the experts rarely fit in RAM: read them once per prompt
     if (N < min_layered) return CausalLM::prefill(tokens, N, logits, err) && (!mtp_ || mtp_fill(n_past_, err));
     if (n_past_ + N > n_ctx_) {
         err = "prefill: context full (" + std::to_string(n_ctx_) + " tokens)";
@@ -1148,7 +1149,27 @@ bool Qwen4Exp::prefill(const int32_t * tokens, int N, float * logits, std::strin
             for (auto & r : ranges) w.push_back({ r.first, r.second });
             if (!w.empty()) PrefetchVirtualMemory(GetCurrentProcess(), w.size(), w.data(), 0);
 #else
-            for (auto & r : ranges) madvise(r.first, r.second, MADV_WILLNEED);
+            // read in 16 MB pieces on 8 threads (one madvise reads synchronously at a few hundred MB/s; NVMe wants
+            // queue depth), touching one byte per page so the pages are really in before the layer runs
+            static const uintptr_t pg = (uintptr_t) sysconf(_SC_PAGESIZE);
+            std::vector<std::pair<char *, size_t>> pieces;
+            for (auto & r : ranges) {
+                char * a = (char *) ((uintptr_t) r.first & ~(pg - 1));
+                char * e = (char *) r.first + r.second;
+                for (; a < e; a += (16u << 20)) pieces.emplace_back(a, std::min<size_t>(16u << 20, (size_t) (e - a)));
+            }
+            std::atomic<size_t>      next{ 0 };
+            std::vector<std::thread> th;
+            for (int t = 0; t < 8; t++) {
+                th.emplace_back([&]() {
+                    volatile char sink = 0;
+                    for (size_t i; (i = next++) < pieces.size();) {
+                        madvise(pieces[i].first, pieces[i].second, MADV_WILLNEED);
+                        for (size_t o = 0; o < pieces[i].second; o += pg) sink = sink + pieces[i].first[o];
+                    }
+                });
+            }
+            for (auto & x : th) x.join();
 #endif
         });
     };

@@ -96,6 +96,7 @@ public:
     int64_t  bos_token() const override { return hp_.bos; }
     uint64_t gpu_weight_bytes() const override { return gpu_bytes_; }
     uint64_t cpu_weight_bytes() const override { return cpu_bytes_; }
+    uint64_t expert_cache_bytes() const { return ec_.bytes; }  // VRAM slots holding hot experts
     const Qwen4ExpHparams & hp() const { return hp_; }
     // expert cache statistics (hit rate, slots, swaps)
     std::string cache_report() const;

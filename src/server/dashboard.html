@@ -354,7 +354,8 @@ function renderMem() {
   // the residual can sit in VRAM (--res-gpu-gb): only the rest of it is in RAM
   const rG = loaded ? Math.min(m.residual_gpu || 0, m.residual || 0) : 0;
   const wG = loaded ? (m.weights_gpu || 0) : 0, wC = loaded ? (m.residual || 0) - rG + (m.weights_cpu || 0) : 0, kv = m.kv_ram || 0;
-  const vUsed = m.vram_total - m.vram_free, vOther = Math.max(0, vUsed - wG - rG), rUsed = m.ram_total - m.ram_avail, rOther = Math.max(0, rUsed - wC - kv);
+  const eG = loaded ? (m.experts_gpu || 0) : 0;
+  const vUsed = m.vram_total - m.vram_free, vOther = Math.max(0, vUsed - wG - rG - eG), rUsed = m.ram_total - m.ram_avail, rOther = Math.max(0, rUsed - wC - kv);
   const cell = (name, total, segs, note) => {
     const used = segs.reduce((s, x) => s + x.b, 0), free = Math.max(0, total - used);
     return `<div class="mhead"><b>${name}</b><span class="mono">${gb(total)} GB</span></div>
@@ -365,9 +366,11 @@ function renderMem() {
   const gpu = cell("Graphics card", m.vram_total, loaded
     ? [{ c: "w", b: wG, l: m.base_type ? `base weights (${m.base_type.toUpperCase()})` : "4-bit base weights" },
        { c: "r", b: rG, l: m.residual_type ? `residual weights (${m.residual_type.toUpperCase()})` : "residual weights" },
+       { c: "r", b: eG, l: "expert cache (hot experts)" },
        { c: "k", b: vOther, l: "context window, buffers" }]
     : [{ c: "o", b: vUsed, l: "desktop, other apps" }]);
-  const ram = cell("System memory", m.ram_total, [{ c: "w", b: wC, l: m.residual_type ? `residual weights (${m.residual_type.toUpperCase()})` : "residual weights" }, { c: "k", b: kv, l: "conversation memory" }, { c: "o", b: rOther, l: "other programs" }]);
+  const ram = cell("System memory", m.ram_total, [{ c: "w", b: wC, l: m.residual_type ? `residual weights (${m.residual_type.toUpperCase()})` : "residual weights" }, { c: "k", b: kv, l: "conversation memory" }, { c: "o", b: rOther, l: "other programs" }],
+    loaded && m.experts_mapped ? `<div><span>experts mapped from disk (the OS caches what fits)</span><span class="mono">${gb(m.experts_mapped)}</span></div>` : "");
   if ($("gpu").dataset.h !== gpu) { $("gpu").innerHTML = gpu; $("gpu").dataset.h = gpu; }
   if ($("ram").dataset.h !== ram) { $("ram").innerHTML = ram; $("ram").dataset.h = ram; }
   // PCIe: the residual crosses the link once per check, so traffic = residual size / check time
