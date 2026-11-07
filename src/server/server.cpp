@@ -182,6 +182,10 @@ struct Server {
         std::vector<Ck>      cks;
         uint64_t             epoch = 0, used = 0;
         bool                 busy = false;  // a request is using it
+        // models without native slots (Flash-Next): the sequence state while another slot holds the model
+        std::vector<uint8_t> parked;
+        const void *         parked_owner = nullptr;  // the model the parked state belongs to
+        int                  parked_n     = 0;
     };
     Slot                             park;         // the parked side sequence's tokens (one slot, Qwen35::swap_side)
     // the system prompt cache: the state after a cold prompt's head (everything before its first user turn), restored
@@ -228,6 +232,11 @@ struct Server {
     std::unique_ptr<model::Qwen35>   drafter;                // sequence slots: drafts beside the verifies
     std::vector<Slot>                slots;
     uint64_t                         slot_clock = 0;
+    // models without native slots: --slots N conversations take turns on the one sequence, the others parked in RAM
+    // (CausalLM::save_seq); one request at a time
+    int                              generic_slots = 1;
+    int                              active_slot   = -1;
+    const void *                     active_owner  = nullptr;
     std::function<bool(int, std::string &)> load;  // loads entry i (lazy mode)
     std::string                      router_url;  // llama-server router to unload / forward to (empty = none)
     std::string                      timing_log;  // JSON lines of per-request timings (no content), when set
@@ -1188,10 +1197,25 @@ loaded:
     };
     // ---- sequence slot: the one whose state or checkpoint this prompt extends furthest, else an empty one, else the
     // least recently used
-    const int n_slots = S.q35 ? S.q35->n_slots() : 1;
+    const int  n_slots = S.q35 ? S.q35->n_slots() : S.generic_slots;
+    const bool parking = !S.q35 && n_slots > 1;  // generic slots: one request at a time, the others' states parked
     if ((int) S.slots.size() != n_slots) S.slots.assign((size_t) n_slots, Server::Slot{});
+    if (parking && S.active_owner != (const void *) &m) {  // a new model: no slot's state is in it
+        for (auto & x : S.slots) {
+            x.state_tokens.clear();
+            x.ck_tokens.clear();
+            x.cks.clear();
+            std::vector<uint8_t>().swap(x.parked);
+            x.parked_owner = nullptr;
+        }
+        S.active_slot  = 0;
+        S.active_owner = &m;
+        if (m.n_past() > 0) m.reset();
+    }
     auto any_free = [&] {
-        return S.model.get() != &m || std::any_of(S.slots.begin(), S.slots.end(), [](const Server::Slot & x) { return !x.busy; });
+        if (S.model.get() != &m) return true;
+        if (parking) return std::none_of(S.slots.begin(), S.slots.end(), [](const Server::Slot & x) { return x.busy; });
+        return std::any_of(S.slots.begin(), S.slots.end(), [](const Server::Slot & x) { return !x.busy; });
     };
     if (!any_free()) turn.wait_for(any_free);
     if (S.model.get() != &m || (int) S.slots.size() != n_slots) {
@@ -1213,7 +1237,7 @@ loaded:
         sync_slot(s);
         const auto & sl  = S.slots[(size_t) s];
         if (sl.busy) continue;
-        const int    np  = S.q35 ? S.q35->slot_n_past(s) : m.n_past();
+        const int    np  = S.q35 ? S.q35->slot_n_past(s) : !parking || s == S.active_slot ? m.n_past() : sl.parked_n;
         size_t       len = 0;
         if (extends(sl.state_tokens) && (int) sl.state_tokens.size() == np) len = sl.state_tokens.size();
         else if (extends(sl.ck_tokens)) len = sl.ck_tokens.size();
@@ -1232,6 +1256,38 @@ loaded:
         for (int s = 0; s < n_slots; s++) {
             if (!S.slots[(size_t) s].busy && (slot < 0 || S.slots[(size_t) s].used < S.slots[(size_t) slot].used)) slot = s;
         }
+    }
+    if (parking && slot != S.active_slot) {  // park the active conversation, bring this one's state back
+        const auto t0 = std::chrono::steady_clock::now();
+        auto       forget = [](Server::Slot & x) {
+            x.state_tokens.clear();
+            x.ck_tokens.clear();
+            x.cks.clear();
+            std::vector<uint8_t>().swap(x.parked);
+            x.parked_owner = nullptr;
+        };
+        if (S.active_slot >= 0 && S.active_slot < n_slots) {
+            auto & a = S.slots[(size_t) S.active_slot];
+            if (!a.state_tokens.empty() && m.save_seq(a.parked)) {
+                a.parked_owner = &m;
+                a.parked_n     = m.n_past();
+            } else {
+                forget(a);
+            }
+        }
+        auto & b = S.slots[(size_t) slot];
+        if (!(b.parked_owner == (const void *) &m && !b.parked.empty() && m.load_seq(b.parked))) {
+            m.reset();
+            b.state_tokens.clear();
+            b.ck_tokens.clear();
+            b.cks.clear();
+        }
+        std::vector<uint8_t>().swap(b.parked);
+        b.parked_owner = nullptr;
+        S.active_slot  = slot;
+        fprintf(stderr, "slot %d: state swapped in (%d tokens) in %.0f ms
+", slot, m.n_past(),
+                1e3 * std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
     }
     std::optional<DraftLane> dlane;
     if (S.drafter) dlane.emplace(S);
@@ -2628,6 +2684,7 @@ int serve(const std::vector<std::string> & args_in) {
     if (ubatch > 0) o.n_ubatch = ubatch;
     o.side_seq        = side && n_slots == 1;
     o.n_slots         = n_slots;
+    S->generic_slots  = n_slots;
     o.kv_pool_gb      = kv_pool_gb;
     o.draft_batch     = n_slots > 1 ? (draft_batch > 0 ? std::min(draft_batch, n_slots) : std::min(n_slots, 2)) : 1;
     S->draft_batch    = o.draft_batch;

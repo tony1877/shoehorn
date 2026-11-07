@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace e8::model {
 
@@ -32,6 +33,11 @@ public:
     }
     virtual void checkpoint_save()    = 0;
     virtual void checkpoint_restore() = 0;
+    // The whole sequence state (KV up to n_past, recurrent state, the checkpoint, draft state) to / from host memory,
+    // so several conversations can take turns on one model without reading their prompts again. Models without it
+    // return false.
+    virtual bool save_seq(std::vector<uint8_t> & out) { (void) out; return false; }
+    virtual bool load_seq(const std::vector<uint8_t> & in) { (void) in; return false; }
 
     virtual int64_t  n_vocab() const          = 0;
     virtual int      n_past() const           = 0;

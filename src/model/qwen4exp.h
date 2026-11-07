@@ -87,6 +87,8 @@ public:
     bool eval_last(const int32_t * tokens, int n, float * logits, std::string & err) override;
     void checkpoint_save() override;
     void checkpoint_restore() override;
+    bool save_seq(std::vector<uint8_t> & out) override;
+    bool load_seq(const std::vector<uint8_t> & in) override;
 
     int64_t  n_vocab() const override { return hp_.n_vocab; }
     int      n_past() const override { return n_past_; }

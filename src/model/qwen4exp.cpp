@@ -429,6 +429,93 @@ void Qwen4Exp::checkpoint_restore() {
     mtp_n_ = std::max(1, std::min(mtp_n_, n_past_));
 }
 
+// Sequence state blob: a header of ints, the token history, the MTP residual rows, then every state tensor in a fixed
+// order (rows below n_past for the positional ones: KV, MTP KV, the sparse-attention index; whole for the recurrent
+// state and its checkpoint).
+namespace {
+template <class F> void for_state(const std::vector<ggml_tensor *> & k, const std::vector<ggml_tensor *> & v,
+                                  const std::vector<ggml_tensor *> & ir, const std::vector<ggml_tensor *> & ip,
+                                  std::initializer_list<const std::vector<ggml_tensor *> *> whole, int n, int kpool, F f) {
+    auto rows = [&](ggml_tensor * t, int64_t r) {
+        if (t) f(t, (size_t) std::min<int64_t>(r, t->ne[1]) * t->nb[1]);
+    };
+    for (size_t l = 0; l < k.size(); l++) {
+        rows(k[l], n);
+        rows(v[l], n);
+    }
+    for (size_t l = 0; l < ir.size(); l++) {
+        rows(ir[l], n);
+        rows(ip[l], kpool > 0 ? n / kpool + 1 : 0);
+    }
+    for (const auto * w : whole) {
+        for (ggml_tensor * t : *w) {
+            if (t) f(t, ggml_nbytes(t));
+        }
+    }
+}
+} // namespace
+
+bool Qwen4Exp::save_seq(std::vector<uint8_t> & out) {
+    if (rec_n_ > 0) return false;  // in the middle of a verify
+    const int hdr[5] = { n_past_, ck_n_past_, mtp_h0_, mtp_n_, (int) history_.size() };
+    out.clear();
+    auto put = [&](const void * p, size_t n) {
+        const size_t o = out.size();
+        out.resize(o + n);
+        if (n) std::memcpy(out.data() + o, p, n);
+    };
+    const uint64_t nh = mtp_h_.size();
+    put(hdr, sizeof hdr);
+    put(&nh, sizeof nh);
+    put(history_.data(), history_.size() * sizeof(int32_t));
+    put(mtp_h_.data(), mtp_h_.size() * sizeof(float));
+    for_state(k_cache_, v_cache_, idx_raw_, idx_pool_, { &conv_state_, &ssm_state_, &ple_state_, &conv_ck_, &ssm_ck_, &ple_ck_ },
+              n_past_, kpool_, [&](ggml_tensor * t, size_t n) {
+                  const size_t o = out.size();
+                  out.resize(o + n);
+                  if (n) ggml_backend_tensor_get(t, out.data() + o, 0, n);
+              });
+    return true;
+}
+
+bool Qwen4Exp::load_seq(const std::vector<uint8_t> & in) {
+    int      hdr[5];
+    uint64_t nh = 0;
+    size_t   o  = 0;
+    auto get = [&](void * p, size_t n) {
+        if (o + n > in.size()) return false;
+        if (n) std::memcpy(p, in.data() + o, n);
+        o += n;
+        return true;
+    };
+    if (!get(hdr, sizeof hdr) || !get(&nh, sizeof nh) || hdr[0] < 0 || hdr[0] > n_ctx_ || hdr[4] < 0) return false;
+    std::vector<int32_t> hist((size_t) hdr[4]);
+    std::vector<float>   mh((size_t) nh);
+    if (!get(hist.data(), hist.size() * sizeof(int32_t)) || !get(mh.data(), mh.size() * sizeof(float))) return false;
+    bool ok = true;
+    for_state(k_cache_, v_cache_, idx_raw_, idx_pool_, { &conv_state_, &ssm_state_, &ple_state_, &conv_ck_, &ssm_ck_, &ple_ck_ },
+              hdr[0], kpool_, [&](ggml_tensor * t, size_t n) {
+                  if (!ok || o + n > in.size()) {
+                      ok = false;
+                      return;
+                  }
+                  if (n) ggml_backend_tensor_set(t, in.data() + o, 0, n);
+                  o += n;
+              });
+    if (!ok || o != in.size()) {
+        reset();
+        return false;
+    }
+    n_past_    = hdr[0];
+    ck_n_past_ = hdr[1];
+    mtp_h0_    = hdr[2];
+    mtp_n_     = hdr[3];
+    history_   = std::move(hist);
+    mtp_h_     = std::move(mh);
+    rec_n_     = 0;
+    return true;
+}
+
 void Qwen4Exp::reset() {
     for (auto b : sbuf_) {
         if (b) ggml_backend_buffer_clear(b, 0);
