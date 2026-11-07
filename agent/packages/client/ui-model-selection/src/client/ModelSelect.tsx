@@ -103,7 +103,8 @@ export function ModelSelect(
   const id = useId()
 
   const accountProviderName = t('provider.account')
-  const groups = useMemo(() => orderModelProviders(state.groups).map(group => ({
+  // routes named *-summarizer exist for compaction routing (summarizationProvider), not to chat with: not offered
+  const groups = useMemo(() => orderModelProviders(state.groups.filter(group => !group.id.endsWith('-summarizer'))).map(group => ({
     ...group,
     provider: {
       id: group.id,
