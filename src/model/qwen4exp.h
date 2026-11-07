@@ -100,6 +100,19 @@ public:
     // expert cache statistics (hit rate, slots, swaps)
     std::string cache_report() const;
 
+    // ---- MTP speculation (the model's own next-token block, from a separate *MTP*.gguf next to the model) -------
+    // The MTP block reads a token and the trunk's final hyper-connection residual of the position before it, and
+    // predicts the token after it; chained on its own residual it drafts several. Its KV holds one row per position
+    // (filled from the trunk's residuals as the prompt and the accepted tokens go by).
+    bool has_mtp() const { return mtp_; }
+    // up to k greedy drafts following `next` (sampled, not evaluated yet)
+    bool mtp_draft(int32_t next, int k, std::vector<int32_t> & drafts, std::string & err);
+    // evaluates n tokens (next + drafts) with the logits of every row and the DeltaNet inputs recorded;
+    // commit(keep) then keeps the first `keep` of them (the recurrent state is replayed over just those)
+    bool verify(const int32_t * tokens, int n, float * logits, std::string & err);
+    bool commit(int keep, std::string & err);
+    int  mtp_max_batch() const { return kRecMax; }
+
 private:
     struct Inputs {
         ggml_tensor * embd = nullptr, * pos = nullptr, * mask = nullptr, * ple = nullptr, * res = nullptr;
@@ -130,6 +143,19 @@ private:
     ggml_tensor * ple(ggml_context * ctx, ggml_cgraph * gf, int64_t il, ggml_tensor * res, ggml_tensor * emb, int n);
     // n-gram table rows for `n` tokens at the current position, gathered and dequantized: [n_embd per token]
     void          ple_rows(const int32_t * tokens, int n, std::vector<float> & out) const;
+    // DeltaNet recurrence over qkv [C, n] (conv + gated delta rule): updates the layer's state, returns [S, Hv, n, 1]
+    ggml_tensor * gdn_core(ggml_context * ctx, ggml_cgraph * gf, int64_t il, ggml_tensor * qkv, ggml_tensor * g,
+                           ggml_tensor * beta, int n);
+    bool          load_mtp(const std::string & model_path, std::string & err);
+    // the MTP block over n rows at positions pos0..: tokens, residual rows h [hc*n_embd each]; outputs the greedy
+    // next token and the residual of the last row (either may be null)
+    bool          mtp_run(const int32_t * tokens, const float * h, int n, int pos0, int32_t * argmax, float * h_out,
+                          std::string & err);
+    // MTP rows for every position whose token and previous residual are known (positions < n_past_)
+    bool          mtp_fill(int upto, std::string & err);  // rows for positions < upto
+    void          mtp_keep_h(int upto);                    // drop residual rows at positions >= upto
+    void          mtp_push_h(const float * rows, int pos0, int n);  // trunk residual rows of positions pos0..
+    bool          embed_rows(const int32_t * tokens, int n, std::vector<float> & out) const;
 
     Qwen4ExpHparams         hp_;
     GgufSet                 file_;
@@ -150,6 +176,28 @@ private:
     std::vector<ggml_tensor *> conv_ck_, ssm_ck_, ple_ck_;
     int ck_n_past_ = 0;
     bool last_only_ = false;
+
+    // MTP
+    static constexpr int kRecMax = 8;  // largest verify batch
+    bool                 mtp_ = false;
+    GgufSet              mtp_file_;
+    ggml_context *       mtp_ctx_ = nullptr;      // MTP weights, KV and the speculation buffers (GPU)
+    ggml_backend_buffer_t mtp_buf_ = nullptr;
+    ggml_tensor *        mtp_eh_ = nullptr, * mtp_enorm_ = nullptr, * mtp_hnorm_ = nullptr;
+    ggml_tensor *        mtp_head_norm_ = nullptr, * mtp_head_down_ = nullptr, * mtp_head_up_ = nullptr;
+    int64_t              mtp_il_ = -1;            // its index in layers_ / k_cache_ (after the trunk)
+    Qwen4ExpLayer        mtp_layer_;
+    ggml_tensor *        mtp_k_ = nullptr, * mtp_v_ = nullptr;
+    std::vector<float>   mtp_h_;                  // trunk residual rows for positions mtp_h0_ ..
+    int                  mtp_h0_ = 0, mtp_n_ = 1; // MTP KV rows are valid for positions 1 .. mtp_n_-1
+    bool                 no_ple_rows_ = false;    // MTP graphs: skip the n-gram lookups
+    ggml_tensor *        h_all_ = nullptr;        // this graph's final residual, every row
+    // verify: recorded DeltaNet / PLE inputs and a snapshot of the recurrent state before it
+    bool                 record_ = false;
+    int                  rec_n_ = 0, sp_n_past_ = 0;
+    std::vector<ggml_tensor *> rec_qkv_, rec_g_, rec_beta_, rec_ple_, sp_conv_, sp_ssm_, sp_ple_;
+    ggml_context *       rec_ctx_[2] = { nullptr, nullptr };
+    ggml_backend_buffer_t rec_buf_[2] = { nullptr, nullptr };
 
     LoadOptions          opt_;
     int                  n_ctx_ = 0, n_past_ = 0, kpool_ = 0;

@@ -121,6 +121,7 @@ bool reasoning_loops(const std::string & text) {
 // a model this server can load: tokenizer and chat templates stay loaded, the weights only while it is active
 struct Entry {
     std::string               alias, path, res;
+    int                       n_ctx = 0;  // --also ALIAS=PATH[,RES][@CTX]: this model's own context (0 = --ctx)
     std::string               mmproj;  // vision encoder (llama.cpp mmproj GGUF): images in chat messages; "" = none
     llama_model *             vocab_model = nullptr;
     const llama_vocab *       vocab       = nullptr;
@@ -1522,6 +1523,9 @@ loaded:
                     const size_t q = (p / (size_t) S.ckpt_every + 1) * (size_t) S.ckpt_every;
                     if (q < next && q + 1 < prompt.size()) to = q;
                 }
+                // prefill() counts from 0 on every call: move the base along, or progress restarts at each checkpoint
+                S.live_read_base = (int) p;
+                model::traffic::prefill_done = 0;
                 ok = m.prefill(prompt.data() + p, (int) (to - p), last.data(), err);
                 p  = to;
                 if (ok && to < next) save_ck(to);
@@ -2057,10 +2061,58 @@ loaded:
         };
         next();
         consume();
-        while (!done && m.n_past() + 2 < m.n_ctx()) {
-            if (!yield() || !m.eval_last(&out.back(), 1, last.data(), err)) return false;
-            next();
-            consume();
+        // Flash-Next with its MTP block: draft k tokens, verify them in one pass, keep the agreeing prefix. Each
+        // row is sampled from the model's own logits exactly as without drafts, so the output distribution is the same.
+        auto *    q4    = dynamic_cast<model::Qwen4Exp *>(&m);
+        static const int flash_k = std::getenv("E8_FLASH_MTP_K") ? std::atoi(std::getenv("E8_FLASH_MTP_K")) : 3;
+        const int mtp_k = q4 && q4->has_mtp() && S.mtp > 0 ? std::max(0, std::min({ S.mtp, flash_k, q4->mtp_max_batch() - 1 })) : 0;
+        if (mtp_k > 0) {
+            const size_t         nv = (size_t) m.n_vocab();
+            std::vector<float>   all;
+            std::vector<int32_t> dr, toks;
+            long long            cycles = 0, proposed = 0, accepted = 0;
+            double               t_draft = 0, t_verify = 0;
+            using sclk = std::chrono::steady_clock;
+            while (!done && m.n_past() + mtp_k + 2 < m.n_ctx()) {
+                if (!yield()) return false;
+                const auto a = sclk::now();
+                if (!q4->mtp_draft(out.back(), mtp_k, dr, err)) return false;
+                const auto b = sclk::now();
+                toks.assign(1, out.back());
+                toks.insert(toks.end(), dr.begin(), dr.end());
+                all.resize(toks.size() * nv);
+                if (!q4->verify(toks.data(), (int) toks.size(), all.data(), err)) return false;
+                t_draft += std::chrono::duration<double>(b - a).count();
+                t_verify += std::chrono::duration<double>(sclk::now() - b).count();
+                int keep = 0;
+                for (size_t i = 0; i < toks.size(); i++) {
+                    std::copy(all.begin() + (ptrdiff_t) (i * nv), all.begin() + (ptrdiff_t) ((i + 1) * nv), last.begin());
+                    next();
+                    consume();
+                    keep = (int) i + 1;
+                    if (done || i >= dr.size() || out.back() != dr[i]) break;
+                }
+                if (!q4->commit(keep, err)) return false;
+                cycles++;
+                proposed += (long long) dr.size();
+                accepted += keep - 1;
+            }
+            while (!done && m.n_past() + 2 < m.n_ctx()) {  // the last few positions of the context
+                if (!yield() || !m.eval_last(&out.back(), 1, last.data(), err)) return false;
+                next();
+                consume();
+            }
+            char b[200];
+            snprintf(b, sizeof b, "MTP: %lld cycles, %.2f tokens/cycle, drafts kept %lld/%lld, draft %.0f / verify %.0f ms per cycle",
+                     cycles, cycles ? (double) (accepted + cycles) / cycles : 0.0, accepted, proposed,
+                     cycles ? 1e3 * t_draft / cycles : 0.0, cycles ? 1e3 * t_verify / cycles : 0.0);
+            R.spec = b;
+        } else {
+            while (!done && m.n_past() + 2 < m.n_ctx()) {
+                if (!yield() || !m.eval_last(&out.back(), 1, last.data(), err)) return false;
+                next();
+                consume();
+            }
         }
     }
     if (generation_loop) {
@@ -2295,8 +2347,14 @@ int serve(const std::vector<std::string> & args_in) {
         else if (a == "--host") host = val();
         else if (a == "--port") port = std::atoi(val().c_str());
         else if (a == "--alias") S->alias = val();
-        else if (a == "--also") {  // ALIAS=PATH[,RES]
-            const std::string v = val();
+        else if (a == "--also") {  // ALIAS=PATH[,RES][@CTX]
+            std::string       v  = val();
+            int               ectx = 0;
+            if (const size_t at = v.rfind('@'); at != std::string::npos && at + 1 < v.size() &&
+                v.find_first_not_of("0123456789", at + 1) == std::string::npos) {
+                ectx = std::atoi(v.c_str() + at + 1);
+                v.resize(at);
+            }
             const size_t      eq = v.find('='), cm = v.find(',', eq == std::string::npos ? 0 : eq);
             if (eq == std::string::npos) {
                 fprintf(stderr, "--also needs ALIAS=PATH[,RES]\n");
@@ -2306,6 +2364,7 @@ int serve(const std::vector<std::string> & args_in) {
             e.alias = v.substr(0, eq);
             e.path  = v.substr(eq + 1, cm == std::string::npos ? std::string::npos : cm - eq - 1);
             if (cm != std::string::npos) e.res = v.substr(cm + 1);
+            e.n_ctx = ectx;
             extra.push_back(std::move(e));
         }
         else if (a == "--api-key-file") key_file = val();
@@ -2448,14 +2507,27 @@ int serve(const std::vector<std::string> & args_in) {
             if (std::find(removed.begin(), removed.end(), json(c.alias)) != removed.end()) continue;
             auto it = std::find_if(ms.begin(), ms.end(), [&](const json & m) { return m.value("alias", std::string()) == c.alias; });
             if (it == ms.end()) {
-                ms.insert(ms.begin() + (long long) front++, json{ { "alias", c.alias }, { "path", c.path }, { "res", c.res } });
+                json j = { { "alias", c.alias }, { "path", c.path }, { "res", c.res } };
+                if (c.n_ctx > 0) j["ctx"] = c.n_ctx;
+                ms.insert(ms.begin() + (long long) front++, j);
                 changed = true;
             } else {
-                front = (size_t) (it - ms.begin()) + 1;
-                if (it->value("path", std::string()) != c.path || it->value("res", std::string()) != c.res) {
-                    (*it)["path"] = c.path;
-                    (*it)["res"]  = c.res;
-                    changed       = true;
+                // the command line's models come first, in its order (the first one is the default)
+                const size_t at = (size_t) (it - ms.begin());
+                if (at != front) {
+                    json j = *it;
+                    ms.erase(it);
+                    ms.insert(ms.begin() + (long long) front, j);
+                    changed = true;
+                }
+                json & e = ms[front++];
+                if (e.value("path", std::string()) != c.path || e.value("res", std::string()) != c.res ||
+                    e.value("ctx", 0) != c.n_ctx) {
+                    e["path"] = c.path;
+                    e["res"]  = c.res;
+                    if (c.n_ctx > 0) e["ctx"] = c.n_ctx;
+                    else e.erase("ctx");
+                    changed = true;
                 }
             }
         }
@@ -2467,6 +2539,7 @@ int serve(const std::vector<std::string> & args_in) {
         e.path  = m.value("path", std::string());
         e.res   = m.value("res", std::string());
         e.mmproj = m.value("mmproj", std::string());
+        e.n_ctx  = m.value("ctx", 0);
         if (e.mmproj.empty()) {  // a single mmproj*.gguf next to the model
             std::error_code ec;
             std::vector<std::string> found;
@@ -2570,6 +2643,7 @@ int serve(const std::vector<std::string> & args_in) {
         const auto t0 = std::chrono::steady_clock::now();
         model::LoadOptions lo = o;
         lo.residual_path      = sp->entries[(size_t) idx].res;
+        if (sp->entries[(size_t) idx].n_ctx > 0) lo.n_ctx = sp->entries[(size_t) idx].n_ctx;
         if (lo.res_gpu_gb < 0 && !sp->entries[(size_t) idx].mmproj.empty()) {  // auto budget: room for the encoder
             std::error_code ec;
             const auto      sz = std::filesystem::file_size(sp->entries[(size_t) idx].mmproj, ec);

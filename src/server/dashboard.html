@@ -87,7 +87,7 @@ nav a:hover { color: var(--ink); }
 .mval small { font: 400 12px var(--f-mono); color: var(--ink2); letter-spacing: 0; margin-left: 4px; }
 .bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: var(--raise); gap: 2px; }
 .bar i { display: block; height: 100%; transition: flex-grow .9s cubic-bezier(.2,.7,.2,1); }
-.b-w { background: var(--accent); } .b-k { background: var(--read); } .b-o { background: var(--line2); } .b-f { background: transparent; }
+.b-w { background: var(--accent); } .b-r { background: var(--accent); opacity: .55; } .b-k { background: var(--read); } .b-o { background: var(--line2); } .b-f { background: transparent; }
 .legend { display: grid; gap: 4px; font-size: 12px; color: var(--ink2); }
 .legend div { display: flex; justify-content: space-between; gap: 8px; }
 .legend i { display: inline-block; width: 6px; height: 6px; border-radius: 1px; margin-right: 8px; vertical-align: 1px; }
@@ -351,8 +351,10 @@ function tweenBig() {  // the number eases toward its target instead of jumping
 function renderMem() {
   const m = mem;
   if (!m.vram_total) return;
-  const wG = loaded ? (m.weights_gpu || 0) : 0, wC = loaded ? (m.residual || 0) + (m.weights_cpu || 0) : 0, kv = m.kv_ram || 0;
-  const vUsed = m.vram_total - m.vram_free, vOther = Math.max(0, vUsed - wG), rUsed = m.ram_total - m.ram_avail, rOther = Math.max(0, rUsed - wC - kv);
+  // the residual can sit in VRAM (--res-gpu-gb): only the rest of it is in RAM
+  const rG = loaded ? Math.min(m.residual_gpu || 0, m.residual || 0) : 0;
+  const wG = loaded ? (m.weights_gpu || 0) : 0, wC = loaded ? (m.residual || 0) - rG + (m.weights_cpu || 0) : 0, kv = m.kv_ram || 0;
+  const vUsed = m.vram_total - m.vram_free, vOther = Math.max(0, vUsed - wG - rG), rUsed = m.ram_total - m.ram_avail, rOther = Math.max(0, rUsed - wC - kv);
   const cell = (name, total, segs, note) => {
     const used = segs.reduce((s, x) => s + x.b, 0), free = Math.max(0, total - used);
     return `<div class="mhead"><b>${name}</b><span class="mono">${gb(total)} GB</span></div>
@@ -361,13 +363,15 @@ function renderMem() {
       <div class="legend">${segs.filter(x => x.b > 0).map(x => `<div><span><i class="b-${x.c}"></i>${x.l}</span><span class="mono">${gb(x.b)}</span></div>`).join("")}</div>${note ? `<div class="legend">${note}</div>` : ""}`;
   };
   const gpu = cell("Graphics card", m.vram_total, loaded
-    ? [{ c: "w", b: wG, l: m.base_type ? `base weights (${m.base_type.toUpperCase()})` : "4-bit base weights" }, { c: "k", b: vOther, l: "context window, buffers" }]
+    ? [{ c: "w", b: wG, l: m.base_type ? `base weights (${m.base_type.toUpperCase()})` : "4-bit base weights" },
+       { c: "r", b: rG, l: m.residual_type ? `residual weights (${m.residual_type.toUpperCase()})` : "residual weights" },
+       { c: "k", b: vOther, l: "context window, buffers" }]
     : [{ c: "o", b: vUsed, l: "desktop, other apps" }]);
   const ram = cell("System memory", m.ram_total, [{ c: "w", b: wC, l: m.residual_type ? `residual weights (${m.residual_type.toUpperCase()})` : "residual weights" }, { c: "k", b: kv, l: "conversation memory" }, { c: "o", b: rOther, l: "other programs" }]);
   if ($("gpu").dataset.h !== gpu) { $("gpu").innerHTML = gpu; $("gpu").dataset.h = gpu; }
   if ($("ram").dataset.h !== ram) { $("ram").innerHTML = ram; $("ram").dataset.h = ram; }
   // PCIe: the residual crosses the link once per check, so traffic = residual size / check time
-  const ls = lastSpec(), res = m.residual || 0;
+  const ls = lastSpec(), res = Math.max(0, (m.residual || 0) - (m.residual_gpu || 0));  // what lives in VRAM never crosses
   const perCheckS = ls ? ls.spec.verify_s / ls.spec.cycles : null, bw = perCheckS && res ? res / perCheckS : null;
   const writing = live.busy && live.gen > 0;
   // live: residual bytes this server streamed across the link over the last ~2 s (its own count, never above what
@@ -382,7 +386,7 @@ function renderMem() {
   const p = `<div class="mhead"><b>PCIe link</b><span class="mono">${writing ? "streaming" : live.busy ? "prompt" : other != null ? "another program" : "quiet"}</span></div>
     <div class="mval">${val}<small>${unit}</small></div>
     <canvas id="link"></canvas>
-    <div class="legend"><div><span>Residual sent per check</span><span class="mono">${res ? gb(res) + " GB" : "-"}</span></div>
+    <div class="legend"><div><span>Residual sent per check</span><span class="mono">${res ? gb(res) + " GB" : m.residual_gpu ? "none, all in VRAM" : "-"}</span></div>
       <div><span>Check takes</span><span class="mono">${perCheckS ? fmt(perCheckS * 1000, 0) + " ms" : "-"}</span></div></div>`;
   if ($("pcie").dataset.h !== p) { $("pcie").innerHTML = p; $("pcie").dataset.h = p; }
 }
