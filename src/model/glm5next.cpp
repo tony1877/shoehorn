@@ -34,6 +34,12 @@ std::string key(const char * k) {
     return std::string("glm5-next.") + k;
 }
 
+// the MLA latent is both K and V of a 512-wide head: f16 (or f32) only, as flash attention's quantized paths at that
+// head size are the least exercised; at ~1 KB per token per layer it is small anyway
+ggml_type latent_type(const LoadOptions & o) {
+    return o.kv_type == GGML_TYPE_F32 ? GGML_TYPE_F32 : GGML_TYPE_F16;
+}
+
 } // namespace
 
 bool Glm5NextHparams::load(const GgufSet & s, std::string & err) {
@@ -280,7 +286,7 @@ bool Glm5Next::load(const std::string & path, const LoadOptions & opt, std::stri
             conv_ck_[l]    = ggml_dup_tensor(c, conv_state_[l]);
             ssm_ck_[l]     = ggml_dup_tensor(c, ssm_state_[l]);
         } else {
-            kv_cache_[l] = ggml_new_tensor_2d(c, opt.kv_type, h.kv_lora, n_ctx_);
+            kv_cache_[l] = ggml_new_tensor_2d(c, latent_type(opt), h.kv_lora, n_ctx_);
             if (layers_[l].idx_k) {
                 idx_raw_[l]  = ggml_new_tensor_2d(c, GGML_TYPE_F32, 2 * h.idx_dim, n_ctx_);
                 idx_pool_[l] = ggml_new_tensor_2d(c, GGML_TYPE_F32, h.idx_dim, n_ctx_ / h.kpool + 1);
@@ -1284,7 +1290,7 @@ bool Glm5Next::load_mtp(std::string & err) {
     mtp_head_norm_    = mk(p + "nextn.shared_head_norm.weight");
     if (missing) return false;
     // its caches, like an attention layer's: latent KV, indexer rows, pooled keys
-    ggml_tensor * kv   = ggml_new_tensor_2d(mtp_ctx_, opt_.kv_type, h.kv_lora, n_ctx_);
+    ggml_tensor * kv   = ggml_new_tensor_2d(mtp_ctx_, latent_type(opt_), h.kv_lora, n_ctx_);
     ggml_tensor * raw  = ggml_new_tensor_2d(mtp_ctx_, GGML_TYPE_F32, 2 * h.idx_dim, n_ctx_);
     ggml_tensor * pool = ggml_new_tensor_2d(mtp_ctx_, GGML_TYPE_F32, h.idx_dim, n_ctx_ / h.kpool + 1);
     mtp_buf_ = ggml_backend_alloc_ctx_tensors_from_buft(mtp_ctx_, ggml_backend_get_default_buffer_type(gpu_));
