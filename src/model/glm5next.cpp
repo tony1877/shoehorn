@@ -667,7 +667,9 @@ ggml_tensor * Glm5Next::moe(ggml_context * ctx, int64_t il, ggml_tensor * cur, i
         ggml_tensor * cids = ggml_reshape_2d(ctx, ggml_cast(ctx, look(ec_.cmap[l]), GGML_TYPE_I32), k, n);
         ggml_tensor * wg   = ggml_mul(ctx, w, gm);
         ggml_tensor * wc   = ggml_sub(ctx, w, wg);
-        static const bool la = std::getenv("E8_LOOKAHEAD") != nullptr;
+        // lookahead (the next layer's router on this layer's input starts its expert reads early): on by default here,
+        // 2.5 vs 1.8 tok/s from a 980 PRO (E8_LOOKAHEAD=0 turns it off)
+        static const bool la = !std::getenv("E8_LOOKAHEAD") || std::atoi(std::getenv("E8_LOOKAHEAD")) != 0;
         ggml_tensor * next_ids = nullptr;
         if (la && l + 1 < layers_.size() && layers_[l + 1].gate_inp && hints_[l].gate) {
             next_ids = ggml_cont(ctx, ggml_argsort_top_k(ctx, ggml_add(ctx, ggml_sigmoid(ctx, ggml_mul_mat(ctx, layers_[l + 1].gate_inp, cur)),
