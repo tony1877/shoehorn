@@ -1,5 +1,6 @@
 #include "model/qwen4exp.h"
 #include "model/glm5next.h"
+#include "model/deepseek41.h"
 
 #include "kernels/moe_cpu.h"
 
@@ -1817,6 +1818,11 @@ std::unique_ptr<CausalLM> load_causal_lm(const std::string & path, const LoadOpt
     }
     if (arch == "glm5-next" || arch == "glm5next") {
         auto m = std::make_unique<Glm5Next>();
+        if (!m->load(path, opt, err)) return nullptr;
+        return m;
+    }
+    if (arch == "deepseek41") {
+        auto m = std::make_unique<Deepseek41>();
         if (!m->load(path, opt, err)) return nullptr;
         return m;
     }

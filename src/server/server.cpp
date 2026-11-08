@@ -55,6 +55,7 @@
 #include "model/qwen35.h"
 #include "model/qwen4exp.h"
 #include "model/glm5next.h"
+#include "model/deepseek41.h"
 #include "runtime/spec.h"
 #include "sys/sysinfo.h"
 
@@ -430,6 +431,14 @@ bool load_vocab(Entry & e, const std::string & tmpl_file, std::string & err) {
     llama_model_params mp = llama_model_default_params();
     mp.vocab_only         = true;
     e.vocab_model         = llama_model_load_from_file(e.path.c_str(), mp);
+    if (!e.vocab_model) {
+        // an architecture this llama.cpp does not know (DeepSeek V4.1): a vocab.gguf next to the model holds its
+        // metadata under a known architecture name, no tensors
+        const std::string side = (std::filesystem::path(e.path).parent_path() / "vocab.gguf").string();
+        std::error_code   ec;
+        if (std::filesystem::exists(side, ec)) e.vocab_model = llama_model_load_from_file(side.c_str(), mp);
+        if (e.vocab_model) fprintf(stderr, "%s: vocabulary and chat template from %s\n", e.alias.c_str(), side.c_str());
+    }
     if (!e.vocab_model) {
         err = "cannot load the vocabulary from " + e.path;
         return false;
@@ -3025,6 +3034,10 @@ int serve(const std::vector<std::string> & args_in) {
                     // the experts are read from the file mapping (the OS file cache, not process memory), the hot ones
                     // copied into VRAM slots
                     mem["experts_gpu"]    = q4->expert_cache_bytes();
+                    mem["experts_mapped"] = S->model->cpu_weight_bytes();
+                    mem["weights_cpu"]    = 0;
+                } else if (auto * ds = dynamic_cast<model::Deepseek41 *>(S->model.get())) {
+                    mem["experts_gpu"]    = ds->expert_cache_bytes();
                     mem["experts_mapped"] = S->model->cpu_weight_bytes();
                     mem["weights_cpu"]    = 0;
                 } else if (auto * g5 = dynamic_cast<model::Glm5Next *>(S->model.get())) {
