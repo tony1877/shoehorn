@@ -772,7 +772,8 @@ bool Deepseek41::init_expert_cache(std::string & err) {
     if (budget < 0) {
         size_t free = 0, total = 0;
         ggml_backend_dev_memory(ggml_backend_get_device(gpu_), &free, &total);
-        budget = std::max(0.0, (double) free - 4.0e9);  // compute buffers: prefill pieces offload whole expert tensors
+        // compute buffers: a prefill MoE piece copies a whole layer of experts (~2.7 GB at IQ1_S) plus its temporaries
+        budget = std::max(0.0, (double) free - 8.0e9);
     }
     const int k = (int) h.n_expert_used;
     const int C = (int) std::min<int64_t>(h.n_expert - 1, (int64_t) (budget / ((double) per_expert * n_gpu)) - k);
@@ -1410,6 +1411,12 @@ bool Deepseek41::prefill(const int32_t * tokens, int N, float * logits, std::str
         // ring positions are replayed per layer
         const std::vector<int32_t> ring0 = ring_pos_;
         std::thread pf = prefetch(0);
+        struct Join {  // an early error return must not leave the prefetch thread joinable
+            std::thread & t;
+            ~Join() {
+                if (t.joinable()) t.join();
+            }
+        } join{ pf };
         for (int64_t il = 0; il < h.n_layer; il++) {
             ring_pos_ = ring0;
             int ua    = std::min(piece, 512);
