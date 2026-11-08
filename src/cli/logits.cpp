@@ -39,7 +39,7 @@ std::vector<int32_t> read_token_ids(const std::string & path) {
 int logits(const std::vector<std::string> & args) {
     std::string model, tokens_path, out_path, res_path;
     std::string kv = "f16";
-    int         gpu_layers = 0, batch = 512;
+    int         gpu_layers = 0, batch = 512, last = 0;
     for (size_t i = 2; i < args.size(); i++) {
         const std::string & k   = args[i];
         auto                val = [&]() -> std::string { return i + 1 < args.size() ? args[++i] : std::string(); };
@@ -49,6 +49,7 @@ int logits(const std::vector<std::string> & args) {
         else if (k == "--batch") batch = std::atoi(val().c_str());
         else if (k == "--kv") kv = val();
         else if (k == "--res") res_path = val();
+        else if (k == "--last") last = std::atoi(val().c_str());  // only the last N rows; the rest is prefilled
         else if (model.empty() && k[0] != '-') model = k;
     }
     const std::vector<int32_t> toks = read_token_ids(tokens_path);
@@ -72,17 +73,22 @@ int logits(const std::vector<std::string> & args) {
     }
     model::CausalLM &  m  = *mp;
     const size_t       nv = (size_t) m.n_vocab();
-    std::vector<float> all(toks.size() * nv);
-    for (size_t i = 0; i < toks.size(); i += (size_t) batch) {
+    const size_t       skip = last > 0 && (size_t) last < toks.size() ? toks.size() - (size_t) last : 0;
+    if (skip && !m.prefill(toks.data(), (int) skip, nullptr, err)) {
+        fprintf(stderr, "prefill failed: %s\n", err.c_str());
+        return 1;
+    }
+    std::vector<float> all((toks.size() - skip) * nv);
+    for (size_t i = skip; i < toks.size(); i += (size_t) batch) {
         const int n = (int) std::min(toks.size() - i, (size_t) batch);
-        if (!m.eval(toks.data() + i, n, all.data() + i * nv, err)) {
+        if (!m.eval(toks.data() + i, n, all.data() + (i - skip) * nv, err)) {
             fprintf(stderr, "eval failed: %s\n", err.c_str());
             return 1;
         }
     }
     std::ofstream f(e8::u8path(out_path), std::ios::binary);
     f.write((const char *) all.data(), (std::streamsize) (all.size() * sizeof(float)));
-    printf("%zu tokens x %zu vocab -> %s\n", toks.size(), nv, out_path.c_str());
+    printf("%zu tokens x %zu vocab -> %s\n", toks.size() - skip, nv, out_path.c_str());
     return f ? 0 : 1;
 }
 

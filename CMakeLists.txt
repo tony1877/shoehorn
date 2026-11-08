@@ -129,3 +129,7 @@ e8_embed_html(sensors)
 e8_embed_html(models)
 e8_embed_html(settings)
 target_include_directories(shoehorn PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
+
+# llama.cpp reference logits for checking native models (not built by default)
+add_executable(llama_logits EXCLUDE_FROM_ALL tools/llama_logits.cpp)
+target_link_libraries(llama_logits PRIVATE llama ggml)
