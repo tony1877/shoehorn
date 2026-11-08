@@ -873,8 +873,7 @@ std::string Glm5Next::cache_report() const {
         if (calls && n_timed_) {
             const double per = (double) calls / (double) (hp_.n_layer - hp_.n_dense);
             char extra[200];
-            snprintf(extra, sizeof extra, "
-CPU MoE ops per pass: gate/up %.1f ms, down %.1f ms (%lld calls)", gu * 1e3 / per,
+            snprintf(extra, sizeof extra, "\nCPU MoE ops per pass: gate/up %.1f ms, down %.1f ms (%lld calls)", gu * 1e3 / per,
                      dn * 1e3 / per, calls);
             strncat(prof, extra, sizeof prof - strlen(prof) - 1);
         }
