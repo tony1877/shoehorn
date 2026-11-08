@@ -195,4 +195,23 @@ uint64_t GgufFile::data_offset(const ggml_tensor * t) const {
     return id < 0 ? 0 : (uint64_t) (gguf_get_data_offset(gguf_) + gguf_get_tensor_offset(gguf_, id));
 }
 
+std::vector<float> GgufFile::f32_arr(const std::string & key) const {
+    std::vector<float> out;
+    const int64_t      id = key_id(key);
+    if (id < 0) return out;
+    const gguf_type t = gguf_get_kv_type(gguf_, id);
+    if (t == GGUF_TYPE_FLOAT32) {
+        out.push_back(gguf_get_val_f32(gguf_, id));
+        return out;
+    }
+    if (t == GGUF_TYPE_ARRAY && gguf_get_arr_type(gguf_, id) == GGUF_TYPE_FLOAT32) {
+        const size_t  n = gguf_get_arr_n(gguf_, id);
+        const float * d = (const float *) gguf_get_arr_data(gguf_, id);
+        out.assign(d, d + n);
+        return out;
+    }
+    for (int64_t v : i64_arr(key)) out.push_back((float) v);
+    return out;
+}
+
 } // namespace e8::model

@@ -49,7 +49,7 @@ public:
     virtual uint64_t cpu_weight_bytes() const = 0;
 };
 
-// Picks the implementation from general.architecture (qwen35, qwen4exp).
+// Picks the implementation from general.architecture (qwen35, qwen4exp, glm5-next).
 std::unique_ptr<CausalLM> load_causal_lm(const std::string & path, const LoadOptions & opt, std::string & err);
 
 } // namespace e8::model

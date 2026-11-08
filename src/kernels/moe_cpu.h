@@ -19,6 +19,7 @@ namespace e8::kernels {
 struct PrefetchHint {
     const ggml_tensor *      gate = nullptr, * up = nullptr, * down = nullptr;
     const std::vector<int> * slot_of = nullptr;
+    float                    limit   = 0;  // clamped SwiGLU: gate <= limit, |up| <= limit (0 = plain SwiGLU)
 };
 
 // x [n_embd, n] F32, ids [k, n] I32, w [k, n] F32 (contiguous); gate/up [n_embd, n_ff, n_expert], down

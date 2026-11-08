@@ -54,6 +54,7 @@
 #include "model/causal_lm.h"
 #include "model/qwen35.h"
 #include "model/qwen4exp.h"
+#include "model/glm5next.h"
 #include "runtime/spec.h"
 #include "sys/sysinfo.h"
 
@@ -3006,6 +3007,10 @@ int serve(const std::vector<std::string> & args_in) {
                     // the experts are read from the file mapping (the OS file cache, not process memory), the hot ones
                     // copied into VRAM slots
                     mem["experts_gpu"]    = q4->expert_cache_bytes();
+                    mem["experts_mapped"] = S->model->cpu_weight_bytes();
+                    mem["weights_cpu"]    = 0;
+                } else if (auto * g5 = dynamic_cast<model::Glm5Next *>(S->model.get())) {
+                    mem["experts_gpu"]    = g5->expert_cache_bytes();
                     mem["experts_mapped"] = S->model->cpu_weight_bytes();
                     mem["weights_cpu"]    = 0;
                 }

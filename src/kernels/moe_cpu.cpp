@@ -182,6 +182,7 @@ void gate_up_op(ggml_tensor * dst, int ith, int nth, void * ud) {
     const size_t         rg = quant(tg->vec_dot_type, xg);
     const size_t         ru = tu->vec_dot_type == tg->vec_dot_type ? rg : quant(tu->vec_dot_type, xu);
     const uint8_t *      xu_p = tu->vec_dot_type == tg->vec_dot_type ? xg.data() : xu.data();
+    const float lim = ud ? ((const PrefetchHint *) ud)->limit : 0.0f;
     // rows of inactive pairs are left unwritten: the down op skips the same pairs
     for (const Pair & p : pairs) {
         float *      h  = (float *) ((char *) dst->data + p.t * dst->nb[2] + p.j * dst->nb[1]);
@@ -191,6 +192,10 @@ void gate_up_op(ggml_tensor * dst, int ith, int nth, void * ud) {
             float g = 0, u = 0;
             tg->vec_dot((int) ne, &g, 0, gb + r * gate->nb[1], 0, xg.data() + rg * p.t, 0, 1);
             tu->vec_dot((int) ne, &u, 0, ub + r * up->nb[1], 0, xu_p + ru * p.t, 0, 1);
+            if (lim > 0) {
+                g = std::min(g, lim);
+                u = std::clamp(u, -lim, lim);
+            }
             h[r] = g / (1.0f + std::exp(-g)) * u;
         }
     }

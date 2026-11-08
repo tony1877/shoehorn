@@ -61,6 +61,7 @@ add_library(e8_model STATIC
     src/model/gguf_file.cpp
     src/model/qwen35.cpp
     src/model/qwen4exp.cpp
+    src/model/glm5next.cpp
     src/model/gguf_set.cpp
     src/util/mmap.cpp
     src/model/safetensors.cpp

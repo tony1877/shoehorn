@@ -6,6 +6,7 @@
 #include "model/causal_lm.h"
 #include "model/qwen35.h"
 #include "model/qwen4exp.h"
+#include "model/glm5next.h"
 
 #include <algorithm>
 #include <chrono>
@@ -97,6 +98,7 @@ int decode(const std::vector<std::string> & args) {
     if (auto * q = dynamic_cast<model::Qwen4Exp *>(&m)) {
         printf("%s\n", q->cache_report().c_str());
     }
+    if (auto * g = dynamic_cast<model::Glm5Next *>(&m)) printf("%s\n", g->cache_report().c_str());
     printf("tokens:");
     for (int32_t t : out) printf(" %d", t);
     printf("\n");

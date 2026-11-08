@@ -34,6 +34,7 @@ public:
     std::string str(const std::string & key, const std::string & def) const;
     // Integer or integer-array key as a vector (a scalar becomes one element). Empty when missing.
     std::vector<int64_t> i64_arr(const std::string & key) const;
+    std::vector<float>   f32_arr(const std::string & key) const;  // float (or integer) scalar or array
 
     int64_t n_kv() const;
     // One line describing key/value `i`; arrays longer than `max_items` are summarized.

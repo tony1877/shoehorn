@@ -1,4 +1,5 @@
 #include "model/qwen4exp.h"
+#include "model/glm5next.h"
 
 #include "kernels/moe_cpu.h"
 
@@ -1811,6 +1812,11 @@ std::unique_ptr<CausalLM> load_causal_lm(const std::string & path, const LoadOpt
     }
     if (arch == "qwen4exp") {
         auto m = std::make_unique<Qwen4Exp>();
+        if (!m->load(path, opt, err)) return nullptr;
+        return m;
+    }
+    if (arch == "glm5-next") {
+        auto m = std::make_unique<Glm5Next>();
         if (!m->load(path, opt, err)) return nullptr;
         return m;
     }
