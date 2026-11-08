@@ -435,7 +435,21 @@ bool load_vocab(Entry & e, const std::string & tmpl_file, std::string & err) {
         return false;
     }
     e.vocab = llama_model_get_vocab(e.vocab_model);
-    e.tmpls = common_chat_templates_init(e.vocab_model, tmpl_file.empty() ? "" : read_file(tmpl_file));
+    std::string tmpl = tmpl_file.empty() ? "" : read_file(tmpl_file);
+    // a template is written for one tokenizer: one whose <|...|> markers this vocabulary cannot read as single special
+    // tokens belongs to another model family (the Qwen template on GLM), so that model keeps its own
+    for (size_t a = tmpl.find("<|"); !tmpl.empty() && a != std::string::npos; a = tmpl.find("<|", a + 2)) {
+        const size_t b = tmpl.find("|>", a + 2);
+        if (b == std::string::npos || b - a > 40) continue;
+        const std::string mark = tmpl.substr(a, b + 2 - a);
+        if (mark.find_first_of(" {}'\"\n") != std::string::npos) continue;
+        if (common_tokenize(e.vocab, mark, false, true).size() != 1) {
+            fprintf(stderr, "%s: %s is not in its vocabulary; using the model's own chat template\n", e.alias.c_str(), mark.c_str());
+            tmpl.clear();
+            break;
+        }
+    }
+    e.tmpls = common_chat_templates_init(e.vocab_model, tmpl);
     return true;
 }
 
