@@ -30,8 +30,10 @@ namespace {
 constexpr int kGraphSize = 32768;
 constexpr int kKvPad     = 256;
 
+// "glm5-next" (llama.cpp's converter) or "glm5next" (some quantizers), keys prefixed the same way
+thread_local std::string g_arch = "glm5-next";
 std::string key(const char * k) {
-    return std::string("glm5-next.") + k;
+    return g_arch + "." + k;
 }
 
 // the MLA latent is both K and V of a 512-wide head: f16 (or f32) only, as flash attention's quantized paths at that
@@ -44,10 +46,11 @@ ggml_type latent_type(const LoadOptions & o) {
 
 bool Glm5NextHparams::load(const GgufSet & s, std::string & err) {
     const GgufFile & f = s.meta();
-    if (f.arch() != "glm5-next") {
+    if (f.arch() != "glm5-next" && f.arch() != "glm5next") {
         err = "architecture \"" + f.arch() + "\" is not glm5-next";
         return false;
     }
+    g_arch = f.arch();
     const int64_t n_all = f.i64(key("block_count"), 0);
     n_layer             = n_all - f.i64(key("nextn_predict_layers"), 0);
     n_embd              = f.i64(key("embedding_length"), 0);

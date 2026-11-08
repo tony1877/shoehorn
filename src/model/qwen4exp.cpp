@@ -1815,7 +1815,7 @@ std::unique_ptr<CausalLM> load_causal_lm(const std::string & path, const LoadOpt
         if (!m->load(path, opt, err)) return nullptr;
         return m;
     }
-    if (arch == "glm5-next") {
+    if (arch == "glm5-next" || arch == "glm5next") {
         auto m = std::make_unique<Glm5Next>();
         if (!m->load(path, opt, err)) return nullptr;
         return m;
