@@ -447,12 +447,12 @@ bool Deepseek41::load_seq(const std::vector<uint8_t> & in) {
 // ---- building blocks -------------------------------------------------------------------------------------------
 
 void Deepseek41::dbg(ggml_context * ctx, ggml_cgraph * gf, int64_t il, const char * name, ggml_tensor * t) {
-    static const bool on = std::getenv("E8_DS_DUMP") != nullptr;
-    if (!on || il != 0) return;
+    static const int layer = std::getenv("E8_DS_DUMP") ? std::atoi(std::getenv("E8_DS_DUMP")) : -1;  // the layer to trace
+    if (layer < 0 || il != layer) return;
     t = ggml_cont(ctx, t);
     ggml_set_output(t);
     ggml_build_forward_expand(gf, t);
-    dbg_.emplace_back(std::string(name) + "-0", t);
+    dbg_.emplace_back(std::string(name) + "-" + std::to_string(il), t);
 }
 
 // RoPE on the last n_rot dims of each head (after n_nope); compressed layers use their base with YaRN
@@ -543,6 +543,7 @@ ggml_tensor * Deepseek41::attention(ggml_context * ctx, ggml_cgraph * gf, int64_
             ggml_tensor * s    = ggml_cont(ctx, ggml_permute(ctx, ggml_view_3d(ctx, rows, D, r, nb, rows->nb[1], rows->nb[2], ggml_row_size(rows->type, D)), 1, 0, 2, 3));
             ggml_tensor * c    = ggml_reshape_2d(ctx, ggml_sum_rows(ctx, ggml_mul(ctx, v, ggml_soft_max(ctx, s))), D, nb);
             c                  = rms(c, L.comp_norm);
+            dbg(ctx, gf, il, "comp_latent", c);
             // the indexer key comes from the RoPE-free latent; a row stands for the first token of its pair
             ggml_tensor * ik = rope(ctx, ggml_reshape_3d(ctx, rms(ggml_mul_mat(ctx, L.idx_k, c), L.idx_k_norm), di, 1, nb), cp.blk_pos, di - h.n_rot, il);
             c                = rope(ctx, ggml_reshape_3d(ctx, c, D, 1, nb), cp.blk_pos, nope, il);
@@ -654,7 +655,11 @@ ggml_tensor * Deepseek41::mixer(ggml_context * ctx, ggml_cgraph * gf, int64_t il
     const auto &            h = hp_;
     const Deepseek41Layer & L = layers_[(size_t) il];
     const int64_t           e = h.engram_layer[(size_t) il];
-    if (e >= 0 && (size_t) e < in.engram.size() && in.engram[(size_t) e]) res = engram(ctx, il, res, in.engram[(size_t) e]);
+    if (e >= 0 && (size_t) e < in.engram.size() && in.engram[(size_t) e]) {
+        dbg(ctx, gf, il, "engram_rows", in.engram[(size_t) e]);
+        res = engram(ctx, il, res, in.engram[(size_t) e]);
+        dbg(ctx, gf, il, "engram_out", res);
+    }
     ggml_tensor * ap = nullptr, * post = nullptr, * comb = nullptr;
     mixes(ctx, res, L.hca_fn, L.hca_scale, L.hca_base, &ap, &post, &comb);
     // single pass: the attention input collapses the streams with the previous sublayer's pre-mix (stream 0 at first)
@@ -1138,7 +1143,7 @@ bool Deepseek41::eval(const int32_t * tokens, int n, float * logits, std::string
     new_inputs(ctx, n, in);
     ggml_tensor * res = ggml_repeat_4d(ctx, ggml_reshape_3d(ctx, in.embd, h.n_embd, 1, n), h.n_embd, h.hc, n, 1);
     ggml_tensor * pre = nullptr;
-    dbg(ctx, gf, 0, "embd", in.embd);
+    dbg(ctx, gf, 0, "embd", in.embd);  // with E8_DS_DUMP=0
     // E8_DS_DUMP: the sum of each layer's residual (attention, then FFN), against llama.cpp's eval-callback l_out sums
     static const bool dump = std::getenv("E8_DS_DUMP") != nullptr;
     std::vector<std::pair<std::string, ggml_tensor *>> dumps;
