@@ -511,7 +511,9 @@ ggml_tensor * Deepseek41::attention(ggml_context * ctx, ggml_cgraph * gf, int64_
     auto rms = [&](ggml_tensor * x, ggml_tensor * w) { return ggml_mul(ctx, ggml_rms_norm(ctx, x, h.rms_eps), w); };
 
     dbg(ctx, gf, il, "attn_norm", cur);
-    ggml_tensor * qr = rms(ggml_mul_mat(ctx, L.q_a, cur), L.q_a_norm);                               // [q_lora, n]
+    ggml_tensor * qa_out = ggml_mul_mat(ctx, L.q_a, cur);
+    dbg(ctx, gf, il, "q_a_out", qa_out);
+    ggml_tensor * qr = rms(qa_out, L.q_a_norm);                                                      // [q_lora, n]
     dbg(ctx, gf, il, "qr_norm", qr);
     ggml_tensor * q0 = ggml_reshape_3d(ctx, ggml_mul_mat(ctx, L.q_b, qr), D, H, n);
     dbg(ctx, gf, il, "q_pre_rope", q0);
