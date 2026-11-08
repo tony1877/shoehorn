@@ -1114,9 +1114,21 @@ bool Deepseek41::eval(const int32_t * tokens, int n, float * logits, std::string
     new_inputs(ctx, n, in);
     ggml_tensor * res = ggml_repeat_4d(ctx, ggml_reshape_3d(ctx, in.embd, h.n_embd, 1, n), h.n_embd, h.hc, n, 1);
     ggml_tensor * pre = nullptr;
+    // E8_DS_DUMP: the sum of each layer's residual (attention, then FFN), against llama.cpp's eval-callback l_out sums
+    static const bool dump = std::getenv("E8_DS_DUMP") != nullptr;
+    std::vector<std::pair<std::string, ggml_tensor *>> dumps;
+    auto mark = [&](const std::string & name, ggml_tensor * t) {
+        if (!dump) return;
+        t = ggml_cont(ctx, t);
+        ggml_set_output(t);
+        ggml_build_forward_expand(gf, t);
+        dumps.emplace_back(name, t);
+    };
     for (int64_t il = 0; il < h.n_layer; il++) {
         res = mixer(ctx, gf, il, res, &pre, n, in, b);
+        mark("attn_out-" + std::to_string(il), res);
         res = ffn_block(ctx, il, res, &pre, n);
+        mark("l_out-" + std::to_string(il), res);
     }
     if (last_only_ && n > 1) {
         res = ggml_view_3d(ctx, res, res->ne[0], res->ne[1], 1, res->nb[1], res->nb[2], res->nb[2] * (size_t) (n - 1));
@@ -1147,6 +1159,14 @@ bool Deepseek41::eval(const int32_t * tokens, int n, float * logits, std::string
         return false;
     }
     if (logits) ggml_backend_tensor_get(out, logits, 0, ggml_nbytes(out));
+    for (auto & [name, t] : dumps) {
+        std::vector<float> v((size_t) ggml_nelements(t));
+        ggml_backend_tensor_get(t, v.data(), 0, ggml_nbytes(t));
+        double sum = 0, sum0 = 0;
+        for (float x : v) sum += x;
+        for (int64_t i = 0; i < t->ne[0]; i++) sum0 += v[(size_t) i];
+        fprintf(stderr, "DUMP %s sum %.6f first-token-stream0 sum %.6f\n", name.c_str(), sum, sum0);
+    }
     if (n == 1) {
         t_compute_ += std::chrono::duration<double>(clk::now() - t0).count();
         n_timed_++;
