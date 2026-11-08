@@ -1,3 +1,4 @@
+#include "model/traffic.h"
 #include "model/glm5next.h"
 
 #include "kernels/moe_cpu.h"
@@ -1213,6 +1214,7 @@ bool Glm5Next::prefill(const int32_t * tokens, int N, float * logits, std::strin
         history_.insert(history_.end(), tokens + c0, tokens + c0 + cn);
         std::thread pf = prefetch(0);
         for (int64_t il = 0; il < h.n_layer; il++) {
+            traffic::prefill_done = c0 + (int) ((int64_t) cn * il / h.n_layer);  // layer-major: progress by layers done
             int ua = 2048;
             if (!h.recurrent[(size_t) il]) {  // keep the mask and the sparse temporaries near 256 MB
                 const int64_t kv = std::max<int64_t>(kKvPad, base + cn);

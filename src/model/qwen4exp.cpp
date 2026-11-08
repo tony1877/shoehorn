@@ -1,3 +1,4 @@
+#include "model/traffic.h"
 #include "model/qwen4exp.h"
 #include "model/glm5next.h"
 #include "model/deepseek41.h"
@@ -1280,6 +1281,7 @@ bool Qwen4Exp::prefill(const int32_t * tokens, int N, float * logits, std::strin
         history_.insert(history_.end(), tokens + c0, tokens + c0 + cn);
         std::thread pf = prefetch(0);
         for (int64_t il = 0; il < h.n_layer; il++) {
+            traffic::prefill_done = c0 + (int) ((int64_t) cn * il / h.n_layer);  // layer-major: progress by layers done
             int ua = ug;
             if (!h.recurrent[(size_t) il]) {  // mask + tail ~6 bytes per (kv, token): keep them near 256 MB
                 const int64_t kv = std::max<int64_t>(kKvPad, base + cn);

@@ -1,3 +1,4 @@
+#include "model/traffic.h"
 #include "model/deepseek41.h"
 
 #include "kernels/moe_cpu.h"
@@ -1418,6 +1419,7 @@ bool Deepseek41::prefill(const int32_t * tokens, int N, float * logits, std::str
             }
         } join{ pf };
         for (int64_t il = 0; il < h.n_layer; il++) {
+            traffic::prefill_done = c0 + (int) ((int64_t) cn * il / h.n_layer);  // layer-major: progress by layers done
             ring_pos_ = ring0;
             int ua    = std::min(piece, 512);
             if (h.ratio[(size_t) il] != 0) {  // mask and indexer temporaries scale with the compressed rows
