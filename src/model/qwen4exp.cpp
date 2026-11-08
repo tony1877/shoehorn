@@ -1205,6 +1205,19 @@ bool Qwen4Exp::prefill(const int32_t * tokens, int N, float * logits, std::strin
     const auto & h = hp_;
     // short prompts: the whole-model graph per 512 tokens
     static const int min_layered = std::getenv("E8_LAYERED_MIN") ? std::atoi(std::getenv("E8_LAYERED_MIN")) : 256;  // the experts rarely fit in RAM: read them once per prompt
+    // Up to a couple of thousand tokens (a tool result, a new message, a title request): pieces of 31 tokens on the
+    // expert cache + sparse CPU path. Batches of 32 or more go through op offload, which copies every expert tensor
+    // of every layer to the GPU (the whole model read from disk: ~100 s whether 50 or 5000 tokens are new).
+    static const int sparse_max = std::getenv("E8_SPARSE_PREFILL_MAX") ? std::atoi(std::getenv("E8_SPARSE_PREFILL_MAX")) : 2048;
+    if (ec_.C > 0 && N <= sparse_max) {
+        traffic::prefill_done = 0;
+        for (int i = 0; i < N; i += 31) {
+            const int m = std::min(31, N - i);
+            if (!eval_last(tokens + i, m, i + m == N ? logits : nullptr, err)) return false;
+            traffic::prefill_done = i + m;
+        }
+        return !mtp_ || mtp_fill(n_past_, err);
+    }
     if (N < min_layered) return CausalLM::prefill(tokens, N, logits, err) && (!mtp_ || mtp_fill(n_past_, err));
     if (n_past_ + N > n_ctx_) {
         err = "prefill: context full (" + std::to_string(n_ctx_) + " tokens)";
