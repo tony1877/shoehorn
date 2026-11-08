@@ -203,6 +203,9 @@ private:
     } ec_;
     std::vector<ggml_tensor *>         sel_out_;
     std::vector<kernels::PrefetchHint> hints_;
+    // E8_DS_DUMP: named intermediates of layer 0 (and every layer's residual), their sums printed after the eval
+    std::vector<std::pair<std::string, ggml_tensor *>> dbg_;
+    void dbg(ggml_context * ctx, ggml_cgraph * gf, int64_t il, const char * name, ggml_tensor * t);
     double  t_compute_ = 0;
     int64_t n_timed_ = 0;
 };

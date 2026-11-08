@@ -446,6 +446,15 @@ bool Deepseek41::load_seq(const std::vector<uint8_t> & in) {
 
 // ---- building blocks -------------------------------------------------------------------------------------------
 
+void Deepseek41::dbg(ggml_context * ctx, ggml_cgraph * gf, int64_t il, const char * name, ggml_tensor * t) {
+    static const bool on = std::getenv("E8_DS_DUMP") != nullptr;
+    if (!on || il != 0) return;
+    t = ggml_cont(ctx, t);
+    ggml_set_output(t);
+    ggml_build_forward_expand(gf, t);
+    dbg_.emplace_back(std::string(name) + "-0", t);
+}
+
 // RoPE on the last n_rot dims of each head (after n_nope); compressed layers use their base with YaRN
 ggml_tensor * Deepseek41::rope(ggml_context * ctx, ggml_tensor * t, ggml_tensor * pos, int64_t n_nope, int64_t il, bool back) {
     const auto & h     = hp_;
@@ -501,9 +510,17 @@ ggml_tensor * Deepseek41::attention(ggml_context * ctx, ggml_cgraph * gf, int64_
     const int64_t           D = h.head_dim, H = h.n_head, nope = h.head_dim - h.n_rot, di = h.idx_dim;
     auto rms = [&](ggml_tensor * x, ggml_tensor * w) { return ggml_mul(ctx, ggml_rms_norm(ctx, x, h.rms_eps), w); };
 
+    dbg(ctx, gf, il, "attn_norm", cur);
     ggml_tensor * qr = rms(ggml_mul_mat(ctx, L.q_a, cur), L.q_a_norm);                               // [q_lora, n]
-    ggml_tensor * q  = rope(ctx, ggml_reshape_3d(ctx, ggml_mul_mat(ctx, L.q_b, qr), D, H, n), in.pos, nope, il);
-    ggml_tensor * kv = rope(ctx, ggml_reshape_3d(ctx, rms(ggml_mul_mat(ctx, L.wkv, cur), L.kv_norm), D, 1, n), in.pos, nope, il);
+    dbg(ctx, gf, il, "qr_norm", qr);
+    ggml_tensor * q0 = ggml_reshape_3d(ctx, ggml_mul_mat(ctx, L.q_b, qr), D, H, n);
+    dbg(ctx, gf, il, "q_pre_rope", q0);
+    ggml_tensor * q  = rope(ctx, q0, in.pos, nope, il);
+    dbg(ctx, gf, il, "q", q);
+    ggml_tensor * kv0 = rms(ggml_mul_mat(ctx, L.wkv, cur), L.kv_norm);
+    dbg(ctx, gf, il, "kv_pre_rope", kv0);
+    ggml_tensor * kv = rope(ctx, ggml_reshape_3d(ctx, kv0, D, 1, n), in.pos, nope, il);
+    dbg(ctx, gf, il, "kv", kv);
     ggml_tensor * ring = ggml_set_rows(ctx, ring_[l], ggml_reshape_2d(ctx, kv, D, n), in.ring_idx);
     ggml_build_forward_expand(gf, ring);
 
@@ -616,13 +633,18 @@ ggml_tensor * Deepseek41::attention(ggml_context * ctx, ggml_cgraph * gf, int64_
     }
     ggml_flash_attn_ext_add_sinks(a, L.sinks);
     ggml_prec_set_acc(a, GGML_PREC_F32);                                                             // [D, H, n]
+    dbg(ctx, gf, il, "fa", a);
     ggml_tensor * o = rope(ctx, ggml_reshape_3d(ctx, a, D, H, n), in.pos, nope, il, true);           // undo the RoPE
+    dbg(ctx, gf, il, "attn_derope", o);
     // grouped low-rank output: [H/G*D, G, n] -> per group wo_a -> [o_lora*G, n] -> wo_b
     const int64_t G = h.o_groups;
     o               = ggml_permute(ctx, ggml_reshape_3d(ctx, o, H / G * D, G, n), 0, 2, 1, 3);       // [H/G*D, n, G]
     ggml_tensor * oa = ggml_mul_mat(ctx, L.wo_a, o);                                                 // [o_lora, n, G]
     oa               = ggml_cont_2d(ctx, ggml_permute(ctx, oa, 0, 2, 1, 3), h.o_lora * G, n);
-    return ggml_mul_mat(ctx, L.wo_b, oa);
+    dbg(ctx, gf, il, "attn_wo_a", oa);
+    ggml_tensor * ao = ggml_mul_mat(ctx, L.wo_b, oa);
+    dbg(ctx, gf, il, "attn_out", ao);
+    return ao;
 }
 
 ggml_tensor * Deepseek41::mixer(ggml_context * ctx, ggml_cgraph * gf, int64_t il, ggml_tensor * res, ggml_tensor ** pre, int n,
@@ -1114,6 +1136,7 @@ bool Deepseek41::eval(const int32_t * tokens, int n, float * logits, std::string
     new_inputs(ctx, n, in);
     ggml_tensor * res = ggml_repeat_4d(ctx, ggml_reshape_3d(ctx, in.embd, h.n_embd, 1, n), h.n_embd, h.hc, n, 1);
     ggml_tensor * pre = nullptr;
+    dbg(ctx, gf, 0, "embd", in.embd);
     // E8_DS_DUMP: the sum of each layer's residual (attention, then FFN), against llama.cpp's eval-callback l_out sums
     static const bool dump = std::getenv("E8_DS_DUMP") != nullptr;
     std::vector<std::pair<std::string, ggml_tensor *>> dumps;
@@ -1159,6 +1182,8 @@ bool Deepseek41::eval(const int32_t * tokens, int n, float * logits, std::string
         return false;
     }
     if (logits) ggml_backend_tensor_get(out, logits, 0, ggml_nbytes(out));
+    for (auto & d : dbg_) dumps.push_back(d);
+    dbg_.clear();
     for (auto & [name, t] : dumps) {
         std::vector<float> v((size_t) ggml_nelements(t));
         ggml_backend_tensor_get(t, v.data(), 0, ggml_nbytes(t));
