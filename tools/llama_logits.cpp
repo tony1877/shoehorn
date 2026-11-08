@@ -1,4 +1,4 @@
-// llama_logits <model.gguf> <ids.txt> <out.f32> [--last N] [--ctx N]: llama.cpp's logits for the token ids (whitespace
+// llama_logits <model.gguf> <ids.txt> <out.f32> [--last N] [--ctx N] [--batch N]: llama.cpp's logits for the token ids (whitespace
 // separated), from position 0, as n_rows * n_vocab float32 (the last N rows, default all). The reference for checking a
 // native model implementation against llama.cpp (compare with `shoehorn logits`). MoE experts stay in the file mapping
 // on the CPU, the rest on the GPU.
@@ -19,10 +19,11 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "usage: llama_logits <model.gguf> <ids.txt> <out.f32> [--last N] [--ctx N]\n");
         return 1;
     }
-    int last = 0, n_ctx = 8192;
+    int last = 0, n_ctx = 8192, nb = 512;
     for (int i = 4; i + 1 < argc; i += 2) {
         if (!strcmp(argv[i], "--last")) last = atoi(argv[i + 1]);
         if (!strcmp(argv[i], "--ctx")) n_ctx = atoi(argv[i + 1]);
+        if (!strcmp(argv[i], "--batch")) nb = std::max(1, atoi(argv[i + 1]));
     }
     std::ifstream     f(argv[2]);
     std::stringstream ss;
@@ -59,15 +60,15 @@ int main(int argc, char ** argv) {
     if (!model) return 1;
     llama_context_params cp = llama_context_default_params();
     cp.n_ctx                = (uint32_t) std::max(n_ctx, n + 16);
-    cp.n_batch = cp.n_ubatch = 512;
+    cp.n_batch = cp.n_ubatch = (uint32_t) nb;
     llama_context * ctx      = llama_init_from_model(model, cp);
     if (!ctx) return 1;
     const int nv = llama_vocab_n_tokens(llama_model_get_vocab(model));
 
     std::vector<float> out((size_t) last * nv);
-    llama_batch        b = llama_batch_init(512, 0, 1);
-    for (int i = 0; i < n; i += 512) {
-        const int m = std::min(512, n - i);
+    llama_batch        b = llama_batch_init(nb, 0, 1);
+    for (int i = 0; i < n; i += nb) {
+        const int m = std::min(nb, n - i);
         b.n_tokens  = m;
         for (int j = 0; j < m; j++) {
             b.token[j]     = toks[(size_t) (i + j)];
