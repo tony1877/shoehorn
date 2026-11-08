@@ -31,4 +31,8 @@ private:
 #endif
 };
 
+// POSIX: the descriptor and file offset behind an address inside a live MappedFile (-1 when none), so prefetchers can
+// read the file with pread (large requests) instead of faulting the mapping in 128 KB readahead pieces
+int mapped_fd(const void * p, uint64_t & offset);
+
 } // namespace e8::util

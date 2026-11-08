@@ -15,7 +15,31 @@
 #include <unistd.h>
 #endif
 
+#include <mutex>
+#include <vector>
+
 namespace e8::util {
+
+namespace {
+struct Live {
+    const uint8_t * p;
+    uint64_t        n;
+    int             fd;
+};
+std::mutex        g_mu;
+std::vector<Live> g_live;
+} // namespace
+
+int mapped_fd(const void * p, uint64_t & offset) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    for (const Live & l : g_live) {
+        if ((const uint8_t *) p >= l.p && (const uint8_t *) p < l.p + l.n) {
+            offset = (uint64_t) ((const uint8_t *) p - l.p);
+            return l.fd;
+        }
+    }
+    return -1;
+}
 
 MappedFile::~MappedFile() {
 #if defined(_WIN32)
@@ -23,6 +47,11 @@ MappedFile::~MappedFile() {
     if (map_) CloseHandle(map_);
     if (file_ && file_ != INVALID_HANDLE_VALUE) CloseHandle(file_);
 #else
+    if (data_) {
+        std::lock_guard<std::mutex> lk(g_mu);
+        for (size_t i = 0; i < g_live.size(); i++)
+            if (g_live[i].p == data_) g_live.erase(g_live.begin() + (long) i--);
+    }
     if (data_) munmap((void *) data_, size_);
     if (fd_ >= 0) close(fd_);
 #endif
@@ -69,6 +98,10 @@ bool MappedFile::open(const std::string & path, std::string & err) {
         return false;
     }
     data_ = (const uint8_t *) p;
+    {
+        std::lock_guard<std::mutex> lk(g_mu);
+        g_live.push_back({ data_, size_, fd_ });
+    }
 #endif
     return true;
 }

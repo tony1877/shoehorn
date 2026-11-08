@@ -1,4 +1,5 @@
 #include "kernels/moe_cpu.h"
+#include "util/mmap.h"
 
 #include "ggml-cpu.h"
 
@@ -112,9 +113,18 @@ private:
             for (const Range & x : r) w.push_back({ (void *) x.p, x.n });
             PrefetchVirtualMemory(GetCurrentProcess(), w.size(), w.data(), 0);
 #else
+            // pread into a scratch buffer: one large request fills the page cache, the compute threads' faults then
+            // only map the pages (faulting reads them 128 KB at a time); without a descriptor, madvise and touch
             static const size_t page = (size_t) sysconf(_SC_PAGESIZE);
+            thread_local std::vector<char> buf;
             volatile char       sink = 0;
             for (const Range & x : r) {
+                uint64_t  off = 0;
+                const int fd  = util::mapped_fd(x.p, off);
+                if (fd >= 0) {
+                    buf.resize(x.n);
+                    if (pread(fd, buf.data(), x.n, (off_t) off) > 0) continue;
+                }
                 madvise((void *) x.p, x.n, MADV_WILLNEED);
                 for (size_t o = 0; o < x.n; o += page) sink = sink + ((const char *) x.p)[o];
             }
