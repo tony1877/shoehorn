@@ -1,7 +1,7 @@
 // `shoehorn serve`: OpenAI-compatible HTTP server (DESIGN.md M6).
 //
 //   shoehorn serve <model.gguf> [--res r.gguf] [--host 127.0.0.1] [--port 8090] [--alias NAME]
-//                  [--api-key-file F] [--chat-template-file F] [--ctx N] [--kv f16|q8_0|q4_0] [--kv-v TYPE] [--kv-lock] [--slots N] [--kv-pool-gb G] [--spec auto|K]
+//                  [--api-key-file F] [--chat-template-file F] [--ctx N] [--kv f16|q8_0|q4_0] [--kv-v TYPE] [--kv-lock] [--slots N] [--dense-slots N] [--kv-pool-gb G] [--spec auto|K]
 //                  [--gpu-layers N] [--expert-cache-gb G] [--threads N] [--mtp N] [--mmproj enc.gguf]
 //
 // Endpoints: GET /health, GET /v1/models, POST /v1/chat/completions and POST /v1/completions (stream or not),
@@ -18,7 +18,7 @@
 // decode concurrently, a cycle each in turn. Model swaps and unloads wait until no request is decoding. A request
 // whose client disconnects stops at the next decode cycle.
 //
-// Sequence slots (--slots N, 27B with the KV in RAM): the model keeps N sequences, each with its own prompt-reuse state,
+// Sequence slots (--dense-slots N, 27B with the KV in RAM; --slots N is for the expert models, parked in RAM): the model keeps N sequences, each with its own prompt-reuse state,
 // so N conversations (an agent and its subagents) run side by side without evicting each other's prompts. A slot
 // serves one request at a time; with more requests than slots the others wait for one. Decoding requests go through
 // two lanes that run at the same time: the draft lane (a slot drafter, Qwen35::make_slot_drafter, on its own CUDA
@@ -2453,7 +2453,7 @@ int serve(const std::vector<std::string> & args_in) {
     bool kv_lock = false, side = true, preload = false;
     int  ubatch = 0;  // prompt batch size (0 = the model's default)
     int  fast_prefill = 0;  // > 0: read all but the last N prompt tokens without the residual
-    int n_slots = 1, draft_batch = 0;
+    int n_slots = 1, dense_slots = 1, draft_batch = 0;
     double kv_pool_gb = 0, res_gpu_gb = 0;
     bool   res_gpu_given = false;  // without --res-gpu-gb the GPU fit profile decides
     std::string router_url;
@@ -2506,6 +2506,9 @@ int serve(const std::vector<std::string> & args_in) {
         else if (a == "--ckpt-max") S->ckpt_max = std::max(0, std::atoi(val().c_str()));
         else if (a == "--no-side") side = false;
         else if (a == "--slots") n_slots = std::max(1, std::atoi(val().c_str()));
+        // the dense model's own slots: each extra slot moves its KV to RAM and gathers it every verify (27B: 18-27
+        // vs 47-53 tok/s at 15K context), so --slots applies to the expert models (parked states) and this stays 1
+        else if (a == "--dense-slots") dense_slots = std::max(1, std::atoi(val().c_str()));
         else if (a == "--kv-pool-gb") kv_pool_gb = std::atof(val().c_str());
         else if (a == "--res-gpu-gb") {  // G, or "auto" (all free VRAM but 3 GB)
             const std::string v = val();
@@ -2709,11 +2712,11 @@ int serve(const std::vector<std::string> & args_in) {
     o.kv_lock         = kv_lock;
     S->fast_prefill   = fast_prefill;
     if (ubatch > 0) o.n_ubatch = ubatch;
-    o.side_seq        = side && n_slots == 1;
-    o.n_slots         = n_slots;
+    o.side_seq        = side && dense_slots == 1;
+    o.n_slots         = dense_slots;
     S->generic_slots  = n_slots;
     o.kv_pool_gb      = kv_pool_gb;
-    o.draft_batch     = n_slots > 1 ? (draft_batch > 0 ? std::min(draft_batch, n_slots) : std::min(n_slots, 2)) : 1;
+    o.draft_batch     = dense_slots > 1 ? (draft_batch > 0 ? std::min(draft_batch, dense_slots) : std::min(dense_slots, 2)) : 1;
     S->draft_batch    = o.draft_batch;
     o.residual_path   = res;
     o.res_gpu_gb      = res_gpu_given ? res_gpu_gb : gpu_fit().res_in_vram ? -1 : 0;
