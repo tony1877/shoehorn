@@ -118,11 +118,14 @@ private:
     struct Inputs {
         ggml_tensor * embd = nullptr, * res = nullptr, * pre = nullptr;  // pre: the carried pre-mix [hc, n] (prefill)
         ggml_tensor * pos = nullptr, * ring_idx = nullptr, * raw_mask = nullptr;  // window: ring slots, mask
-        ggml_tensor * comp_mask = nullptr;                                         // [n_comp, n] visibility (0 / -inf)
-        ggml_tensor * blk_rows = nullptr, * blk_dst = nullptr, * blk_pos = nullptr;  // pairs completed by this batch
-        ggml_tensor * cand_pin = nullptr;
+        // per compress ratio (1, 2): the compressed rows visible to this batch and the groups it completes
+        struct Comp {
+            ggml_tensor * mask = nullptr;  // [n_comp, n] visibility (0 / -inf)
+            ggml_tensor * blk_rows = nullptr, * blk_dst = nullptr, * blk_pos = nullptr;
+            ggml_tensor * cand_pin = nullptr;
+            int64_t       n_comp = 0, n_blk = 0;
+        } c[3];
         std::vector<ggml_tensor *> engram;  // per Engram module: rows [ple_n_heads * ple_head_dim, n]
-        int64_t n_comp = 0, n_blk = 0;
     };
     struct Build {  // per graph: what source layers hand to later ones
         std::vector<ggml_tensor *> topk;     // per top-k source: [top_k, n] I32 (null = every visible row)

@@ -310,8 +310,8 @@ bool Deepseek41::load(const std::string & path, const LoadOptions & opt, std::st
         ring_[l]    = ggml_new_tensor_2d(sctx_, kt, h.head_dim, R_);
         ring_ck_[l] = ggml_dup_tensor(sctx_, ring_[l]);
         if (h.kv_src[l] == (int64_t) l) {
-            comp_k_[l]     = ggml_new_tensor_2d(sctx_, kt, h.head_dim, n_ctx_ / 2 + 1);
-            comp_ik_[l]    = ggml_new_tensor_2d(sctx_, GGML_TYPE_F32, h.idx_dim, n_ctx_ / 2 + 1);
+            comp_k_[l]     = ggml_new_tensor_2d(sctx_, kt, h.head_dim, n_ctx_ / h.ratio[l] + 1);
+            comp_ik_[l]    = ggml_new_tensor_2d(sctx_, GGML_TYPE_F32, h.idx_dim, n_ctx_ / h.ratio[l] + 1);
             comp_in_[l]    = ggml_new_tensor_2d(sctx_, GGML_TYPE_F32, 2 * h.head_dim, R_);
             comp_in_ck_[l] = ggml_dup_tensor(sctx_, comp_in_[l]);
         }
@@ -380,8 +380,8 @@ bool Deepseek41::save_seq(std::vector<uint8_t> & out) {
         out.resize(o + n);
         ggml_backend_tensor_get(t, out.data() + o, 0, n);
     };
-    const int rows = n_past_ / 2 + 1;
     for (size_t l = 0; l < ring_.size(); l++) {
+        const int rows = comp_k_[l] ? (int) (n_past_ / hp_.ratio[l] + 1) : 0;
         tens(ring_[l], ggml_nbytes(ring_[l]));
         tens(ring_ck_[l], ggml_nbytes(ring_ck_[l]));
         if (comp_k_[l]) {
@@ -420,8 +420,8 @@ bool Deepseek41::load_seq(const std::vector<uint8_t> & in) {
         ggml_backend_tensor_set(t, in.data() + o, 0, n);
         o += n;
     };
-    const int rows = hdr[0] / 2 + 1;
     for (size_t l = 0; l < ring_.size(); l++) {
+        const int rows = comp_k_[l] ? (int) (hdr[0] / hp_.ratio[l] + 1) : 0;
         tens(ring_[l], ggml_nbytes(ring_[l]));
         tens(ring_ck_[l], ggml_nbytes(ring_ck_[l]));
         if (comp_k_[l]) {
@@ -509,25 +509,26 @@ ggml_tensor * Deepseek41::attention(ggml_context * ctx, ggml_cgraph * gf, int64_
 
     const int64_t r   = h.ratio[l];
     const int64_t src = h.kv_src[l];
+    Inputs::Comp & cp = in.c[r];
     // the source layer's compressed rows (the ones written by this graph when it is in it)
     if (r != 0 && src == il) {
         ggml_tensor * sk = ggml_mul_mat(ctx, L.comp_kv, cur);
         ggml_tensor * sg = L.comp_gate ? ggml_mul_mat(ctx, L.comp_gate, cur) : ggml_scale(ctx, sk, 0.0f);
         ggml_tensor * ci = ggml_set_rows(ctx, comp_in_[l], ggml_concat(ctx, sk, sg, 0), in.ring_idx);
         ggml_build_forward_expand(gf, ci);
-        if (in.n_blk > 0) {
+        if (cp.n_blk > 0) {
             // pool each completed pair: per channel, softmax over the members of the gate scores weighs their kv
-            const int64_t nb   = in.n_blk;
-            ggml_tensor * rows = ggml_reshape_3d(ctx, ggml_get_rows(ctx, ci, in.blk_rows), 2 * D, r, nb);
+            const int64_t nb   = cp.n_blk;
+            ggml_tensor * rows = ggml_reshape_3d(ctx, ggml_get_rows(ctx, ci, cp.blk_rows), 2 * D, r, nb);
             ggml_tensor * v    = ggml_cont(ctx, ggml_permute(ctx, ggml_view_3d(ctx, rows, D, r, nb, rows->nb[1], rows->nb[2], 0), 1, 0, 2, 3));
             ggml_tensor * s    = ggml_cont(ctx, ggml_permute(ctx, ggml_view_3d(ctx, rows, D, r, nb, rows->nb[1], rows->nb[2], ggml_row_size(rows->type, D)), 1, 0, 2, 3));
             ggml_tensor * c    = ggml_reshape_2d(ctx, ggml_sum_rows(ctx, ggml_mul(ctx, v, ggml_soft_max(ctx, s))), D, nb);
             c                  = rms(c, L.comp_norm);
             // the indexer key comes from the RoPE-free latent; a row stands for the first token of its pair
-            ggml_tensor * ik = rope(ctx, ggml_reshape_3d(ctx, rms(ggml_mul_mat(ctx, L.idx_k, c), L.idx_k_norm), di, 1, nb), in.blk_pos, di - h.n_rot, il);
-            c                = rope(ctx, ggml_reshape_3d(ctx, c, D, 1, nb), in.blk_pos, nope, il);
-            ggml_tensor * wk = ggml_set_rows(ctx, comp_k_[l], ggml_reshape_2d(ctx, c, D, nb), in.blk_dst);
-            ggml_tensor * wi = ggml_set_rows(ctx, comp_ik_[l], ggml_reshape_2d(ctx, ik, di, nb), in.blk_dst);
+            ggml_tensor * ik = rope(ctx, ggml_reshape_3d(ctx, rms(ggml_mul_mat(ctx, L.idx_k, c), L.idx_k_norm), di, 1, nb), cp.blk_pos, di - h.n_rot, il);
+            c                = rope(ctx, ggml_reshape_3d(ctx, c, D, 1, nb), cp.blk_pos, nope, il);
+            ggml_tensor * wk = ggml_set_rows(ctx, comp_k_[l], ggml_reshape_2d(ctx, c, D, nb), cp.blk_dst);
+            ggml_tensor * wi = ggml_set_rows(ctx, comp_ik_[l], ggml_reshape_2d(ctx, ik, di, nb), cp.blk_dst);
             ggml_build_forward_expand(gf, wk);
             ggml_build_forward_expand(gf, wi);
             b.ck[l]  = wk;
@@ -539,15 +540,15 @@ ggml_tensor * Deepseek41::attention(ggml_context * ctx, ggml_cgraph * gf, int64_
     ggml_tensor * qp    = ggml_permute(ctx, q, 0, 2, 1, 3);  // [D, n, H]
     ggml_tensor * Kr    = ggml_view_2d(ctx, ring, D, R_, ring->nb[1], 0);
     ggml_tensor * a     = nullptr;
-    if (r == 0 || in.n_comp == 0) {  // window only
+    if (r == 0 || cp.n_comp == 0) {  // window only
         a = ggml_flash_attn_ext(ctx, qp, Kr, Kr, in.raw_mask, scale, 0.0f, 0.0f);
     } else {
-        const int64_t nc  = in.n_comp;
+        const int64_t nc  = cp.n_comp;
         ggml_tensor * ck  = b.ck[(size_t) src] ? b.ck[(size_t) src] : comp_k_[(size_t) src];
         ggml_tensor * cik = b.cik[(size_t) src] ? b.cik[(size_t) src] : comp_ik_[(size_t) src];
         ck                = ggml_view_2d(ctx, ck, D, nc, ck->nb[1], 0);
         cik               = ggml_view_2d(ctx, cik, di, nc, cik->nb[1], 0);
-        ggml_tensor * comp_mask = in.comp_mask;  // [nc, n] f32
+        ggml_tensor * comp_mask = cp.mask;  // [nc, n] f32
         const int64_t ts        = h.topk_src[l];
         if (ts == il && nc > h.idx_top_k) {
             // lightning indexer over the visible compressed rows, in chunks of tokens (scores [Hi, chunk, nc])
@@ -556,7 +557,7 @@ ggml_tensor * Deepseek41::attention(ggml_context * ctx, ggml_cgraph * gf, int64_
             ggml_tensor * iw = ggml_scale(ctx, ggml_mul_mat(ctx, L.idx_proj, cur), 1.0f / sqrtf((float) (di * Hi)));  // [Hi, n]
             const int64_t chunk = std::max<int64_t>(1, (INT64_C(1) << 26) / (Hi * nc));
             const int64_t bs    = h.cand_block_size;
-            const bool    pick  = h.cand_src == il && in.cand_pin;
+            const bool    pick  = h.cand_src == il && cp.cand_pin;
             const bool    use   = h.cand_src >= 0 && h.cand_src < il && b.cand_sel;
             const int64_t nblk  = (nc + std::max<int64_t>(bs, 1) - 1) / std::max<int64_t>(bs, 1);
             std::vector<ggml_tensor *> tops, sels;
@@ -574,7 +575,7 @@ ggml_tensor * Deepseek41::attention(ggml_context * ctx, ggml_cgraph * gf, int64_
                     ggml_tensor * s2 = s;
                     if (nblk * bs != nc) s2 = ggml_concat(ctx, s2, ggml_fill(ctx, ggml_new_tensor_2d(ctx, GGML_TYPE_F32, nblk * bs - nc, m), -INFINITY), 0);
                     ggml_tensor * bm = ggml_pool_1d(ctx, s2, GGML_OP_POOL_MAX, (int) bs, (int) bs, 0);  // [nblk, m]
-                    bm = ggml_add(ctx, bm, ggml_view_2d(ctx, in.cand_pin, nblk, m, in.cand_pin->nb[1], (size_t) t0 * in.cand_pin->nb[1]));
+                    bm = ggml_add(ctx, bm, ggml_view_2d(ctx, cp.cand_pin, nblk, m, cp.cand_pin->nb[1], (size_t) t0 * cp.cand_pin->nb[1]));
                     sels.push_back(ggml_top_k(ctx, bm, (int) h.cand_blocks));
                 } else if (use) {
                     // level two: own scores, only inside the source's candidate blocks
@@ -976,23 +977,27 @@ void Deepseek41::new_inputs(ggml_context * ctx, int n, Inputs & in) {
     ggml_set_input(in.ring_idx);
     in.raw_mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, R_, n);
     ggml_set_input(in.raw_mask);
-    in.n_comp = (n_past_ + n) / 2;
-    in.n_blk  = (n_past_ + n) / 2 - n_past_ / 2;
-    if (in.n_comp > 0) {
-        in.comp_mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, in.n_comp, n);
-        ggml_set_input(in.comp_mask);
-        if (h.cand_src >= 0 && h.cand_block_size > 0) {
-            in.cand_pin = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, (in.n_comp + h.cand_block_size - 1) / h.cand_block_size, n);
-            ggml_set_input(in.cand_pin);
+    for (int64_t rt = 1; rt <= 2; rt++) {
+        if (std::find(h.ratio.begin(), h.ratio.end(), rt) == h.ratio.end()) continue;
+        Inputs::Comp & cp = in.c[rt];
+        cp.n_comp         = (n_past_ + n) / rt;
+        cp.n_blk          = (n_past_ + n) / rt - n_past_ / rt;
+        if (cp.n_comp > 0) {
+            cp.mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cp.n_comp, n);
+            ggml_set_input(cp.mask);
+            if (h.cand_src >= 0 && h.cand_block_size > 0 && h.ratio[(size_t) h.cand_src] == rt) {
+                cp.cand_pin = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, (cp.n_comp + h.cand_block_size - 1) / h.cand_block_size, n);
+                ggml_set_input(cp.cand_pin);
+            }
         }
-    }
-    if (in.n_blk > 0) {
-        in.blk_rows = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 2 * in.n_blk);
-        ggml_set_input(in.blk_rows);
-        in.blk_dst = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, in.n_blk);
-        ggml_set_input(in.blk_dst);
-        in.blk_pos = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, in.n_blk);
-        ggml_set_input(in.blk_pos);
+        if (cp.n_blk > 0) {
+            cp.blk_rows = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, rt * cp.n_blk);
+            ggml_set_input(cp.blk_rows);
+            cp.blk_dst = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, cp.n_blk);
+            ggml_set_input(cp.blk_dst);
+            cp.blk_pos = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, cp.n_blk);
+            ggml_set_input(cp.blk_pos);
+        }
     }
     if (h.ple_n_heads > 0) {
         int64_t ne = 0;
@@ -1032,37 +1037,38 @@ void Deepseek41::set_inputs(const Inputs & in, const int32_t * tokens, int n) {
         }
         set(in.raw_mask, m.data(), m.size() * sizeof(ggml_fp16_t));
     }
-    if (in.comp_mask) {  // compressed row j visible to t when j < (t + 1) / 2
-        const int64_t      nc = in.n_comp;
-        std::vector<float> m((size_t) nc * n);
-        for (int i = 0; i < n; i++) {
-            const int64_t nv = (n_past_ + i + 1) / 2;
-            for (int64_t j = 0; j < nc; j++) m[(size_t) i * nc + j] = j < nv ? 0.0f : -INFINITY;
+    for (int64_t rt = 1; rt <= 2; rt++) {
+        const Inputs::Comp & cp = in.c[rt];
+        if (cp.mask) {  // compressed row j visible to t when j < (t + 1) / ratio
+            const int64_t      nc = cp.n_comp;
+            std::vector<float> m((size_t) nc * n);
+            for (int i = 0; i < n; i++) {
+                const int64_t nv = (n_past_ + i + 1) / rt;
+                for (int64_t j = 0; j < nc; j++) m[(size_t) i * nc + j] = j < nv ? 0.0f : -INFINITY;
+            }
+            set(cp.mask, m.data(), m.size() * 4);
         }
-        set(in.comp_mask, m.data(), m.size() * 4);
-    }
-    if (in.cand_pin) {  // +1e30 on the block holding each token's newest visible row
-        const int64_t      nb = in.cand_pin->ne[0], bs = h.cand_block_size;
-        std::vector<float> pin((size_t) nb * n, 0.0f);
-        for (int i = 0; i < n; i++) {
-            const int64_t nv = (n_past_ + i + 1) / 2;
-            if (nv > 0) pin[(size_t) i * nb + (nv - 1) / bs] = 1e30f;
+        if (cp.cand_pin) {  // +1e30 on the block holding each token's newest visible row
+            const int64_t      nb = cp.cand_pin->ne[0], bs = h.cand_block_size;
+            std::vector<float> pin((size_t) nb * n, 0.0f);
+            for (int i = 0; i < n; i++) {
+                const int64_t nv = (n_past_ + i + 1) / rt;
+                if (nv > 0) pin[(size_t) i * nb + (nv - 1) / bs] = 1e30f;
+            }
+            set(cp.cand_pin, pin.data(), pin.size() * 4);
         }
-        set(in.cand_pin, pin.data(), pin.size() * 4);
-    }
-    if (in.blk_rows) {  // pairs completed by this batch: their member slots, row and position
-        std::vector<int32_t> rows;
-        std::vector<int64_t> dst;
-        std::vector<int32_t> bp;
-        for (int64_t j = n_past_ / 2; j < (n_past_ + n) / 2; j++) {
-            rows.push_back((int32_t) ((2 * j) % R_));
-            rows.push_back((int32_t) ((2 * j + 1) % R_));
-            dst.push_back(j);
-            bp.push_back((int32_t) (2 * j));
+        if (cp.blk_rows) {  // groups completed by this batch: their member slots, row and first position
+            std::vector<int32_t> rows, bp;
+            std::vector<int64_t> dst;
+            for (int64_t j = n_past_ / rt; j < (n_past_ + n) / rt; j++) {
+                for (int64_t k = 0; k < rt; k++) rows.push_back((int32_t) ((rt * j + k) % R_));
+                dst.push_back(j);
+                bp.push_back((int32_t) (rt * j));
+            }
+            set(cp.blk_rows, rows.data(), rows.size() * 4);
+            set(cp.blk_dst, dst.data(), dst.size() * 8);
+            set(cp.blk_pos, bp.data(), bp.size() * 4);
         }
-        set(in.blk_rows, rows.data(), rows.size() * 4);
-        set(in.blk_dst, dst.data(), dst.size() * 8);
-        set(in.blk_pos, bp.data(), bp.size() * 4);
     }
     if (tokens) {
         std::vector<float> er;
@@ -1202,13 +1208,14 @@ bool Deepseek41::run_part(int part, int64_t il, const int32_t * tokens, int n, f
     if (part == 0) {
         new_inputs(ctx, n, in);
         const int64_t ts = h.topk_src[(size_t) il];
-        if (ts >= 0 && ts != il && in.n_comp > h.idx_top_k) {  // the source layer's top-k, from its own pass
+        if (ts >= 0 && ts != il && in.c[h.ratio[(size_t) il]].n_comp > h.idx_top_k) {  // the source layer's top-k, from its own pass
             topk_in = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, h.idx_top_k, n);
             ggml_set_input(topk_in);
             b.topk[(size_t) ts] = topk_in;
         }
-        if (h.cand_src >= 0 && h.cand_src < il && ts == il && in.cand_pin &&
-            in.cand_pin->ne[0] > h.cand_blocks && !cand_host_.empty()) {
+        const Inputs::Comp & cq = in.c[h.ratio[(size_t) il]];
+        if (h.cand_src >= 0 && h.cand_src < il && ts == il && cq.cand_pin &&
+            cq.cand_pin->ne[0] > h.cand_blocks && !cand_host_.empty()) {
             cand_in = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, h.cand_blocks, n);
             ggml_set_input(cand_in);
             b.cand_sel = cand_in;
@@ -1352,7 +1359,7 @@ bool Deepseek41::prefill(const int32_t * tokens, int N, float * logits, std::str
             ring_pos_ = ring0;
             int ua    = std::min(piece, 512);
             if (h.ratio[(size_t) il] != 0) {  // mask and indexer temporaries scale with the compressed rows
-                const int64_t nc = std::max<int64_t>(1, (base + cn) / 2);
+                const int64_t nc = std::max<int64_t>(1, (base + cn) / h.ratio[(size_t) il]);
                 ua = (int) std::clamp<int64_t>(24'000'000 / nc / 32 * 32, 32, ua);
             }
             for (int m0 = 0; m0 < cn; m0 += ua) {
