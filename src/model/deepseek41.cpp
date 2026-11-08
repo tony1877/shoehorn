@@ -1190,7 +1190,10 @@ bool Deepseek41::eval(const int32_t * tokens, int n, float * logits, std::string
         double sum = 0, sum0 = 0;
         for (float x : v) sum += x;
         for (int64_t i = 0; i < t->ne[0]; i++) sum0 += v[(size_t) i];
-        fprintf(stderr, "DUMP %s sum %.6f first-token-stream0 sum %.6f\n", name.c_str(), sum, sum0);
+        const size_t r0 = (size_t) t->ne[0];
+        fprintf(stderr, "DUMP %s sum %.6f first-token-stream0 sum %.6f  row0 %.4f %.4f %.4f .. %.4f %.4f %.4f  row1 %.4f %.4f %.4f\n",
+                name.c_str(), sum, sum0, v[0], v[1], v[2], v[r0 - 3], v[r0 - 2], v[r0 - 1],
+                v.size() > r0 + 2 ? v[r0] : 0.0f, v.size() > r0 + 2 ? v[r0 + 1] : 0.0f, v.size() > r0 + 2 ? v[r0 + 2] : 0.0f);
     }
     if (n == 1) {
         t_compute_ += std::chrono::duration<double>(clk::now() - t0).count();
