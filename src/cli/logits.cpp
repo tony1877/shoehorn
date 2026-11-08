@@ -40,6 +40,7 @@ int logits(const std::vector<std::string> & args) {
     std::string model, tokens_path, out_path, res_path;
     std::string kv = "f16";
     int         gpu_layers = 0, batch = 512, last = 0;
+    double      cache_gb = -1;
     for (size_t i = 2; i < args.size(); i++) {
         const std::string & k   = args[i];
         auto                val = [&]() -> std::string { return i + 1 < args.size() ? args[++i] : std::string(); };
@@ -49,6 +50,7 @@ int logits(const std::vector<std::string> & args) {
         else if (k == "--batch") batch = std::atoi(val().c_str());
         else if (k == "--kv") kv = val();
         else if (k == "--res") res_path = val();
+        else if (k == "--expert-cache-gb") cache_gb = std::atof(val().c_str());  // MoE: 0 = every expert from the mapping
         else if (k == "--last") last = std::atoi(val().c_str());  // only the last N rows; the rest is prefilled
         else if (model.empty() && k[0] != '-') model = k;
     }
@@ -65,6 +67,7 @@ int logits(const std::vector<std::string> & args) {
     o.n_ubatch     = batch;
     o.kv_type      = kv == "f32" ? GGML_TYPE_F32 : GGML_TYPE_F16;
     o.residual_path = res_path;
+    o.expert_cache_gb = cache_gb;
     std::string err;
     auto        mp = model::load_causal_lm(model, o, err);
     if (!mp) {
