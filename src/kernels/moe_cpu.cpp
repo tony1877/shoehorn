@@ -10,6 +10,7 @@
 #include <thread>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -55,8 +56,9 @@ std::vector<Pair> active_pairs(const ggml_tensor * ids, const ggml_tensor * w) {
     return p;
 }
 
-// Background prefetcher: compute threads only enqueue address ranges; one thread asks the OS to read them as large
-// concurrent I/Os (PrefetchVirtualMemory blocks its caller while it queues the reads; madvise(MADV_WILLNEED) on POSIX).
+// Background prefetcher: compute threads only enqueue address ranges; worker threads read them. On POSIX the ranges are
+// cut into 1 MB pieces that 8 threads madvise(MADV_WILLNEED) and touch page by page: one madvise reads synchronously
+// at a few hundred MB/s, NVMe wants queue depth (Windows: PrefetchVirtualMemory queues the reads itself).
 struct Range {
     const void * p;
     size_t       n;
@@ -67,19 +69,31 @@ public:
         if (r.empty()) return;
         {
             std::lock_guard<std::mutex> lk(mu_);
-            if (!th_.joinable()) th_ = std::thread([this] { run(); });
+            if (th_.empty()) {
+                const int nt = std::getenv("E8_PREFETCH_THREADS") ? std::max(1, std::atoi(std::getenv("E8_PREFETCH_THREADS"))) : 8;
+                for (int i = 0; i < nt; i++) th_.emplace_back([this] { run(); });
+            }
+#if defined(_WIN32)
             q_.push_back(std::move(r));
-            while (q_.size() > 8) q_.pop_front();  // stale requests: the compute has moved on
+#else
+            static const uintptr_t page = (uintptr_t) sysconf(_SC_PAGESIZE);
+            for (const Range & x : r) {
+                const char * a = (const char *) ((uintptr_t) x.p & ~(page - 1));
+                const char * e = (const char *) x.p + x.n;
+                for (; a < e; a += (1u << 20)) q_.push_back({ { a, std::min<size_t>(1u << 20, (size_t) (e - a)) } });
+            }
+#endif
+            while (q_.size() > 4096) q_.pop_front();  // stale requests: the compute has moved on
         }
-        cv_.notify_one();
+        cv_.notify_all();
     }
     ~Prefetcher() {
         {
             std::lock_guard<std::mutex> lk(mu_);
             stop_ = true;
         }
-        cv_.notify_one();
-        if (th_.joinable()) th_.join();
+        cv_.notify_all();
+        for (auto & t : th_) t.join();
     }
 
 private:
@@ -98,11 +112,11 @@ private:
             for (const Range & x : r) w.push_back({ (void *) x.p, x.n });
             PrefetchVirtualMemory(GetCurrentProcess(), w.size(), w.data(), 0);
 #else
-            // madvise wants a page-aligned start; the kernel queues the reads and returns
-            static const uintptr_t page = (uintptr_t) sysconf(_SC_PAGESIZE);
+            static const size_t page = (size_t) sysconf(_SC_PAGESIZE);
+            volatile char       sink = 0;
             for (const Range & x : r) {
-                const uintptr_t a = (uintptr_t) x.p & ~(page - 1);
-                madvise((void *) a, (uintptr_t) x.p + x.n - a, MADV_WILLNEED);
+                madvise((void *) x.p, x.n, MADV_WILLNEED);
+                for (size_t o = 0; o < x.n; o += page) sink = sink + ((const char *) x.p)[o];
             }
 #endif
         }
@@ -110,7 +124,7 @@ private:
     std::mutex                     mu_;
     std::condition_variable        cv_;
     std::deque<std::vector<Range>> q_;
-    std::thread                    th_;
+    std::vector<std::thread>       th_;
     bool                           stop_ = false;
 };
 Prefetcher g_prefetcher;
