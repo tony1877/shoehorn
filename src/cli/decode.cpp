@@ -7,6 +7,7 @@
 #include "model/qwen35.h"
 #include "model/qwen4exp.h"
 #include "model/glm5next.h"
+#include "model/deepseek41.h"
 
 #include <algorithm>
 #include <chrono>
@@ -99,6 +100,7 @@ int decode(const std::vector<std::string> & args) {
         printf("%s\n", q->cache_report().c_str());
     }
     if (auto * g = dynamic_cast<model::Glm5Next *>(&m)) printf("%s\n", g->cache_report().c_str());
+    if (auto * d = dynamic_cast<model::Deepseek41 *>(&m)) printf("%s\n", d->cache_report().c_str());
     printf("tokens:");
     for (int32_t t : out) printf(" %d", t);
     printf("\n");
