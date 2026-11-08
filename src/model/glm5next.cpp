@@ -860,11 +860,24 @@ void Glm5Next::update_expert_cache(int n) {
 }
 
 std::string Glm5Next::cache_report() const {
-    char prof[256] = "";
+    char prof[512] = "";
     if (n_timed_) {
         const double d = 1e3 / (double) n_timed_;
         snprintf(prof, sizeof prof, "\nper decode token: build %.1f ms, alloc %.1f ms, inputs %.1f ms, compute %.1f ms, cache update %.1f ms",
                  t_build_ * d, t_alloc_ * d, t_inputs_ * d, t_compute_ * d, t_update_ * d);
+    }
+    {
+        double gu = 0, dn = 0;
+        long long calls = 0;
+        kernels::moe_cpu_times(gu, dn, calls);
+        if (calls && n_timed_) {
+            const double per = (double) calls / (double) (hp_.n_layer - hp_.n_dense);
+            char extra[200];
+            snprintf(extra, sizeof extra, "
+CPU MoE ops per pass: gate/up %.1f ms, down %.1f ms (%lld calls)", gu * 1e3 / per,
+                     dn * 1e3 / per, calls);
+            strncat(prof, extra, sizeof prof - strlen(prof) - 1);
+        }
     }
     if (ec_.C <= 0) return std::string("expert cache: off") + prof;
     char buf[256];
