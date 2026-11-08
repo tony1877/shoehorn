@@ -74,7 +74,7 @@ struct Qwen4ExpLayer {
     bool          on_gpu = false;
 };
 
-class Qwen4Exp : public CausalLM {
+class Qwen4Exp : public CausalLM, public Speculative {
 public:
     Qwen4Exp();
     ~Qwen4Exp() override;
@@ -107,14 +107,14 @@ public:
     // The MTP block reads a token and the trunk's final hyper-connection residual of the position before it, and
     // predicts the token after it; chained on its own residual it drafts several. Its KV holds one row per position
     // (filled from the trunk's residuals as the prompt and the accepted tokens go by).
-    bool has_mtp() const { return mtp_; }
+    bool has_mtp() const override { return mtp_; }
     // up to k greedy drafts following `next` (sampled, not evaluated yet)
-    bool mtp_draft(int32_t next, int k, std::vector<int32_t> & drafts, std::string & err);
+    bool mtp_draft(int32_t next, int k, std::vector<int32_t> & drafts, std::string & err) override;
     // evaluates n tokens (next + drafts) with the logits of every row and the DeltaNet inputs recorded;
     // commit(keep) then keeps the first `keep` of them (the recurrent state is replayed over just those)
-    bool verify(const int32_t * tokens, int n, float * logits, std::string & err);
-    bool commit(int keep, std::string & err);
-    int  mtp_max_batch() const { return kRecMax; }
+    bool verify(const int32_t * tokens, int n, float * logits, std::string & err) override;
+    bool commit(int keep, std::string & err) override;
+    int  mtp_max_batch() const override { return kRecMax; }
 
 private:
     struct Inputs {

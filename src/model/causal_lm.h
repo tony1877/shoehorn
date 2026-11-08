@@ -49,6 +49,20 @@ public:
     virtual uint64_t cpu_weight_bytes() const = 0;
 };
 
+// Models with their own draft block (MTP): the server drafts with mtp_draft() (or copies a draft from the context),
+// checks the drafts in one verify() pass and keeps the agreeing prefix with commit().
+class Speculative {
+public:
+    virtual ~Speculative() = default;
+    virtual bool has_mtp() const = 0;
+    virtual int  mtp_max_batch() const = 0;  // largest verify batch
+    // up to k greedy drafts following `next` (sampled, not evaluated yet)
+    virtual bool mtp_draft(int32_t next, int k, std::vector<int32_t> & drafts, std::string & err) = 0;
+    // evaluates n tokens with every row's logits; commit(keep) then keeps the first `keep` of them
+    virtual bool verify(const int32_t * tokens, int n, float * logits, std::string & err) = 0;
+    virtual bool commit(int keep, std::string & err) = 0;
+};
+
 // Picks the implementation from general.architecture (qwen35, qwen4exp, glm5-next).
 std::unique_ptr<CausalLM> load_causal_lm(const std::string & path, const LoadOptions & opt, std::string & err);
 

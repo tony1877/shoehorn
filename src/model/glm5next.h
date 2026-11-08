@@ -78,7 +78,7 @@ struct Glm5NextLayer {
     bool          on_gpu = false;
 };
 
-class Glm5Next : public CausalLM {
+class Glm5Next : public CausalLM, public Speculative {
 public:
     Glm5Next();
     ~Glm5Next() override;
@@ -106,6 +106,15 @@ public:
     const Glm5NextHparams & hp() const { return hp_; }
     std::string cache_report() const;
 
+    // ---- MTP (the GGUF's nextn block, blk.<n_layer>): a plain DeepSeek-style block on [enorm(embedding of token
+    // j) | hnorm(trunk's post-norm hidden of j-1)], predicting token j+1; chained on its own output hidden it drafts
+    // several. Its latent KV holds one row per position, filled as the prompt and the accepted tokens go by.
+    bool has_mtp() const override { return mtp_; }
+    int  mtp_max_batch() const override { return kRecMax; }
+    bool mtp_draft(int32_t next, int k, std::vector<int32_t> & drafts, std::string & err) override;
+    bool verify(const int32_t * tokens, int n, float * logits, std::string & err) override;
+    bool commit(int keep, std::string & err) override;
+
 private:
     struct Inputs {
         ggml_tensor * embd = nullptr, * mask = nullptr, * res = nullptr, * kvidx = nullptr;
@@ -116,14 +125,17 @@ private:
     void          new_inputs(ggml_context * ctx, int n, int n_kv, bool sparse, Inputs & in);
     bool          set_inputs(const Inputs & in, int n, int n_kv);
     bool          sparse_at(int n) const;
-    // layer-major prompt processing (see Qwen4Exp::run_part): 0 = mixer, 1 = FFN, 2 = head
+    // layer-major prompt processing (see Qwen4Exp::run_part): 0 = mixer, 1 = FFN, 2 = head (last row's logits),
+    // 3 = the post-norm hidden of every row (into `logits`, n_embd per row)
     bool          run_part(int part, int64_t il, int n, float * r, float * logits, std::string & err);
     ggml_tensor * hc_pre(ggml_context * ctx, ggml_tensor * x, ggml_tensor * fn, ggml_tensor * scale, ggml_tensor * base,
                          ggml_tensor ** post, ggml_tensor ** comb);
     ggml_tensor * mixer(ggml_context * ctx, ggml_cgraph * gf, int64_t il, ggml_tensor * res, int n, int n_kv, bool sparse,
                         Inputs & in, ggml_tensor ** prev_mask);
     ggml_tensor * ffn_block(ggml_context * ctx, int64_t il, ggml_tensor * res, int n);
-    ggml_tensor * head(ggml_context * ctx, ggml_tensor * res);
+    ggml_tensor * head_norm(ggml_context * ctx, ggml_tensor * res);  // [n_embd, hc, n] -> post-norm hidden [n_embd, n]
+    ggml_tensor * kda_core(ggml_context * ctx, ggml_cgraph * gf, int64_t il, ggml_tensor * xq, ggml_tensor * xk,
+                           ggml_tensor * xv, ggml_tensor * g, ggml_tensor * beta, int n);
     ggml_tensor * kda(ggml_context * ctx, ggml_cgraph * gf, int64_t il, ggml_tensor * cur, int n);
     ggml_tensor * dsa(ggml_context * ctx, ggml_cgraph * gf, int64_t il, ggml_tensor * cur, int n, int n_kv, bool sparse,
                       Inputs & in, ggml_tensor ** prev_mask);
@@ -135,6 +147,12 @@ private:
     bool          init_expert_cache(std::string & err);
     void          update_expert_cache(int n);
     bool          embed_rows(const int32_t * tokens, int n, std::vector<float> & out) const;
+    bool          load_mtp(std::string & err);
+    bool          mtp_run(const int32_t * tokens, const float * h, int n, int pos0, int32_t * argmax, float * h_out,
+                          std::string & err);
+    bool          mtp_fill(int upto, std::string & err);
+    void          mtp_keep_h(int upto);
+    void          mtp_push_h(const float * rows, int pos0, int n);
 
     Glm5NextHparams         hp_;
     GgufSet                 file_;
@@ -151,8 +169,27 @@ private:
     std::vector<Glm5NextLayer> layers_;
     // per layer: latent KV + indexer rows (key | gate) + pooled keys (MLA); conv / recurrent state (KDA)
     std::vector<ggml_tensor *> kv_cache_, idx_raw_, idx_pool_, conv_state_, ssm_state_, conv_ck_, ssm_ck_;
+    std::vector<int32_t>       history_;  // every evaluated token (the MTP block reads token j at row j)
     int  ck_n_past_ = 0;
     bool last_only_ = false;
+
+    // MTP
+    static constexpr int  kRecMax = 8;
+    bool                  mtp_ = false;
+    int64_t               mtp_il_ = -1;  // its index in layers_ and the caches (after the trunk)
+    Glm5NextLayer         mtp_layer_;
+    ggml_tensor *         mtp_eh_ = nullptr, * mtp_enorm_ = nullptr, * mtp_hnorm_ = nullptr, * mtp_head_norm_ = nullptr;
+    ggml_context *        mtp_ctx_ = nullptr;
+    ggml_backend_buffer_t mtp_buf_ = nullptr;
+    std::vector<float>    mtp_h_;                   // trunk post-norm hidden rows for positions mtp_h0_ ..
+    int                   mtp_h0_ = 0, mtp_n_ = 1;  // MTP KV rows are valid for positions 1 .. mtp_n_-1
+    ggml_tensor *         h_all_ = nullptr;         // this graph's post-norm hidden, every row
+    // verify: recorded KDA inputs (pre-conv Q|K|V, decay, beta) and the recurrent state before it
+    bool                  record_ = false;
+    int                   rec_n_ = 0, sp_n_past_ = 0;
+    std::vector<ggml_tensor *> rec_x_, rec_g_, rec_beta_, sp_conv_, sp_ssm_;
+    ggml_context *        rec_ctx_[2] = { nullptr, nullptr };
+    ggml_backend_buffer_t rec_buf_[2] = { nullptr, nullptr };
 
     LoadOptions          opt_;
     int                  n_ctx_ = 0, n_past_ = 0;

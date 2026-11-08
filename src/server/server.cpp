@@ -2120,7 +2120,7 @@ loaded:
         consume();
         // Flash-Next with its MTP block: draft k tokens, verify them in one pass, keep the agreeing prefix. Each
         // row is sampled from the model's own logits exactly as without drafts, so the output distribution is the same.
-        auto *    q4    = dynamic_cast<model::Qwen4Exp *>(&m);
+        auto *    q4    = dynamic_cast<model::Speculative *>(&m);
         static const int flash_k = std::getenv("E8_FLASH_MTP_K") ? std::atoi(std::getenv("E8_FLASH_MTP_K")) : 3;
         const int mtp_k = q4 && q4->has_mtp() && S.mtp > 0 ? std::max(0, std::min({ S.mtp, flash_k, q4->mtp_max_batch() - 1 })) : 0;
         if (mtp_k > 0) {

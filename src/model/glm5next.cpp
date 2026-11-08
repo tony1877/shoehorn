@@ -110,6 +110,12 @@ Glm5Next::Glm5Next() = default;
 
 Glm5Next::~Glm5Next() {
     if (sched_) ggml_backend_sched_free(sched_);
+    if (mtp_buf_) ggml_backend_buffer_free(mtp_buf_);
+    if (mtp_ctx_) ggml_free(mtp_ctx_);
+    for (int i = 0; i < 2; i++) {
+        if (rec_buf_[i]) ggml_backend_buffer_free(rec_buf_[i]);
+        if (rec_ctx_[i]) ggml_free(rec_ctx_[i]);
+    }
     if (ec_.buf) ggml_backend_buffer_free(ec_.buf);
     if (ec_.ctx) ggml_free(ec_.ctx);
     if (wbuf_gpu_) ggml_backend_buffer_free(wbuf_gpu_);
@@ -290,7 +296,48 @@ bool Glm5Next::load(const std::string & path, const LoadOptions & opt, std::stri
             return false;
         }
     }
+    // MTP first: the expert cache (auto) takes the VRAM that is left
+    if (opt.mtp && gpu_) {
+        std::string e;
+        if (!load_mtp(e)) {
+            fprintf(stderr, "MTP: off (%s)\n", e.c_str());
+        } else {
+            ggml_init_params rp = { ggml_tensor_overhead() * (nl * 6 + 8), nullptr, true };
+            rec_ctx_[0] = ggml_init(rp);
+            rec_ctx_[1] = ggml_init(rp);
+            for (auto * v : { &rec_x_, &rec_g_, &rec_beta_, &sp_conv_, &sp_ssm_ }) v->assign(nl, nullptr);
+            for (size_t l = 0; l < nl; l++) {
+                if (!h.recurrent[l]) continue;
+                ggml_context * c = rec_ctx_[layers_[l].on_gpu ? 0 : 1];
+                rec_x_[l]    = ggml_new_tensor_2d(c, GGML_TYPE_F32, 3 * h.kda_inner(), kRecMax);
+                rec_g_[l]    = ggml_new_tensor_2d(c, GGML_TYPE_F32, h.kda_inner(), kRecMax);
+                rec_beta_[l] = ggml_new_tensor_2d(c, GGML_TYPE_F32, h.n_head, kRecMax);
+                sp_conv_[l]  = ggml_dup_tensor(c, conv_state_[l]);
+                sp_ssm_[l]   = ggml_dup_tensor(c, ssm_state_[l]);
+            }
+            for (int i = 0; i < 2; i++) {
+                ggml_backend_t be = i == 0 ? gpu_ : cpu_;
+                if (!ggml_get_first_tensor(rec_ctx_[i])) continue;
+                rec_buf_[i] = ggml_backend_alloc_ctx_tensors_from_buft(rec_ctx_[i], ggml_backend_get_default_buffer_type(be));
+                if (!rec_buf_[i]) {
+                    err = "not enough memory for the MTP verify buffers";
+                    return false;
+                }
+            }
+        }
+    }
     if (!init_expert_cache(err)) return false;
+    if (mtp_) {  // the MTP block becomes layer n_layer: dsa() / moe() take it like any other
+        mtp_il_ = (int64_t) layers_.size();
+        layers_.push_back(mtp_layer_);
+        for (auto * v : { &conv_state_, &ssm_state_, &conv_ck_, &ssm_ck_ }) v->push_back(nullptr);
+        if (ec_.C > 0)
+            for (auto * v : { &ec_.gate, &ec_.up, &ec_.down, &ec_.gmap, &ec_.cmap, &ec_.gmask }) v->push_back(nullptr);
+        sel_out_.push_back(nullptr);
+        kernels::PrefetchHint hn;
+        hn.limit = h.clamp_exp[(size_t) mtp_il_];
+        hints_.push_back(hn);
+    }
     reset();
 
     std::vector<ggml_backend_t> bes;
@@ -324,6 +371,9 @@ void Glm5Next::checkpoint_restore() {
         ggml_backend_tensor_copy(ssm_ck_[l], ssm_state_[l]);
     }
     n_past_ = ck_n_past_;
+    history_.resize((size_t) n_past_);
+    mtp_keep_h(n_past_);
+    mtp_n_ = std::max(1, std::min(mtp_n_, n_past_));
 }
 
 // Sequence state blob: n_past, the checkpoint's n_past, then the latent KV and indexer rows below n_past, the pooled
@@ -346,8 +396,11 @@ template <class F> static void glm_for_state(const std::vector<ggml_tensor *> & 
 }
 
 bool Glm5Next::save_seq(std::vector<uint8_t> & out) {
-    const int hdr[2] = { n_past_, ck_n_past_ };
+    if (rec_n_ > 0) return false;  // in the middle of a verify
+    const int hdr[6] = { n_past_, ck_n_past_, mtp_h0_, mtp_n_, (int) history_.size(), (int) mtp_h_.size() };
     out.assign((const uint8_t *) hdr, (const uint8_t *) hdr + sizeof hdr);
+    out.insert(out.end(), (const uint8_t *) history_.data(), (const uint8_t *) (history_.data() + history_.size()));
+    out.insert(out.end(), (const uint8_t *) mtp_h_.data(), (const uint8_t *) (mtp_h_.data() + mtp_h_.size()));
     glm_for_state(kv_cache_, idx_raw_, idx_pool_, { &conv_state_, &ssm_state_, &conv_ck_, &ssm_ck_ }, n_past_, (int) hp_.kpool,
                   [&](ggml_tensor * t, size_t n) {
                       const size_t o = out.size();
@@ -358,11 +411,18 @@ bool Glm5Next::save_seq(std::vector<uint8_t> & out) {
 }
 
 bool Glm5Next::load_seq(const std::vector<uint8_t> & in) {
-    int hdr[2];
+    int hdr[6];
     if (in.size() < sizeof hdr) return false;
     std::memcpy(hdr, in.data(), sizeof hdr);
-    if (hdr[0] < 0 || hdr[0] > n_ctx_) return false;
+    if (hdr[0] < 0 || hdr[0] > n_ctx_ || hdr[4] < 0 || hdr[5] < 0 ||
+        in.size() < sizeof hdr + (size_t) hdr[4] * 4 + (size_t) hdr[5] * 4) return false;
     size_t o  = sizeof hdr;
+    std::vector<int32_t> hist((size_t) hdr[4]);
+    std::vector<float>   mh((size_t) hdr[5]);
+    std::memcpy(hist.data(), in.data() + o, hist.size() * 4);
+    o += hist.size() * 4;
+    std::memcpy(mh.data(), in.data() + o, mh.size() * 4);
+    o += mh.size() * 4;
     bool   ok = true;
     glm_for_state(kv_cache_, idx_raw_, idx_pool_, { &conv_state_, &ssm_state_, &conv_ck_, &ssm_ck_ }, hdr[0], (int) hp_.kpool,
                   [&](ggml_tensor * t, size_t n) {
@@ -379,6 +439,11 @@ bool Glm5Next::load_seq(const std::vector<uint8_t> & in) {
     }
     n_past_    = hdr[0];
     ck_n_past_ = hdr[1];
+    mtp_h0_    = hdr[2];
+    mtp_n_     = hdr[3];
+    history_   = std::move(hist);
+    mtp_h_     = std::move(mh);
+    rec_n_     = 0;
     return true;
 }
 
@@ -387,6 +452,10 @@ void Glm5Next::reset() {
         if (b) ggml_backend_buffer_clear(b, 0);
     }
     n_past_ = 0;
+    history_.clear();
+    mtp_h_.clear();
+    mtp_h0_ = 0;
+    mtp_n_  = 1;
 }
 
 // ---- building blocks -------------------------------------------------------------------------------------------
@@ -411,24 +480,9 @@ ggml_tensor * Glm5Next::hc_pre(ggml_context * ctx, ggml_tensor * x, ggml_tensor 
 ggml_tensor * Glm5Next::kda(ggml_context * ctx, ggml_cgraph * gf, int64_t il, ggml_tensor * cur, int n) {
     const auto &          h  = hp_;
     const Glm5NextLayer & L  = layers_[(size_t) il];
-    const int64_t         S = h.kda_dim, H = h.n_head, D = h.kda_inner(), K = h.d_conv;
-    ggml_tensor *         cs = conv_state_[(size_t) il];
+    const int64_t         S = h.kda_dim, H = h.n_head, D = h.kda_inner();
 
-    // causal conv over [state | batch] for each of Q, K, V; the last K-1 inputs become the state
-    auto conv = [&](int qkv, ggml_tensor * w, ggml_tensor * cw) {
-        ggml_tensor * st  = ggml_view_3d(ctx, cs, K - 1, D, 1, ggml_row_size(cs->type, K - 1), ggml_row_size(cs->type, (K - 1) * D),
-                                         ggml_row_size(cs->type, (size_t) qkv * (K - 1) * D));
-        ggml_tensor * x   = ggml_reshape_3d(ctx, ggml_mul_mat(ctx, w, cur), D, n, 1);
-        ggml_tensor * cin = ggml_concat(ctx, st, ggml_transpose(ctx, x), 0);  // [K-1+n, D, 1]
-        ggml_tensor * last = ggml_view_3d(ctx, cin, K - 1, D, 1, cin->nb[1], cin->nb[2], ggml_row_size(cin->type, n));
-        ggml_build_forward_expand(gf, ggml_cpy(ctx, last, st));
-        ggml_tensor * y = ggml_silu(ctx, ggml_ssm_conv(ctx, cin, ggml_reshape_2d(ctx, cw, K, D)));  // [D, n, 1]
-        return ggml_reshape_4d(ctx, y, S, H, n, 1);
-    };
-    ggml_tensor * q = conv(0, L.wq, L.conv_q);
-    ggml_tensor * k = conv(1, L.wk, L.conv_k);
-    ggml_tensor * v = conv(2, L.wv, L.conv_v);
-
+    ggml_tensor * xq = ggml_mul_mat(ctx, L.wq, cur), * xk = ggml_mul_mat(ctx, L.wk, cur), * xv = ggml_mul_mat(ctx, L.wv, cur);
     // per-channel log decay: lower_bound * sigmoid(exp(A_log) * (f_b f_a x + dt_b)); ssm_a holds -exp(A_log)
     ggml_tensor * g = ggml_add(ctx, ggml_mul_mat(ctx, L.f_b, ggml_mul_mat(ctx, L.f_a, cur)), L.dt_b);  // [D, n]
     ggml_tensor * A = ggml_reshape_3d(ctx, L.a, 1, H, 1);
@@ -439,6 +493,45 @@ ggml_tensor * Glm5Next::kda(ggml_context * ctx, ggml_cgraph * gf, int64_t il, gg
     }
     g                  = ggml_reshape_4d(ctx, g, S, H, n, 1);
     ggml_tensor * beta = ggml_reshape_4d(ctx, ggml_sigmoid(ctx, ggml_mul_mat(ctx, L.beta, cur)), 1, H, n, 1);
+    if (record_ && !rec_x_.empty() && rec_x_[(size_t) il] && n <= kRecMax) {  // verify: keep the inputs for commit()
+        ggml_tensor * rx = rec_x_[(size_t) il];
+        ggml_tensor * x3[3] = { xq, xk, xv };
+        for (int i = 0; i < 3; i++)
+            ggml_build_forward_expand(gf, ggml_cpy(ctx, x3[i], ggml_view_2d(ctx, rx, D, n, rx->nb[1], ggml_row_size(rx->type, (size_t) i * D))));
+        ggml_tensor * rg = rec_g_[(size_t) il], * rb = rec_beta_[(size_t) il];
+        ggml_build_forward_expand(gf, ggml_cpy(ctx, ggml_reshape_2d(ctx, g, D, n), ggml_view_2d(ctx, rg, D, n, rg->nb[1], 0)));
+        ggml_build_forward_expand(gf, ggml_cpy(ctx, ggml_reshape_2d(ctx, beta, H, n), ggml_view_2d(ctx, rb, H, n, rb->nb[1], 0)));
+    }
+    ggml_tensor * out = kda_core(ctx, gf, il, xq, xk, xv, g, beta, n);
+
+    // RMSNorm(o) * sigmoid(g_b g_a x)
+    ggml_tensor * g2 = ggml_reshape_3d(ctx, ggml_mul_mat(ctx, L.g_b, ggml_mul_mat(ctx, L.g_a, cur)), S, H, n);
+    ggml_tensor * o  = ggml_mul(ctx, ggml_rms_norm(ctx, ggml_reshape_3d(ctx, ggml_cont(ctx, out), S, H, n), h.rms_eps), L.o_norm);
+    o                = ggml_mul(ctx, o, ggml_sigmoid(ctx, g2));
+    return ggml_mul_mat(ctx, L.wo, ggml_reshape_2d(ctx, o, D, n));
+}
+
+// conv + KDA recurrence over the pre-conv projections xq/xk/xv [D, n]: updates the layer's state, returns [S, H, n, 1]
+ggml_tensor * Glm5Next::kda_core(ggml_context * ctx, ggml_cgraph * gf, int64_t il, ggml_tensor * xq, ggml_tensor * xk,
+                                 ggml_tensor * xv, ggml_tensor * g, ggml_tensor * beta, int n) {
+    const auto &          h  = hp_;
+    const Glm5NextLayer & L  = layers_[(size_t) il];
+    const int64_t         S = h.kda_dim, H = h.n_head, D = h.kda_inner(), K = h.d_conv;
+    ggml_tensor *         cs = conv_state_[(size_t) il];
+    // causal conv over [state | batch] for each of Q, K, V; the last K-1 inputs become the state
+    auto conv = [&](int qkv, ggml_tensor * w, ggml_tensor * cw) {
+        ggml_tensor * st  = ggml_view_3d(ctx, cs, K - 1, D, 1, ggml_row_size(cs->type, K - 1), ggml_row_size(cs->type, (K - 1) * D),
+                                         ggml_row_size(cs->type, (size_t) qkv * (K - 1) * D));
+        ggml_tensor * x   = ggml_reshape_3d(ctx, ggml_is_contiguous(w) ? w : ggml_cont(ctx, w), D, n, 1);
+        ggml_tensor * cin = ggml_concat(ctx, st, ggml_transpose(ctx, x), 0);  // [K-1+n, D, 1]
+        ggml_tensor * last = ggml_view_3d(ctx, cin, K - 1, D, 1, cin->nb[1], cin->nb[2], ggml_row_size(cin->type, n));
+        ggml_build_forward_expand(gf, ggml_cpy(ctx, last, st));
+        ggml_tensor * y = ggml_silu(ctx, ggml_ssm_conv(ctx, cin, ggml_reshape_2d(ctx, cw, K, D)));  // [D, n, 1]
+        return ggml_reshape_4d(ctx, y, S, H, n, 1);
+    };
+    ggml_tensor * q = conv(0, xq, L.conv_q);
+    ggml_tensor * k = conv(1, xk, L.conv_k);
+    ggml_tensor * v = conv(2, xv, L.conv_v);
 
     // l2 norm (FLA's, eps 1e-6)
     auto l2 = [&](ggml_tensor * x) { return ggml_scale(ctx, ggml_rms_norm(ctx, x, 1e-6f / (float) S), 1.0f / sqrtf((float) S)); };
@@ -450,12 +543,7 @@ ggml_tensor * Glm5Next::kda(ggml_context * ctx, ggml_cgraph * gf, int64_t il, gg
     ggml_tensor * out = ggml_view_4d(ctx, res, S, H, n, 1, ggml_row_size(res->type, S), ggml_row_size(res->type, S * H),
                                      ggml_row_size(res->type, S * H * n), 0);
     ggml_build_forward_expand(gf, ggml_cpy(ctx, ggml_view_1d(ctx, res, S * S * H, ggml_row_size(res->type, S * H * n)), ss));
-
-    // RMSNorm(o) * sigmoid(g_b g_a x)
-    ggml_tensor * g2 = ggml_reshape_3d(ctx, ggml_mul_mat(ctx, L.g_b, ggml_mul_mat(ctx, L.g_a, cur)), S, H, n);
-    ggml_tensor * o  = ggml_mul(ctx, ggml_rms_norm(ctx, ggml_reshape_3d(ctx, ggml_cont(ctx, out), S, H, n), h.rms_eps), L.o_norm);
-    o                = ggml_mul(ctx, o, ggml_sigmoid(ctx, g2));
-    return ggml_mul_mat(ctx, L.wo, ggml_reshape_2d(ctx, o, D, n));
+    return out;
 }
 
 ggml_tensor * Glm5Next::dsa(ggml_context * ctx, ggml_cgraph * gf, int64_t il, ggml_tensor * cur, int n, int n_kv, bool sparse,
@@ -798,12 +886,11 @@ ggml_tensor * Glm5Next::ffn_block(ggml_context * ctx, int64_t il, ggml_tensor * 
     return ggml_dsv4_hc_post(ctx, cur, res, post, comb);
 }
 
-ggml_tensor * Glm5Next::head(ggml_context * ctx, ggml_tensor * res) {
+ggml_tensor * Glm5Next::head_norm(ggml_context * ctx, ggml_tensor * res) {
     const int64_t ne = hp_.n_embd, n = res->ne[2];
     ggml_tensor * m  = ggml_view_2d(ctx, res, ne, n, res->nb[2], 0);  // mean of the streams
     for (int64_t s = 1; s < hp_.hc; s++) m = ggml_add(ctx, m, ggml_view_2d(ctx, res, ne, n, res->nb[2], (size_t) s * res->nb[1]));
-    m = ggml_mul(ctx, ggml_rms_norm(ctx, ggml_scale(ctx, m, 1.0f / (float) hp_.hc), hp_.rms_eps), output_norm_);
-    return ggml_mul_mat(ctx, output_, m);
+    return ggml_mul(ctx, ggml_rms_norm(ctx, ggml_scale(ctx, m, 1.0f / (float) hp_.hc), hp_.rms_eps), output_norm_);
 }
 
 ggml_cgraph * Glm5Next::build_graph(ggml_context * ctx, int n, int n_kv, bool sparse, Inputs & in, ggml_tensor *& out) {
@@ -818,10 +905,19 @@ ggml_cgraph * Glm5Next::build_graph(ggml_context * ctx, int n, int n_kv, bool sp
         res = mixer(ctx, gf, il, res, n, n_kv, sparse, in, &prev);
         res = ffn_block(ctx, il, res, n);
     }
-    if (last_only_ && n > 1) {
-        res = ggml_view_3d(ctx, res, res->ne[0], res->ne[1], 1, res->nb[1], res->nb[2], res->nb[2] * (size_t) (n - 1));
+    h_all_ = nullptr;
+    if (mtp_) {  // every row's post-norm hidden feeds the MTP block
+        ggml_tensor * hn = head_norm(ctx, res);
+        h_all_           = hn;
+        ggml_set_output(hn);
+        if (last_only_ && n > 1) hn = ggml_view_2d(ctx, hn, hn->ne[0], 1, hn->nb[1], hn->nb[1] * (size_t) (n - 1));
+        out = ggml_mul_mat(ctx, output_, hn);
+    } else {
+        if (last_only_ && n > 1) {
+            res = ggml_view_3d(ctx, res, res->ne[0], res->ne[1], 1, res->nb[1], res->nb[2], res->nb[2] * (size_t) (n - 1));
+        }
+        out = ggml_mul_mat(ctx, output_, head_norm(ctx, res));
     }
-    out = head(ctx, res);
     ggml_set_output(out);
     ggml_build_forward_expand(gf, out);
     return gf;
@@ -957,6 +1053,12 @@ bool Glm5Next::eval(const int32_t * tokens, int n, float * logits, std::string &
         return false;
     }
     if (logits) ggml_backend_tensor_get(out, logits, 0, ggml_nbytes(out));
+    if (h_all_ && h_all_->buffer) {
+        std::vector<float> hr((size_t) ggml_nelements(h_all_));
+        ggml_backend_tensor_get(h_all_, hr.data(), 0, ggml_nbytes(h_all_));
+        mtp_push_h(hr.data(), n_past_, n);
+    }
+    h_all_        = nullptr;
     const auto t4 = clk::now();
     update_expert_cache(n);
     const auto t5 = clk::now();
@@ -975,7 +1077,10 @@ bool Glm5Next::eval(const int32_t * tokens, int n, float * logits, std::string &
                 ggml_backend_sched_get_n_splits(sched_));
     }
     ggml_free(ctx);
+    history_.insert(history_.end(), tokens, tokens + n);
     n_past_ += n;
+    // plain decoding (no drafts) still keeps the MTP rows current, in batches
+    if (mtp_ && !record_ && (int64_t) mtp_h_.size() / hp_.n_embd > 256 && !mtp_fill(n_past_, err)) return false;
     return true;
 }
 
@@ -998,8 +1103,10 @@ bool Glm5Next::run_part(int part, int64_t il, int n, float * r, float * logits, 
         out = mixer(ctx, gf, il, in.res, n, n_kv, sparse, in, &prev);
     } else if (part == 1) {
         out = ffn_block(ctx, il, in.res, n);
+    } else if (part == 2) {
+        out = ggml_mul_mat(ctx, output_, head_norm(ctx, in.res));
     } else {
-        out = head(ctx, in.res);
+        out = head_norm(ctx, in.res);
     }
     ggml_set_output(out);
     ggml_build_forward_expand(gf, out);
@@ -1016,7 +1123,7 @@ bool Glm5Next::run_part(int part, int64_t il, int n, float * r, float * logits, 
         err = "prefill: graph compute failed";
         return false;
     }
-    ggml_backend_tensor_get(out, part == 2 ? logits : r, 0, ggml_nbytes(out));
+    ggml_backend_tensor_get(out, part >= 2 ? logits : r, 0, ggml_nbytes(out));
     ggml_free(ctx);
     return true;
 }
@@ -1024,7 +1131,7 @@ bool Glm5Next::run_part(int part, int64_t il, int n, float * r, float * logits, 
 bool Glm5Next::prefill(const int32_t * tokens, int N, float * logits, std::string & err) {
     const auto & h = hp_;
     static const int min_layered = std::getenv("E8_LAYERED_MIN") ? std::atoi(std::getenv("E8_LAYERED_MIN")) : 256;
-    if (N < min_layered) return CausalLM::prefill(tokens, N, logits, err);
+    if (N < min_layered) return CausalLM::prefill(tokens, N, logits, err) && (!mtp_ || mtp_fill(n_past_, err));
     if (n_past_ + N > n_ctx_) {
         err = "prefill: context full (" + std::to_string(n_ctx_) + " tokens)";
         return false;
@@ -1080,6 +1187,7 @@ bool Glm5Next::prefill(const int32_t * tokens, int N, float * logits, std::strin
         for (int i = 0; i < cn; i++)
             for (int64_t j = 0; j < h.hc; j++)
                 std::memcpy(rr.data() + (size_t) i * hcd + j * h.n_embd, e.data() + (size_t) i * h.n_embd, sizeof(float) * h.n_embd);
+        history_.insert(history_.end(), tokens + c0, tokens + c0 + cn);
         std::thread pf = prefetch(0);
         for (int64_t il = 0; il < h.n_layer; il++) {
             int ua = 2048;
@@ -1102,9 +1210,291 @@ bool Glm5Next::prefill(const int32_t * tokens, int N, float * logits, std::strin
         }
         pf.join();
         n_past_ = base + cn;
+        if (mtp_) {  // the chunk's post-norm hidden rows feed the MTP rows, in pieces
+            std::vector<float> hn;
+            for (int o = 0; o < cn; o += 4096) {
+                const int b = std::min(4096, cn - o);
+                hn.resize((size_t) b * h.n_embd);
+                if (!run_part(3, 0, b, rr.data() + (size_t) o * hcd, hn.data(), err)) return false;
+                mtp_push_h(hn.data(), base + o, b);
+                if (!mtp_fill(base + o + b, err)) return false;
+            }
+        }
         if (c0 + cn == N && logits && !run_part(2, 0, cn, rr.data(), logits, err)) return false;
     }
     return true;
 }
+
+// ---- MTP speculation -----------------------------------------------------------------------------------------
+
+bool Glm5Next::load_mtp(std::string & err) {
+    const auto &      h  = hp_;
+    const GgufFile &  f  = file_.meta();
+    if (f.i64(key("nextn_predict_layers"), 0) != 1) {
+        err = "the GGUF has no MTP block";
+        return false;
+    }
+    const std::string p  = "blk." + std::to_string(h.n_layer) + ".";
+    ggml_init_params  ip = { ggml_tensor_overhead() * 64, nullptr, true };
+    mtp_ctx_             = ggml_init(ip);
+    std::vector<std::pair<ggml_tensor *, const ggml_tensor *>> up;
+    bool missing = false;
+    auto mk = [&](const std::string & name) -> ggml_tensor * {
+        const ggml_tensor * m = file_.tensor(name);
+        if (!m) {
+            if (!missing) err = "MTP tensor missing: " + name;
+            missing = true;
+            return nullptr;
+        }
+        ggml_tensor * t = ggml_dup_tensor(mtp_ctx_, m);
+        ggml_set_name(t, ("mtp." + name).c_str());
+        up.emplace_back(t, m);
+        return t;
+    };
+    Glm5NextLayer & L = mtp_layer_;
+    L.on_gpu          = true;
+    L.attn_norm       = mk(p + "attn_norm.weight");
+    L.ffn_norm        = mk(p + "ffn_norm.weight");
+    L.q_a             = mk(p + "attn_q_a.weight");
+    L.q_a_norm        = mk(p + "attn_q_a_norm.weight");
+    L.q_b             = mk(p + "attn_q_b.weight");
+    L.kv_a            = mk(p + "attn_kv_a_mqa.weight");
+    L.kv_a_norm       = mk(p + "attn_kv_a_norm.weight");
+    L.k_b             = mk(p + "attn_k_b.weight");
+    L.v_b             = mk(p + "attn_v_b.weight");
+    L.wo              = mk(p + "attn_output.weight");
+    L.idx_k_norm      = mk(p + "indexer.k_norm.weight");
+    L.idx_k_norm_b    = mk(p + "indexer.k_norm.bias");
+    L.idx_proj        = mk(p + "indexer.proj.weight");
+    L.idx_k           = mk(p + "indexer.attn_k.weight");
+    L.idx_q_b         = mk(p + "indexer.attn_q_b.weight");
+    L.idx_gate        = mk(p + "indexer_compressor_gate.weight");
+    L.idx_ape         = mk(p + "indexer_compressor_ape.weight");
+    L.gate_inp        = mk(p + "ffn_gate_inp.weight");
+    L.exp_bias        = mk(p + "exp_probs_b.bias");
+    L.gate_exps       = mk(p + "ffn_gate_exps.weight");
+    L.up_exps         = mk(p + "ffn_up_exps.weight");
+    L.down_exps       = mk(p + "ffn_down_exps.weight");
+    L.gate_shexp      = mk(p + "ffn_gate_shexp.weight");
+    L.up_shexp        = mk(p + "ffn_up_shexp.weight");
+    L.down_shexp      = mk(p + "ffn_down_shexp.weight");
+    mtp_eh_           = mk(p + "nextn.eh_proj.weight");
+    mtp_enorm_        = mk(p + "nextn.enorm.weight");
+    mtp_hnorm_        = mk(p + "nextn.hnorm.weight");
+    mtp_head_norm_    = mk(p + "nextn.shared_head_norm.weight");
+    if (missing) return false;
+    // its caches, like an attention layer's: latent KV, indexer rows, pooled keys
+    ggml_tensor * kv   = ggml_new_tensor_2d(mtp_ctx_, opt_.kv_type, h.kv_lora, n_ctx_);
+    ggml_tensor * raw  = ggml_new_tensor_2d(mtp_ctx_, GGML_TYPE_F32, 2 * h.idx_dim, n_ctx_);
+    ggml_tensor * pool = ggml_new_tensor_2d(mtp_ctx_, GGML_TYPE_F32, h.idx_dim, n_ctx_ / h.kpool + 1);
+    mtp_buf_ = ggml_backend_alloc_ctx_tensors_from_buft(mtp_ctx_, ggml_backend_get_default_buffer_type(gpu_));
+    if (!mtp_buf_) {
+        err = "not enough VRAM for the MTP block";
+        return false;
+    }
+    ggml_backend_buffer_clear(mtp_buf_, 0);
+    for (auto & [t, m] : up) ggml_backend_tensor_set(t, file_.data(m), 0, ggml_nbytes(t));
+    kv_cache_.push_back(kv);  // index n_layer, as mtp_il_ will be
+    idx_raw_.push_back(raw);
+    idx_pool_.push_back(pool);
+    mtp_ = true;
+    fprintf(stderr, "MTP: blk.%lld, %.2f GB in VRAM\n", (long long) h.n_layer, ggml_backend_buffer_get_size(mtp_buf_) / 1e9);
+    return true;
+}
+
+void Glm5Next::mtp_keep_h(int upto) {
+    const int64_t ne   = hp_.n_embd;
+    const int     rows = (int) ((int64_t) mtp_h_.size() / ne);
+    mtp_h_.resize((size_t) (std::clamp(upto - mtp_h0_, 0, rows) * ne));
+}
+
+void Glm5Next::mtp_push_h(const float * rows, int pos0, int n) {
+    const int64_t ne = hp_.n_embd;
+    mtp_keep_h(pos0);  // a rewind: forget what lay past pos0
+    if (mtp_h0_ + (int) ((int64_t) mtp_h_.size() / ne) != pos0) {  // a gap (a restored checkpoint)
+        mtp_h_.clear();
+        mtp_h0_ = pos0;
+        mtp_n_  = std::max(mtp_n_, pos0 + 1);
+    }
+    mtp_h_.insert(mtp_h_.end(), rows, rows + (size_t) n * ne);
+}
+
+bool Glm5Next::mtp_fill(int upto, std::string & err) {
+    if (!mtp_) return true;
+    const int64_t ne   = hp_.n_embd;
+    const int     rows = (int) ((int64_t) mtp_h_.size() / ne);
+    upto               = std::min(upto, (int) history_.size());
+    mtp_n_             = std::max(mtp_n_, mtp_h0_ + 1);
+    while (mtp_n_ < upto && mtp_n_ - 1 < mtp_h0_ + rows) {
+        const int j0 = mtp_n_;
+        const int b  = std::min({ 512, upto - j0, mtp_h0_ + rows - (j0 - 1) });
+        if (!mtp_run(history_.data() + j0, mtp_h_.data() + (size_t) (j0 - 1 - mtp_h0_) * ne, b, j0, nullptr, nullptr, err)) return false;
+        mtp_n_ += b;
+    }
+    const int drop = std::min(rows, mtp_n_ - 1 - mtp_h0_);  // keep the rows from mtp_n_-1 on: the next row's input
+    if (drop > 0) {
+        mtp_h_.erase(mtp_h_.begin(), mtp_h_.begin() + (ptrdiff_t) (drop * ne));
+        mtp_h0_ += drop;
+    }
+    return true;
+}
+
+bool Glm5Next::mtp_run(const int32_t * tokens, const float * hrows, int n, int pos0, int32_t * argmax, float * h_out,
+                       std::string & err) {
+    const auto &  h  = hp_;
+    const int64_t ne = h.n_embd;
+    if (pos0 + n > n_ctx_) {
+        err = "MTP: context full";
+        return false;
+    }
+    std::vector<float> e;
+    if (!embed_rows(tokens, n, e)) {
+        err = "MTP: token id out of range";
+        return false;
+    }
+    const int saved = n_past_;
+    n_past_         = pos0;  // dsa() / set_inputs() place rows at n_past_
+    const int  n_kv   = std::min(n_ctx_, (pos0 + n + kKvPad - 1) / kKvPad * kKvPad);
+    const bool sparse = sparse_at(n);
+
+    ggml_init_params ip  = { graph_meta_.size(), graph_meta_.data(), true };
+    ggml_context *   ctx = ggml_init(ip);
+    ggml_cgraph *    gf  = ggml_new_graph_custom(ctx, kGraphSize, false);
+    Inputs           in;
+    in.embd = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, ne, n);
+    ggml_set_input(in.embd);
+    ggml_tensor * hin = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, ne, n);
+    ggml_set_input(hin);
+    new_inputs(ctx, n, n_kv, sparse, in);
+
+    const Glm5NextLayer & L = layers_[(size_t) mtp_il_];
+    auto rms = [&](ggml_tensor * x, ggml_tensor * w) { return ggml_mul(ctx, ggml_rms_norm(ctx, x, h.rms_eps), w); };
+    // x = eh_proj([enorm(embedding) | hnorm(hidden)]), then a plain pre-norm block
+    ggml_tensor * x    = ggml_mul_mat(ctx, mtp_eh_, ggml_concat(ctx, rms(in.embd, mtp_enorm_), rms(hin, mtp_hnorm_), 0));
+    ggml_tensor * prev = nullptr;
+    ggml_tensor * a    = dsa(ctx, gf, mtp_il_, rms(x, L.attn_norm), n, n_kv, sparse, in, &prev);  // writes this block's KV rows
+    ggml_tensor * hout = nullptr, * am = nullptr;
+    if (argmax || h_out) {
+        x = ggml_add(ctx, x, a);
+        x = ggml_add(ctx, x, moe(ctx, mtp_il_, rms(x, L.ffn_norm), n));
+        ggml_tensor * last = ggml_view_2d(ctx, x, ne, 1, x->nb[1], x->nb[1] * (size_t) (n - 1));
+        if (h_out) {  // the chained draft reads the block's own output hidden
+            hout = ggml_cont(ctx, last);  // pre shared-head-norm, as vLLM chains DeepSeek MTP
+            ggml_set_output(hout);
+            ggml_build_forward_expand(gf, hout);
+        }
+        if (argmax) {
+            ggml_tensor * lg = ggml_mul_mat(ctx, output_, rms(last, mtp_head_norm_));
+            am               = ggml_argmax(ctx, lg);
+            ggml_set_output(am);
+            ggml_build_forward_expand(gf, am);
+        }
+    } else {
+        ggml_build_forward_expand(gf, a);
+    }
+    bool ok = true;
+    ggml_backend_sched_reset(sched_);
+    if (!ggml_backend_sched_alloc_graph(sched_, gf)) {
+        err = "MTP: cannot allocate the compute graph";
+        ok  = false;
+    }
+    if (ok) {
+        ggml_backend_tensor_set(in.embd, e.data(), 0, ggml_nbytes(in.embd));
+        ggml_backend_tensor_set(hin, hrows, 0, ggml_nbytes(hin));
+        set_inputs(in, n, n_kv);
+        if (ggml_backend_sched_graph_compute(sched_, gf) != GGML_STATUS_SUCCESS) {
+            err = "MTP: graph compute failed";
+            ok  = false;
+        }
+    }
+    if (ok && hout) ggml_backend_tensor_get(hout, h_out, 0, ggml_nbytes(hout));
+    if (ok && am) ggml_backend_tensor_get(am, argmax, 0, sizeof(int32_t));
+    ggml_free(ctx);
+    n_past_ = saved;
+    return ok;
+}
+
+bool Glm5Next::mtp_draft(int32_t next, int k, std::vector<int32_t> & drafts, std::string & err) {
+    drafts.clear();
+    if (!mtp_ || k <= 0 || n_past_ < 1 || n_past_ + k + 1 >= n_ctx_) return true;
+    if (!mtp_fill(n_past_, err)) return false;
+    const int64_t ne   = hp_.n_embd;
+    const int     rows = (int) ((int64_t) mtp_h_.size() / ne);
+    if (mtp_n_ != n_past_ || n_past_ - 1 < mtp_h0_ || n_past_ - 1 >= mtp_h0_ + rows) return true;  // no hidden: no drafts
+    std::vector<float> hv((size_t) ne);
+    int32_t            tok = next, d = 0;
+    // the row for `next` is real (it is evaluated next whatever the drafts): it stays
+    if (!mtp_run(&tok, mtp_h_.data() + (size_t) (n_past_ - 1 - mtp_h0_) * ne, 1, n_past_, &d, hv.data(), err)) return false;
+    mtp_n_ = n_past_ + 1;
+    drafts.push_back(d);
+    for (int i = 1; i < k; i++) {
+        tok = d;
+        if (!mtp_run(&tok, hv.data(), 1, n_past_ + i, &d, hv.data(), err)) return false;
+        drafts.push_back(d);
+    }
+    return true;
+}
+
+bool Glm5Next::verify(const int32_t * tokens, int n, float * logits, std::string & err) {
+    if (n > kRecMax || rec_x_.empty()) {
+        err = "verify: batch above " + std::to_string(kRecMax) + " or no MTP";
+        return false;
+    }
+    for (size_t l = 0; l < sp_conv_.size(); l++) {  // the recurrent state before the batch
+        if (!sp_conv_[l]) continue;
+        ggml_backend_tensor_copy(conv_state_[l], sp_conv_[l]);
+        ggml_backend_tensor_copy(ssm_state_[l], sp_ssm_[l]);
+    }
+    sp_n_past_    = n_past_;
+    record_       = true;
+    rec_n_        = n;
+    const bool ok = eval(tokens, n, logits, err);
+    record_       = false;
+    if (!ok) rec_n_ = 0;
+    return ok;
+}
+
+bool Glm5Next::commit(int keep, std::string & err) {
+    if (rec_n_ <= 0 || keep < 1 || keep > rec_n_) {
+        err = "commit: no verify to keep from";
+        return false;
+    }
+    if (keep == rec_n_) {
+        rec_n_ = 0;
+        return true;
+    }
+    const auto & h = hp_;
+    for (size_t l = 0; l < sp_conv_.size(); l++) {
+        if (!sp_conv_[l]) continue;
+        ggml_backend_tensor_copy(sp_conv_[l], conv_state_[l]);
+        ggml_backend_tensor_copy(sp_ssm_[l], ssm_state_[l]);
+    }
+    // replay the kept tokens through the recurrences only (no attention, no experts)
+    ggml_init_params ip  = { graph_meta_.size(), graph_meta_.data(), true };
+    ggml_context *   ctx = ggml_init(ip);
+    ggml_cgraph *    gf  = ggml_new_graph_custom(ctx, kGraphSize, false);
+    const int64_t    D = h.kda_inner(), H = h.n_head, S = h.kda_dim;
+    for (size_t l = 0; l < rec_x_.size(); l++) {
+        if (!rec_x_[l]) continue;
+        ggml_tensor * rx = rec_x_[l];
+        auto part = [&](int i) { return ggml_cont(ctx, ggml_view_2d(ctx, rx, D, keep, rx->nb[1], ggml_row_size(rx->type, (size_t) i * D))); };
+        ggml_tensor * g    = ggml_reshape_4d(ctx, ggml_view_2d(ctx, rec_g_[l], D, keep, rec_g_[l]->nb[1], 0), S, H, keep, 1);
+        ggml_tensor * beta = ggml_reshape_4d(ctx, ggml_view_2d(ctx, rec_beta_[l], H, keep, rec_beta_[l]->nb[1], 0), 1, H, keep, 1);
+        ggml_build_forward_expand(gf, kda_core(ctx, gf, (int64_t) l, part(0), part(1), part(2), g, beta, keep));
+    }
+    bool ok = true;
+    ggml_backend_sched_reset(sched_);
+    if (!ggml_backend_sched_alloc_graph(sched_, gf) || ggml_backend_sched_graph_compute(sched_, gf) != GGML_STATUS_SUCCESS) {
+        err = "commit: replay failed";
+        ok  = false;
+    }
+    ggml_free(ctx);
+    n_past_ = sp_n_past_ + keep;
+    history_.resize((size_t) n_past_);
+    mtp_keep_h(n_past_);
+    rec_n_ = 0;
+    return ok;
+}
+
 
 } // namespace e8::model
