@@ -28,6 +28,19 @@ int main(int argc, char ** argv) {
     std::stringstream ss;
     ss << f.rdbuf();
     std::vector<llama_token> toks;
+    if (!strcmp(argv[3], "--tokenize")) {  // llama_logits <model> <text.txt> --tokenize <ids.txt>: text to ids only
+        llama_model_params vp = llama_model_default_params();
+        vp.vocab_only         = true;
+        llama_model *       vm = llama_model_load_from_file(argv[1], vp);
+        const std::string   s  = ss.str();
+        toks.resize(s.size() + 16);
+        const int nt = llama_tokenize(llama_model_get_vocab(vm), s.c_str(), (int32_t) s.size(), toks.data(), (int32_t) toks.size(), true, true);
+        FILE * o = fopen(argc > 4 ? argv[4] : "ids.txt", "w");
+        for (int i = 0; i < nt; i++) fprintf(o, "%d ", toks[(size_t) i]);
+        fclose(o);
+        printf("%d tokens\n", nt);
+        return 0;
+    }
     for (int t; ss >> t;) toks.push_back(t);
     if (toks.empty()) {
         fprintf(stderr, "no token ids\n");
