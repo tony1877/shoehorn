@@ -71,6 +71,13 @@ export interface Config {
   investigationThresholds?: number[]
   /** Tool names whose successful result resets the investigation count. */
   investigationResetTools?: string[]
+  /**
+   * Consecutive identical calls (same tool, same arguments) that also returned
+   * the identical result, at which the call is blocked: its result is replaced
+   * by corrective feedback (default 0: never block). Polling that sees a
+   * changing result is never blocked.
+   */
+  blockAt?: number
 }
 
 export const Config: z<Config> = z.object({
@@ -85,6 +92,7 @@ export const Config: z<Config> = z.object({
   reminderSuffix: z.string().default(''),
   investigationThresholds: z.array(z.number()).default([]),
   investigationResetTools: z.array(z.string()).default(['write', 'edit', 'str_replace_editor']),
+  blockAt: z.number().default(0),
 })
 
 /**
@@ -125,6 +133,27 @@ const GENTLE_RESULT_REMINDER =
   + 'change approach, or report the discrepancy and finish.'
 
 /** The detailed later same-result reminder naming the tool, the count, the window, and the repeated result. */
+/**
+ * The step-back checkpoint after `count` calls without a reset tool succeeding.
+ * The highest threshold asks the model to stop and hand the decision to the user.
+ */
+function investigationReminder(count: number, last: boolean): string {
+  const base = `You have made ${count} tool calls without the task visibly advancing. Step back before the next call: `
+    + 'list the approaches you have tried and why each failed, and name the standard, well-documented way this '
+    + 'problem is normally solved. If you have not tried that way, switch to it now instead of going deeper into the '
+    + 'current approach. Do not repeat an approach you have already ruled out.'
+  return last
+    ? `${base} You have been at this for a long time: unless the next step is clearly the standard fix, stop, report `
+      + 'what you tried and what is blocking you, and ask the user how to proceed.'
+    : base
+}
+
+/** Feedback replacing the result of a call blocked for repeating the identical call with the identical result. */
+function blockedFeedback(toolName: string, count: number): string {
+  return `Blocked: this ${toolName} call is identical to the previous ${count - 1} and they all returned the same result, `
+    + 'so it was not worth running again. Use the result you already have, or change the command or the approach.'
+}
+
 function detailedResultReminder(toolName: string, count: number, window: number, result: string): string {
   return 'Repeated tool result detected:\n'
     + `- tool: ${toolName}\n`
@@ -224,6 +253,9 @@ function prependContext(ours: UserMessage, theirs: UserMessage[] | undefined): U
 interface Chain {
   key: string
   count: number
+  /** Result key of the last call in the chain, and how many consecutive calls in the chain returned it. */
+  result?: string | undefined
+  sameResult?: number | undefined
 }
 
 /**
@@ -258,6 +290,11 @@ export function apply(ctx: Context, config: Config): void {
   const investigationThresholds = new Set(validateThresholds(config.investigationThresholds as number[], 'investigationThresholds', true))
   const investigationResetTools = new Set(config.investigationResetTools as string[])
   const investigationCounts = new WeakMap<Agent, number>()
+  const investigationLast = Math.max(0, ...investigationThresholds)
+  const blockAt = config.blockAt as number
+  if (!Number.isInteger(blockAt) || blockAt === 1 || blockAt < 0) {
+    throw new Error(`repeat-tool-reminder: invalid blockAt ${blockAt} — must be 0 (off) or an integer >= 2`)
+  }
   const highestResultThreshold = resultThresholds.at(-1)
   if (highestResultThreshold !== undefined && highestResultThreshold > resultWindow) {
     throw new Error(`repeat-tool-reminder: resultWindow ${resultWindow} is smaller than resultThresholds entry ${highestResultThreshold}, which could never be reached`)
@@ -292,7 +329,7 @@ export function apply(ctx: Context, config: Config): void {
     const key = JSON.stringify([exec.name, canonical])
     const chain = chains.get(agent)
     const count = chain !== undefined && chain.key === key ? chain.count + 1 : 1
-    chains.set(agent, { key, count })
+    chains.set(agent, { key, count, result: count > 1 ? chain?.result : undefined, sameResult: count > 1 ? chain?.sameResult : undefined })
     if (!thresholdSet.has(count)) return undefined
     const text = count === thresholds[0]
       ? GENTLE_REMINDER
@@ -333,21 +370,38 @@ export function apply(ctx: Context, config: Config): void {
    * the loop worth breaking. When both detectors fire on one call, the
    * exact-repeat reminder wins: it names the repeated arguments.
    */
-  function observe(exec: ToolExecution, result: Readonly<ToolExecutionResult>): UserMessage | undefined {
+  /**
+   * After the chain advanced for this call: record its result and report whether this is the `blockAt`-th (or later)
+   * consecutive identical call to return the identical result.
+   */
+  function shouldBlock(agent: Agent, result: Readonly<ToolExecutionResult>): boolean {
+    const chain = chains.get(agent)
+    if (chain === undefined) return false
+    const key = JSON.stringify(result.content)
+    chain.sameResult = chain.count > 1 && chain.result === key ? (chain.sameResult ?? 1) + 1 : 1
+    chain.result = key
+    return blockAt > 0 && chain.sameResult >= blockAt
+  }
+
+  function observe(
+    exec: ToolExecution,
+    result: Readonly<ToolExecutionResult>,
+  ): { reminder?: UserMessage | undefined; block?: string | undefined } {
     // A direct `ctx.tools.execute()` caller has no model to remind and no id
     // to key on; only agent-loop calls participate.
-    if (!exec.agent) return undefined
-    if (!tracked(exec.name)) return undefined
+    if (!exec.agent) return {}
+    if (!tracked(exec.name)) return {}
     const successful = !result.isError
     if (successful && investigationResetTools.has(exec.name)) investigationCounts.delete(exec.agent)
     else investigationCounts.set(exec.agent, (investigationCounts.get(exec.agent) ?? 0) + 1)
     const byArguments = observeArguments(exec.agent, exec)
+    const block = shouldBlock(exec.agent, result) ? blockedFeedback(exec.name, chains.get(exec.agent)?.count ?? 0) : undefined
     const byResult = observeResult(exec.agent, exec, result)
     const count = investigationCounts.get(exec.agent) ?? 0
     const investigation = investigationThresholds.has(count)
-      ? reminderMessage(`You have made ${count} tool calls since a successful file mutation. Consolidate the facts already verified, identify the unresolved question, and check an authoritative reference or a runnable assertion before continuing. This is an advisory checkpoint, not evidence that the investigation is wrong.`, `Investigation checkpoint × ${count}`)
+      ? reminderMessage(investigationReminder(count, count === investigationLast), `Step-back checkpoint × ${count}`)
       : undefined
-    return byArguments ?? byResult ?? investigation
+    return { reminder: byArguments ?? byResult ?? investigation, block }
   }
 
   // Observe-and-enrich, never veto: count first (state advances regardless of
@@ -355,8 +409,14 @@ export function apply(ctx: Context, config: Config): void {
   // replace, then fold the reminder onto whatever came back — additionalContexts
   // rides both decision variants, so a blocked call still gets the nudge.
   ctx.on('tools/post-execute', async (exec, result, next): Promise<PostToolDecision> => {
-    const reminder = observe(exec, result)
+    const { reminder, block } = observe(exec, result)
     const downstream = await next()
+    if (block !== undefined) {
+      const contexts = downstream.additionalContexts
+      const additionalContexts = reminder ? prependContext(reminder, contexts) : contexts
+      const feedback: ContentBlock[] = [{ type: 'text', text: block }]
+      return additionalContexts === undefined ? { kind: 'block', feedback } : { kind: 'block', feedback, additionalContexts }
+    }
     if (!reminder) return downstream
     if (downstream.kind === 'block') {
       return { kind: 'block', feedback: downstream.feedback, additionalContexts: prependContext(reminder, downstream.additionalContexts) }

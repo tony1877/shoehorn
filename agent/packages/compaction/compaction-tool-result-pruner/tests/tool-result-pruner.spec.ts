@@ -326,6 +326,18 @@ describe('ToolResultPruner pass limits', () => {
     expect(result.pruned.map(entry => entry.callId)).toEqual([ToolCallId('a')])
   })
 
+  it('prunes nothing when the pass would save less than minSavingsTokens', () => {
+    const session = Session.create(SessionId('min-savings'))
+    appendToolStep(session, 1, 'a', [{ type: 'text', text: 'A'.repeat(100) }])
+    appendToolStep(session, 2, 'b', [{ type: 'text', text: 'B'.repeat(100) }])
+    session.append('turn/start', { turn: 3 })
+    const before = session.seq
+    expect(service().pruneSession(session, { minSavingsTokens: 1_000_000 })).toEqual({ pruned: [], charsRemoved: 0 })
+    expect(session.seq).toBe(before)
+    expect(service().pruneSession(session, { minSavingsTokens: 1 }).pruned.map(entry => entry.callId))
+      .toEqual([ToolCallId('a'), ToolCallId('b')])
+  })
+
   it('leaves the protected tail whole', () => {
     const session = Session.create(SessionId('tail'))
     appendToolStep(session, 1, 'a', [{ type: 'text', text: 'A'.repeat(100) }])

@@ -165,11 +165,9 @@
 {%- endfor %}
 {%- set _sc = sys_state.content %}
 {%- set _msgs = messages[head.count:] %}
-{%- if ns_state.thinking %}
-    {%- set _terse_lead = 'Answer directly, after thinking. Lead with the answer, then only what it needs to be correct and usable.' %}
-{%- else %}
-    {%- set _terse_lead = 'Answer directly and concisely. Give the answer with only what it needs to be correct and usable.' %}
-{%- endif %}
+{#- One lead whether thinking is on or off: the system prompt must not change with enable_thinking, or a
+    thinking-off request (the compaction summary) cannot reuse the KV the thinking-on conversation built. #}
+{%- set _terse_lead = 'Answer directly and concisely. Lead with the answer, then only what it needs to be correct and usable.' %}
 {%- set _terse_core %}
 Never: open with preamble or pleasantries; restate the question; add filler transitions; hedge with niceties; or repeat a point you've already made.
 Always: keep essential steps, caveats, uncertainties, and specifics — never drop correctness or a needed warning for brevity. Keep the final answer lean. Use the least structure that conveys it (plain prose when short; lists or code only when they earn their place). If genuinely uncertain, say so and explain why — never omit uncertainty for the sake of brevity.

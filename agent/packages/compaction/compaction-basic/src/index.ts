@@ -35,6 +35,9 @@ import type {
   ResolvedConfig,
 } from './types.ts'
 
+/** A pressure-time prune runs only when it lands the context this fraction of the threshold below it. */
+const PRUNE_MARGIN_RATIO = 0.15
+
 export type {
   BasicCompactionConfig,
   CompactionPolicyConfig,
@@ -358,8 +361,16 @@ export class BasicCompactionEngine extends CompactionEngine {
     // result on, and with everything older already pruned that is close to the
     // tail (stopping early would leave old results for a later pass that
     // changes the prompt near its start).
+    //
+    // A pass that would not bring the estimate well below the threshold is skipped: the summary that follows covers
+    // those results anyway, so pruning first only adds a full prompt re-read (160K+ tokens, minutes on a local model)
+    // a few steps before the summary's own.
     if (prune !== undefined) {
-      prune.pruneSession(agent.session, { protectTailTokens: spec.retainTokens })
+      const margin = Math.floor(spec.thresholdTokens * PRUNE_MARGIN_RATIO)
+      prune.pruneSession(agent.session, {
+        protectTailTokens: spec.retainTokens,
+        minSavingsTokens: measurement.totalTokens - spec.thresholdTokens + margin,
+      })
       measurement = meter.measure(agent.session, header)
     }
     if (measurement.totalTokens < spec.thresholdTokens) return null

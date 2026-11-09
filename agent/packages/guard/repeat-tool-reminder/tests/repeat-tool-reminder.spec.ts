@@ -37,10 +37,33 @@ it('reminds across changing investigation calls and resets on successful configu
   await waitForIdle(ctx, agent)
   expect(reminders(agent).map(item => item.text)).toMatchInlineSnapshot(`
     [
-      "You have made 2 tool calls since a successful file mutation. Consolidate the facts already verified, identify the unresolved question, and check an authoritative reference or a runnable assertion before continuing. This is an advisory checkpoint, not evidence that the investigation is wrong.",
-      "You have made 2 tool calls since a successful file mutation. Consolidate the facts already verified, identify the unresolved question, and check an authoritative reference or a runnable assertion before continuing. This is an advisory checkpoint, not evidence that the investigation is wrong.",
+      "You have made 2 tool calls without the task visibly advancing. Step back before the next call: list the approaches you have tried and why each failed, and name the standard, well-documented way this problem is normally solved. If you have not tried that way, switch to it now instead of going deeper into the current approach. Do not repeat an approach you have already ruled out. You have been at this for a long time: unless the next step is clearly the standard fix, stop, report what you tried and what is blocking you, and ask the user how to proceed.",
+      "You have made 2 tool calls without the task visibly advancing. Step back before the next call: list the approaches you have tried and why each failed, and name the standard, well-documented way this problem is normally solved. If you have not tried that way, switch to it now instead of going deeper into the current approach. Do not repeat an approach you have already ruled out. You have been at this for a long time: unless the next step is clearly the standard fix, stop, report what you tried and what is blocking you, and ask the user how to proceed.",
     ]
   `)
+})
+
+it('blockAt replaces the result of an identical call that keeps returning the identical result', async () => {
+  const ctx = await harness({ thresholds: [99], blockAt: 3 })
+  const adapter = new MockAdapter([
+    toolCallResponse('c1', 'probe', { q: 'same' }),
+    toolCallResponse('c2', 'probe', { q: 'same' }),
+    toolCallResponse('c3', 'probe', { q: 'same' }),
+    textResponse('done'),
+  ])
+  ctx.llm.registerAdapter(['mock'], adapter)
+  const agent = await ctx.agentLoop.create(SessionId('block'), { provider: 'mock', model: 'mock' })
+  agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+  await waitForIdle(ctx, agent)
+  const results = agent.session.snapshotEvents()
+    .filter((e): e is SessionEvent<'tool/result'> => e.type === 'tool/result')
+    .map(e => e.data.message.content.map(block => block.type === 'text' ? block.text : '').join(''))
+  expect(results.slice(0, 2)).toEqual(['ok', 'ok'])
+  expect(results[2]).toMatch(/^Blocked: this probe call is identical to the previous 2/)
+})
+
+it('blockAt rejects 1 and negative values', async () => {
+  await expect(harness({ blockAt: 1 })).rejects.toThrow(/invalid blockAt 1/)
 })
 
 /**

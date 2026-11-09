@@ -52,6 +52,11 @@ export interface PruneOptions {
   /** The surface's current estimated size; with `targetTokens`, the pass stops once it is down to the target. */
   readonly currentTokens?: number
   readonly targetTokens?: number
+  /**
+   * Prune nothing unless the pass would remove at least this many estimated tokens. Every pass makes the provider
+   * read the prompt again from the first pruned result on, so a pass too small to matter costs more than it saves.
+   */
+  readonly minSavingsTokens?: number
 }
 
 /** The model-facing message an event contributes, if it is a message event. */
@@ -246,13 +251,23 @@ export class ToolResultPruner extends Service {
     }
     let estimate = options.currentTokens
 
-    const pruned: PrunedEntry[] = []
-    let charsRemoved = 0
+    // Plan the whole pass before landing any of it, so a pass below `minSavingsTokens` changes nothing.
+    const planned: Array<{ seq: SessionSeq; event: SessionEvent<'tool/result'>; original: ToolResultMessage; content: ContentBlock[]; saved: number }> = []
     for (const { seq, event } of candidates) {
       if (estimate !== undefined && options.targetTokens !== undefined && estimate <= options.targetTokens) break
       const original = session.deriveEventMessage(event) as ToolResultMessage
       const content = this.pruneContent(original.content)
       if (content === null) continue
+      const saved = this.ctx.tokenMeter.estimateMessage(original) - this.ctx.tokenMeter.estimateMessage({ ...original, content })
+      planned.push({ seq, event, original, content, saved })
+      if (estimate !== undefined) estimate -= saved
+    }
+    const pruned: PrunedEntry[] = []
+    let charsRemoved = 0
+    if (options.minSavingsTokens !== undefined && planned.reduce((sum, item) => sum + item.saved, 0) < options.minSavingsTokens) {
+      return { pruned, charsRemoved }
+    }
+    for (const { seq, event, original, content } of planned) {
       const charsBefore = this.measureContent(original.content)
       const charsAfter = this.measureContent(content)
       const message = freezeMessage<ToolResultMessage>({
@@ -282,9 +297,6 @@ export class ToolResultPruner extends Service {
         charsAfter,
       })
       charsRemoved += charsBefore - charsAfter
-      if (estimate !== undefined) {
-        estimate -= this.ctx.tokenMeter.estimateMessage(original) - this.ctx.tokenMeter.estimateMessage(message)
-      }
     }
     return { pruned, charsRemoved }
   }

@@ -986,9 +986,10 @@ describe('optional model-free tool-result pruning', () => {
     expect(session.surface.replaceGeneration).toBe(1)
   })
 
-  it('summarizes the pruned surface when pruning is insufficient', async () => {
-    const ctx = createContext(2_000)
-    void new ToolResultPruner(ctx, pruneConfig)
+  it('skips a prune that would not land well below the threshold and summarizes the original results', async () => {
+    const ctx = createContext(1_600)
+    const prune = new ToolResultPruner(ctx, pruneConfig)
+    const pruneSession = vi.spyOn(prune, 'pruneSession')
     const compact = new TestCompactionEngine(ctx, {
       headroomTokens: 0,
       maxTokens: 8192,
@@ -996,12 +997,12 @@ describe('optional model-free tool-result pruning', () => {
       thresholdRatio: 0.5,
       retainTokens: 50,
     })
-    const session = toolConversation()
+    const session = oversizedToolResult(600, true)
 
     expect(await compactIfNeeded(compact, session)).not.toBeNull()
+    expect(pruneSession).toHaveBeenCalledWith(session, expect.objectContaining({ minSavingsTokens: expect.any(Number) }))
+    expect(session.snapshotEvents().filter(event => event.type === 'compaction/prune')).toHaveLength(0)
     expect(compact.calls).toHaveLength(1)
-    expect(summarizedText(compact.calls[0]!.input)).toContain('tool result middle pruned')
-    expect(summarizedText(compact.calls[0]!.input)).not.toContain('result 1 '.repeat(300))
   })
 
   it('retains the original compaction-basic behavior without the optional plugin', async () => {
