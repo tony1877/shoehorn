@@ -87,12 +87,12 @@ it.each([false, true])('defines the approved light static steps in the dark=%s p
 
 it('resolves the dark artwork colors through the actual static palette', () => {
   expect(illustrationColors(definitions(true))).toEqual({
-    // shoehorn: Solarized Dark base03 / base02 tones (upstream: 44,44,46 and 67,69,74)
-    background: [10, 63, 76],
-    backing: [20, 85, 101],
+    // shoehorn: Claude palette warm charcoals (upstream: 44,44,46 and 67,69,74)
+    background: [58, 57, 54],
+    backing: [81, 80, 75],
     detail: [129, 133, 140],
-    inset: [20, 85, 101],
-    shadow: [20, 85, 101],
+    inset: [81, 80, 75],
+    shadow: [81, 80, 75],
     surface: [97, 102, 107],
   })
 })

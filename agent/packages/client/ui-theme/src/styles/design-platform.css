@@ -360,7 +360,7 @@ body[data-ds-dark-theme] {
   --dsw-alias-label-primary-dimmed: var(--dsw-static-neutral-bluish-100);
   --dsw-alias-label-primary-foreground: var(--dsw-static-neutral-bluish-1000);
   --dsw-alias-label-primary-inverted: var(--dsw-static-neutral-bluish-800);
-  --dsw-alias-label-primary: var(--dsw-static-neutral-bluish-50);  /* shoehorn: overridden by soft dark below */
+  --dsw-alias-label-primary: var(--dsw-static-neutral-bluish-50);  /* shoehorn: overridden by the Claude palette below */
   --dsw-alias-label-secondary: var(--dsw-static-neutral-bluish-300);
   --dsw-alias-label-shimmer: color-mix(in srgb, var(--dsw-static-neutral-00) 45%, transparent);
   --dsw-alias-label-tertiary: var(--dsw-static-neutral-bluish-400);
@@ -411,8 +411,8 @@ body[data-ds-dark-theme] {
   --dsw-specific-input-major: var(--dsw-static-neutral-bluish-850);
   --dsw-specific-login-input: var(--dsw-static-neutral-bluish-900);
   /* shoehorn: upstream 0.64; page text bled through dialogs and menus. */
-  --dsw-menu-surface-fill: rgba(48, 49, 54, 0.94);
-  --dsw-alias-menu-group-header-fill: rgba(48, 49, 54, 0.94);
+  --dsw-menu-surface-fill: rgba(48, 48, 46, 0.94);
+  --dsw-alias-menu-group-header-fill: rgba(48, 48, 46, 0.94);
   --dsw-specific-menu: var(--dsw-menu-surface-fill);
   --dsw-specific-selector: var(--dsw-static-neutral-bluish-800);
   --dsw-specific-sidebar-fill: var(--dsw-static-neutral-bluish-900);
@@ -428,22 +428,35 @@ html[data-platform='darwin'] body {
 }
 
 html[data-platform='darwin'] body[data-ds-dark-theme] {
-  --dsw-specific-menu: rgba(48, 49, 54, 0.94);
+  --dsw-specific-menu: rgba(48, 48, 46, 0.94);  /* shoehorn: Claude raised charcoal */
 }
 
-/* shoehorn: Solarized Dark (Ethan Schoonover's palette), chosen for low halation. The stock dark theme pairs a
-   near-black base with near-white text; bright text on black blurs ("halation") for many eyes. Solarized uses a deep
-   blue-teal base and muted grey-blue text (~6:1 body contrast, above WCAG AA's 4.5:1). Dark theme only: the dark
-   rungs of the neutral ladder take the Solarized base tones, so every alias keeps its rung and the elevation and
-   scrollbar rules still hold. base03 #002b36, base02 #073642, base0 #839496, base1 #93a1a1, base00 #657b83. */
+/* shoehorn: Claude's palette (warm greys + clay accent), replacing Solarized Dark. Dark theme: the dark rungs of the
+   neutral ladder take Claude's warm charcoals (#262624 base, #1f1e1d deeper, #30302e raised), so every alias keeps
+   its rung and the elevation and scrollbar rules still hold; labels are warm greys (~9:1 body contrast, no glare). */
 body[data-ds-dark-theme] {
-  --dsw-static-neutral-bluish-950: rgb(0, 43, 54);
-  --dsw-static-neutral-bluish-900: rgb(0, 37, 47);
-  --dsw-static-neutral-bluish-875: rgb(7, 54, 66);
-  --dsw-static-neutral-bluish-850: rgb(10, 63, 76);
-  --dsw-static-neutral-bluish-800: rgb(14, 74, 88);
-  --dsw-static-neutral-bluish-750: rgb(20, 85, 101);
-  --dsw-alias-label-primary: #93a1a1;
-  --dsw-alias-label-secondary: #839496;
-  --dsw-alias-label-tertiary: #657b83;
+  --dsw-static-neutral-bluish-950: rgb(38, 38, 36);
+  --dsw-static-neutral-bluish-900: rgb(31, 30, 29);
+  --dsw-static-neutral-bluish-875: rgb(48, 48, 46);
+  --dsw-static-neutral-bluish-850: rgb(58, 57, 54);
+  --dsw-static-neutral-bluish-800: rgb(68, 67, 63);
+  --dsw-static-neutral-bluish-750: rgb(81, 80, 75);
+  --dsw-alias-label-primary: #d4d1c7;
+  --dsw-alias-label-secondary: #b0ada3;
+  --dsw-alias-label-tertiary: #8a877e;
+}
+
+/* shoehorn: the brand ramp (stock blue) becomes Claude's clay, in both themes. */
+body,
+body[data-ds-dark-theme] {
+  --dsw-static-deepseek-50: rgb(251, 240, 235);
+  --dsw-static-deepseek-100: rgb(247, 228, 219);
+  --dsw-static-deepseek-200: rgb(240, 207, 191);
+  --dsw-static-deepseek-300: rgb(232, 178, 154);
+  --dsw-static-deepseek-400: rgb(224, 138, 109);
+  --dsw-static-deepseek-450: rgb(217, 119, 87);
+  --dsw-static-deepseek-500: rgb(201, 100, 66);
+  --dsw-static-deepseek-600: rgb(176, 88, 58);
+  --dsw-static-deepseek-800: rgb(90, 53, 40);
+  --dsw-static-deepseek-900: rgb(61, 42, 34);
 }
