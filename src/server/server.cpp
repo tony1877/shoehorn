@@ -908,7 +908,9 @@ bool remote_encode(const Server & S, const ImgSpan & sp, int n_embd, std::vector
     return true;
 }
 
-constexpr int kThinkGrace = 512;  // tokens past the reasoning budget allowed to finish the current sentence
+// most prompt tokens read between checks for a stopped request (~1 s at 2K tok/s, ~8 s at 240 tok/s 400K deep)
+constexpr size_t kCancelPiece = 2048;
+constexpr int    kThinkGrace  = 512;  // tokens past the reasoning budget allowed to finish the current sentence
 
 bool run_request(Server & S, Turn & turn, const json & body, Result & R, const std::function<bool(const json &)> & on_delta,
                  const std::function<bool()> & cancelled, std::string & err) {
@@ -1607,12 +1609,24 @@ loaded:
                     const size_t q = (p / (size_t) S.ckpt_every + 1) * (size_t) S.ckpt_every;
                     if (q < next && q + 1 < prompt.size()) to = q;
                 }
+                // read in pieces so a stopped request ends within one piece (a 400K-token prompt reads for ~15
+                // minutes); set_prompt_end keeps --fast-prefill's split where it would be in one call
+                const size_t piece = cancelled ? kCancelPiece : to - p;
+                const size_t end   = std::min(to, p + piece);
                 // prefill() counts from 0 on every call: move the base along, or progress restarts at each checkpoint
                 S.live_read_base = (int) p;
                 model::traffic::prefill_done = 0;
-                ok = m.prefill(prompt.data() + p, (int) (to - p), last.data(), err);
-                p  = to;
-                if (ok && to < next) save_ck(to);
+                ok = m.prefill(prompt.data() + p, (int) (end - p), last.data(), err);
+                p  = end;
+                if (ok && p == to && to < next) save_ck(to);
+                if (ok && p < b && cancelled && cancelled()) {
+                    // keep what was read: the state holds exactly prompt[0, p), so a resend continues from p
+                    SL.state_tokens.assign(prompt.begin(), prompt.begin() + (long long) p);
+                    R.finish = "cancelled";
+                    err      = "cancelled while reading the prompt";
+                    fprintf(stderr, "prompt read stopped at %zu of %zu tokens\n", p, prompt.size());
+                    return false;
+                }
             }
         }
         if (!ok) {
