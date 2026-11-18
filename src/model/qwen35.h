@@ -105,6 +105,10 @@ struct EvalOpts {
     // (4 * n: sections t, y, x, 0, as llama.cpp's M-RoPE batches) the rotary positions. Plain decode only.
     const float *   embd = nullptr;
     const int32_t * pos  = nullptr;
+    // Approximate attention allowed (prefill() sets it for batches well before the prompt's end): with the KV in
+    // VRAM and a long context, each query attends exactly to the last E8_SPARSE_WINDOW tokens and to the first page
+    // plus the E8_SPARSE_PAGES most relevant 64-token pages before them (see Qwen35::build_graph, "VRAM sparse").
+    bool approx_attn = false;
 };
 
 // one sequence of a joint verify (Qwen35::eval_multi): `n` tokens continuing slot `slot`'s committed state
@@ -317,11 +321,15 @@ public:
         // the residual-free part ends `keep` tokens before the prompt's end: this call's end, or the whole prompt's
         // when the caller reads it in pieces (set_prompt_end), so the split does not change which tokens get it
         const int base = n_past_, end = prompt_end_ > 0 ? prompt_end_ : base + n;
+        // approximate attention only well before the prompt's end: the newest tokens (at least the last 4096, or the
+        // fast-prefill tail) read the whole context exactly
+        const int exact_tail = std::max(fast_keep_, 4096);
         for (int i = 0; i < n; i += chunk) {
             const int m = std::min(chunk, n - i);
             EvalOpts  o;
-            o.last_only = true;
-            o.residual  = !(fast_keep_ > 0 && base + i + m <= end - fast_keep_);
+            o.last_only   = true;
+            o.residual    = !(fast_keep_ > 0 && base + i + m <= end - fast_keep_);
+            o.approx_attn = base + i + m <= end - exact_tail;
             if (!eval(tokens + i, m, o, i + m == n ? logits : nullptr, nullptr, err)) return false;
             traffic::prefill_done = i + m;
         }
@@ -572,6 +580,14 @@ private:
     std::vector<GatherInfo>    gi_;
     ggml_tensor *              inp_sbias_ = nullptr, * inp_smask_ = nullptr;
     void update_summaries(int upto);
+    // VRAM sparse prefill (EvalOpts::approx_attn, KV in VRAM): positions [0, vsp_far_) are vsp_npf_ pages, of which
+    // each (KV head, query sub-chunk) keeps page 0 and the vsp_kp_ best; positions from vsp_far_ on (vsp_nwin_ rows,
+    // padded) are exact. Those rows are gathered into a small F16 K/V and attended densely.
+    // Page keys are summarized per eval from vsp_samples_ sampled rows each (inp_vidx_), so no state can go stale.
+    bool          vsp_ = false, vsp_off_ = false;
+    int           vsp_far_ = 0, vsp_npf_ = 0, vsp_kp_ = 0, vsp_nwin_ = 0, vsp_samples_ = 8, vsp_chunk_ = 256;
+    ggml_tensor * inp_vidx_ = nullptr, * inp_vbias_ = nullptr, * inp_voff_ = nullptr, * inp_vwin_ = nullptr,
+                  * inp_vmask_ = nullptr;
 };
 
 } // namespace e8::model

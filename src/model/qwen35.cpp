@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1756,6 +1757,15 @@ bool Qwen35::load_residual(const std::string & path, std::string & err) {
 
 ggml_tensor * Qwen35::mm(ggml_context * ctx, ggml_tensor * w, ggml_tensor * x) {
     ggml_tensor * y = ggml_mul_mat(ctx, w, x);
+    if (w->type == GGML_TYPE_NVFP4 || w->type == GGML_TYPE_MXFP4) {
+        // an FP4 base on Blackwell multiplies 4-bit activations on the FP4 tensor cores (2.07x IQ4_XS's matmul rate
+        // at a 1024-token batch, NVFP4) unless 8-bit is asked for (then 0.73x). Base-only passes (fast prefill,
+        // drafts) are approximate anyway and take 4-bit; full-precision passes (with the residual) keep 8-bit, as the
+        // residual corrects the weights only. E8_FP4_ACT=8 / 4 forces one for every pass.
+        static const int act = std::getenv("E8_FP4_ACT") ? std::atoi(std::getenv("E8_FP4_ACT")) : 0;
+        const bool       q4  = act == 4 || (act != 8 && !use_res_);
+        ggml_prec_set_src(y, q4 ? GGML_PREC_Q4 : GGML_PREC_Q8, 1);
+    }
     if (use_res_) {
         auto it = res_.find(w);
         if (it != res_.end()) {
@@ -2003,6 +2013,19 @@ ggml_cgraph * Qwen35::build_graph(ggml_context * ctx, int n, const EvalOpts & o,
     inp_hidx_ = nullptr;
     attn_nodes_.clear();
     inp_sbias_ = inp_smask_ = nullptr;
+    inp_vidx_ = inp_vbias_ = inp_voff_ = inp_vwin_ = inp_vmask_ = nullptr;
+    if (vsp_) {  // VRAM sparse prefill inputs (filled in eval())
+        inp_vidx_ = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, (int64_t) vsp_samples_ * h.n_head_kv * vsp_npf_);
+        ggml_set_input(inp_vidx_);
+        inp_vbias_ = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, vsp_npf_, 1);
+        ggml_set_input(inp_vbias_);
+        inp_voff_ = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, kPage, h.n_head_kv);
+        ggml_set_input(inp_voff_);
+        inp_vwin_ = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, vsp_nwin_, h.n_head_kv);
+        ggml_set_input(inp_vwin_);
+        inp_vmask_ = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, (int64_t) (vsp_kp_ + 1) * kPage + vsp_nwin_, n);
+        ggml_set_input(inp_vmask_);
+    }
     if (attn_mode_ == 1) {
         inp_hidx_ = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, n);
         ggml_set_input(inp_hidx_);
@@ -2165,6 +2188,54 @@ ggml_cgraph * Qwen35::build_graph(ggml_context * ctx, int n, const EvalOpts & o,
                     ggml_prec_set_acc(aj, GGML_PREC_F32);
                     attn_nodes_.push_back(aj);
                     a = a ? ggml_concat(ctx, a, aj, 1) : aj;  // [hd, heads, n]
+                }
+            } else if (vsp_) {
+                // ---- VRAM sparse prefill (eval(): vsp_*). Per KV head and query sub-chunk: score the far pages by the
+                // sub-chunk's attention to their summaries, keep page 0 and the vsp_kp_ best, mask the other far
+                // columns out; flash attention's sparse gather (n_kv_max) then reads only the visible columns.
+                const int64_t g = h.n_head / h.n_head_kv, nkv = h.n_head_kv, S = vsp_samples_, npf = vsp_npf_;
+                // page summaries [hd, npf, nkv]: the mean of S sampled key rows per page and head (inp_vidx_ lists
+                // the rows of kc as [hd] rows: (Kd_ + position) * nkv + head)
+                ggml_tensor * k2  = ggml_reshape_2d(ctx, kc, hd, kc->ne[1] * nkv);
+                ggml_tensor * smp = ggml_get_rows(ctx, k2, inp_vidx_);                        // [hd, S*nkv*npf] f32
+                smp               = ggml_reshape_4d(ctx, smp, hd, S, nkv, npf);
+                smp               = ggml_mean(ctx, ggml_cont(ctx, ggml_permute(ctx, smp, 1, 0, 2, 3)));  // [1, hd, nkv, npf]
+                ggml_tensor * mid = ggml_cont(ctx, ggml_permute(ctx, ggml_reshape_3d(ctx, smp, hd, nkv, npf), 0, 2, 1, 3));  // [hd, npf, nkv]
+                ggml_tensor * k2v = ggml_reshape_2d(ctx, vc, hd, vc->ne[1] * nkv);
+                const int64_t nfs = (int64_t) (vsp_kp_ + 1) * kPage;  // gathered far rows: page 0 + the best pages
+                for (int64_t c0 = 0; c0 < n; c0 += vsp_chunk_) {
+                    const int64_t m  = std::min<int64_t>(vsp_chunk_, n - c0);
+                    // the small mask: far rows visible to every query, window rows causal, padding masked
+                    ggml_tensor * mk = ggml_view_2d(ctx, inp_vmask_, inp_vmask_->ne[0], m, inp_vmask_->nb[1], inp_vmask_->nb[1] * (size_t) c0);
+                    ggml_tensor * ac = nullptr;
+                    for (int64_t j = 0; j < nkv; j++) {
+                        ggml_tensor * qc = ggml_view_3d(ctx, q, hd, m, g, q->nb[1], q->nb[2], q->nb[2] * (size_t) (j * g) + q->nb[1] * (size_t) c0);
+                        // q . page summary, a distribution over pages per query, summed over the queries (as the
+                        // RAM path); page 0 (attention sink) always kept through inp_vbias_
+                        ggml_tensor * md = ggml_view_2d(ctx, mid, hd, npf, mid->nb[1], mid->nb[2] * (size_t) j);
+                        ggml_tensor * s  = ggml_mul_mat(ctx, md, ggml_reshape_2d(ctx, ggml_cont(ctx, qc), hd, m * g));  // [npf, m*g]
+                        s                = ggml_soft_max_ext(ctx, s, nullptr, 1.0f / sqrtf((float) hd), 0.0f);
+                        s                = ggml_sum_rows(ctx, ggml_cont(ctx, ggml_transpose(ctx, s)));  // [1, npf]
+                        s                = ggml_add(ctx, ggml_reshape_2d(ctx, s, npf, 1), inp_vbias_);
+                        ggml_tensor * top = ggml_argsort_top_k(ctx, s, vsp_kp_ + 1);                // [kp+1, 1] i32
+                        // rows of the selected pages in kc as [hd] rows: page * 64 * nkv + (Kd_ + t) * nkv + j, built
+                        // in F32 (exact below 2^24) from the page ids and this head's offsets
+                        ggml_tensor * pid = ggml_scale(ctx, ggml_cast(ctx, ggml_reshape_2d(ctx, ggml_cont(ctx, top), 1, vsp_kp_ + 1), GGML_TYPE_F32),
+                                                       (float) (kPage * nkv));                        // [1, kp+1]
+                        ggml_tensor * off = ggml_view_2d(ctx, inp_voff_, kPage, 1, inp_voff_->nb[1], inp_voff_->nb[1] * (size_t) j);
+                        ggml_tensor * fr  = ggml_add(ctx, ggml_repeat_4d(ctx, off, kPage, vsp_kp_ + 1, 1, 1), pid);  // [64, kp+1]
+                        ggml_tensor * fi  = ggml_reshape_1d(ctx, ggml_cast(ctx, fr, GGML_TYPE_I32), nfs);
+                        ggml_tensor * wi  = ggml_view_1d(ctx, inp_vwin_, inp_vwin_->ne[0], inp_vwin_->nb[1] * (size_t) j);
+                        // gather far + window rows (F32) and attend over them densely in F16
+                        ggml_tensor * kg = ggml_cast(ctx, ggml_concat(ctx, ggml_get_rows(ctx, k2, fi), ggml_get_rows(ctx, k2, wi), 1), GGML_TYPE_F16);
+                        ggml_tensor * vg = ggml_cast(ctx, ggml_concat(ctx, ggml_get_rows(ctx, k2v, fi), ggml_get_rows(ctx, k2v, wi), 1), GGML_TYPE_F16);
+                        kg               = ggml_reshape_3d(ctx, kg, hd, kg->ne[1], 1);
+                        vg               = ggml_reshape_3d(ctx, vg, hd, vg->ne[1], 1);
+                        ggml_tensor * aj = ggml_flash_attn_ext(ctx, qc, kg, vg, mk, 1.0f / sqrtf((float) hd), 0.0f, 0.0f);
+                        ggml_prec_set_acc(aj, GGML_PREC_F32);
+                        ac = ac ? ggml_concat(ctx, ac, aj, 1) : aj;  // [hd, heads, m]
+                    }
+                    a = a ? ggml_concat(ctx, a, ac, 2) : ac;  // [hd, heads, n]
                 }
             } else {
                 ggml_tensor * K = ggml_view_3d(ctx, kc, hd, h.n_head_kv, n_kv, ggml_row_size(kc->type, hd), kc->nb[1], kc->nb[1] * (size_t) ring_off_);
@@ -2485,6 +2556,35 @@ bool Qwen35::eval(const int32_t * tokens, int n, const EvalOpts & opts, float * 
         sp_nsel_ = (sp_kp_ * kPage + sp_nwin_ + kKvPad - 1) / kKvPad * kKvPad;
         update_summaries(sp_nfar_);
     }
+    // VRAM sparse prefill: a prompt batch deep in a long context, KV in VRAM. Measured on an RTX PRO 5000 (27B, fast
+    // prefill, 1024-token batches): exact 512 ms at 30K, 662 at 60K, 1178 at 140K; sparse ~500 ms flat from 60K to
+    // 140K (a 150K prompt in 82 s instead of 130 s, needles at 8/37/71% depth all found). E8_SPARSE_PREFILL = the least
+    // context it applies at (default 32768, 0 = off).
+    vsp_ = false;
+    {
+        static const int min_ctx = std::getenv("E8_SPARSE_PREFILL") ? std::atoi(std::getenv("E8_SPARSE_PREFILL")) : 32768;
+        static const int win     = std::getenv("E8_SPARSE_WINDOW") ? std::atoi(std::getenv("E8_SPARSE_WINDOW")) : 4096;
+        static const int pages   = std::getenv("E8_SPARSE_PAGES") ? std::atoi(std::getenv("E8_SPARSE_PAGES")) : 128;
+        static const int samples = std::getenv("E8_SPARSE_SAMPLES") ? std::atoi(std::getenv("E8_SPARSE_SAMPLES")) : 8;
+        const int far = std::max(0, (n_past_ - win) / kPage * kPage);  // every query sees at least `win` back exactly
+        if (opts.approx_attn && !vsp_off_ && min_ctx > 0 && !use_host && !window && ns == 1 && !opts.record &&
+            !opts.embd && n >= 64 && n_past_ + n >= min_ctx && far / kPage > 4 * (pages + 1) && samples >= 1 &&
+            kPage % samples == 0 && gpu_) {
+            vsp_         = true;
+            vsp_far_     = far;
+            vsp_npf_     = far / kPage;
+            vsp_kp_      = pages;
+            vsp_samples_ = samples;
+            // one page selection per sub-chunk of queries (as the RAM path's kSparseMaxN); at most 4 per batch so
+            // the graph stays within kGraphSize
+            static const int chunk = std::getenv("E8_SPARSE_PREFILL_CHUNK") ? std::atoi(std::getenv("E8_SPARSE_PREFILL_CHUNK")) : 0;
+            vsp_chunk_ = chunk > 0 ? std::max(chunk, (n + 3) / 4) : n;
+            // exact rows [far, n_past + n), padded so the gathered rows are a multiple of 256 (flash attention's GQA
+            // kernels need it)
+            const int fr = (vsp_kp_ + 1) * kPage, nw = n_past_ + n - far;
+            vsp_nwin_    = (fr + nw + 255) / 256 * 256 - fr;
+        }
+    }
 
     use_res_             = opts.residual && has_residual();
     write_state_         = !(opts.dry && opts.record);
@@ -2499,24 +2599,36 @@ bool Qwen35::eval(const int32_t * tokens, int n, const EvalOpts & opts, float * 
         mp = &v;
     }
     auto &           meta = *mp;
-    ggml_init_params ip  = { meta.size(), meta.data(), true };
-    ggml_context *   ctx = ggml_init(ip);
+    ggml_context *   ctx  = nullptr;
     ggml_tensor *    inp_tok = nullptr, * inp_pos = nullptr, * inp_mask = nullptr, * out = nullptr;
-    ggml_cgraph *    gf      = build_graph(ctx, n, opts, inp_tok, inp_pos, inp_mask, out, n_kv);
+    ggml_cgraph *    gf      = nullptr;
     const bool       with_res = use_res_;
-    use_res_                 = false;
-    write_state_             = true;
+    for (;;) {
+        ggml_init_params ip = { meta.size(), meta.data(), true };
+        ctx                 = ggml_init(ip);
+        use_res_            = with_res;
+        write_state_        = !(opts.dry && opts.record);
+        gf                  = build_graph(ctx, n, opts, inp_tok, inp_pos, inp_mask, out, n_kv);
+        use_res_            = false;
+        write_state_        = true;
 
-    ggml_backend_sched_reset(sched_);
-    for (ggml_tensor * t : res_on_gpu_) ggml_backend_sched_set_tensor_backend(sched_, t, gpu_);
-    res_on_gpu_.clear();
-    for (ggml_tensor * t : gpu_nodes_) ggml_backend_sched_set_tensor_backend(sched_, t, gpu_);
-    gpu_nodes_.clear();
-    for (ggml_tensor * a : attn_nodes_) {
-        ggml_backend_sched_set_tensor_backend(sched_, a, gpu_ && n >= host_gpu_min_ ? gpu_ : cpu_);
-    }
-    if (!ggml_backend_sched_alloc_graph(sched_, gf)) {
+        ggml_backend_sched_reset(sched_);
+        for (ggml_tensor * t : res_on_gpu_) ggml_backend_sched_set_tensor_backend(sched_, t, gpu_);
+        res_on_gpu_.clear();
+        for (ggml_tensor * t : gpu_nodes_) ggml_backend_sched_set_tensor_backend(sched_, t, gpu_);
+        gpu_nodes_.clear();
+        for (ggml_tensor * a : attn_nodes_) {
+            ggml_backend_sched_set_tensor_backend(sched_, a, gpu_ && n >= host_gpu_min_ ? gpu_ : cpu_);
+        }
+        if (ggml_backend_sched_alloc_graph(sched_, gf)) break;
         ggml_free(ctx);
+        if (vsp_) {  // the sparse prefill's scratch did not fit: this batch reads exactly
+            static bool told = false;
+            if (!told) fprintf(stderr, "sparse prefill: compute buffer does not fit, batch read exactly\n");
+            told = true;
+            vsp_ = false;
+            continue;
+        }
         err = "eval: cannot allocate the compute graph";
         return false;
     }
@@ -2557,9 +2669,11 @@ bool Qwen35::eval(const int32_t * tokens, int n, const EvalOpts & opts, float * 
     if (inp_pos->buffer) {
         ggml_backend_tensor_set(inp_pos, pos.data(), 0, pos.size() * sizeof(int32_t));
     }
-    std::vector<ggml_fp16_t> mask((size_t) n_kv * n);
+    // (the full mask is n_kv x n: skipped when no node reads it, as with the VRAM sparse prefill's small mask)
+    const bool               need_mask = inp_mask->buffer != nullptr;
+    std::vector<ggml_fp16_t> mask(need_mask ? (size_t) n_kv * n : 0);
     const ggml_fp16_t        zero = ggml_fp32_to_fp16(0.0f), ninf = ggml_fp32_to_fp16(-INFINITY);
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; need_mask && i < n; i++) {
         ggml_fp16_t * mr = mask.data() + (size_t) i * n_kv;
         const int     qp = n_past_ + i;
         if (window) {
@@ -2620,13 +2734,52 @@ bool Qwen35::eval(const int32_t * tokens, int n, const EvalOpts & opts, float * 
         }
         ggml_backend_tensor_set(inp_smask_, sm.data(), 0, sm.size() * sizeof(ggml_fp16_t));
     }
+    if (inp_vidx_ && inp_vidx_->buffer) {
+        // rows of kc viewed as [hd] rows, ordered (page, head, sample): S evenly spaced rows of each 64-token page
+        const int nkv = (int) hp_.n_head_kv, S = vsp_samples_, step = kPage / S;
+        std::vector<int32_t> ix((size_t) S * nkv * vsp_npf_);
+        size_t               k = 0;
+        for (int p = 0; p < vsp_npf_; p++) {
+            for (int j = 0; j < nkv; j++) {
+                for (int s = 0; s < S; s++) ix[k++] = (Kd_ + p * kPage + s * step + step / 2) * nkv + j;
+            }
+        }
+        ggml_backend_tensor_set(inp_vidx_, ix.data(), 0, ix.size() * sizeof(int32_t));
+        std::vector<float> b((size_t) vsp_npf_, 0.0f);
+        b[0] = 1e30f;  // the first page (attention sink) is always kept
+        ggml_backend_tensor_set(inp_vbias_, b.data(), 0, b.size() * sizeof(float));
+        // per head: the row offsets inside a page, the exact rows (padding repeats the last), the shared small mask
+        std::vector<float>   off((size_t) kPage * nkv);
+        std::vector<int32_t> win((size_t) vsp_nwin_ * nkv);
+        const int            nw = n_past_ + n - vsp_far_;
+        for (int j = 0; j < nkv; j++) {
+            for (int t = 0; t < kPage; t++) off[(size_t) j * kPage + t] = (float) ((Kd_ + t) * nkv + j);
+            for (int t = 0; t < vsp_nwin_; t++) win[(size_t) j * vsp_nwin_ + t] = (Kd_ + vsp_far_ + std::min(t, nw - 1)) * nkv + j;
+        }
+        ggml_backend_tensor_set(inp_voff_, off.data(), 0, off.size() * sizeof(float));
+        ggml_backend_tensor_set(inp_vwin_, win.data(), 0, win.size() * sizeof(int32_t));
+        const int                fr  = (vsp_kp_ + 1) * kPage, nsl = fr + vsp_nwin_;
+        std::vector<ggml_fp16_t> vm((size_t) nsl * n, ninf);
+        for (int i = 0; i < n; i++) {
+            ggml_fp16_t * mr = vm.data() + (size_t) i * nsl;
+            std::fill(mr, mr + fr, zero);                                       // the gathered pages (all before far)
+            std::fill(mr + fr, mr + fr + (n_past_ + i + 1 - vsp_far_), zero);  // exact rows up to its own position
+        }
+        ggml_backend_tensor_set(inp_vmask_, vm.data(), 0, vm.size() * sizeof(ggml_fp16_t));
+    }
     if (inp_sbias_ && inp_sbias_->buffer) {
         std::vector<float> b((size_t) sp_nfar_, 0.0f);
         b[0] = 1e30f;  // the first page (attention sink) is always kept
         ggml_backend_tensor_set(inp_sbias_, b.data(), 0, b.size() * sizeof(float));
     }
 
+    static const bool eval_time = std::getenv("E8_EVAL_TIME") != nullptr;  // debugging: wall time per eval
+    const auto        te0       = std::chrono::steady_clock::now();
     const ggml_status st = ggml_backend_sched_graph_compute(sched_, gf);
+    if (eval_time) {
+        fprintf(stderr, "eval_time n=%d past=%d sparse=%d %.1f ms\n", n, n_past_, (int) vsp_,
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - te0).count());
+    }
     if (st == GGML_STATUS_SUCCESS) traffic::pass(with_res);
     if (st != GGML_STATUS_SUCCESS) {
         ggml_free(ctx);
