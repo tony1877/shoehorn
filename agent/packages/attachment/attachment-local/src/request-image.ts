@@ -14,7 +14,6 @@ import type {
 } from '@deepseek-ai/dsh-attachment'
 import {
   IMAGE_ENCODING_QUALITIES,
-  WEBP_ENCODING_EFFORT,
   encodeFirstWithinLimit,
   encodingLadder,
   isExhaustedEncoding,
@@ -23,7 +22,7 @@ import { detectImage, encodedAlphaIsCompatible, probeImage } from './image.ts'
 import { requireSharp } from './sharp.ts'
 
 /** Transform version included in every cache and upload-index identity. */
-export const REQUEST_IMAGE_TRANSFORM_VERSION = 'request-image-v6'
+export const REQUEST_IMAGE_TRANSFORM_VERSION = 'request-image-v7'
 
 interface EncodedRequestImage {
   data: Uint8Array
@@ -61,10 +60,8 @@ function descriptor(attachment: ImageAttachmentRef, target: ImageRequestTarget):
     targetHeight: target.height,
     encodedByteBudget: target.maxBytes,
     encoding: {
-      webpQualities: IMAGE_ENCODING_QUALITIES,
-      webpEffort: WEBP_ENCODING_EFFORT,
       jpegQualities: IMAGE_ENCODING_QUALITIES,
-      order: ['alpha:webp', 'opaque:jpeg'],
+      order: ['flatten-white:jpeg'],
       colourspace: 'srgb',
     },
   })
@@ -83,11 +80,16 @@ export function requestImageVariantId(
   return ImageVariantId(`sha256:${digest(descriptor(attachment, target))}`)
 }
 
-/** Resize by the source long edge only, so the encoder derives the short edge as the route predicts. */
+/**
+ * Resize by the source long edge only, so the encoder derives the short edge as the route predicts.
+ * Alpha is flattened onto white: request images are always re-encoded as JPEG, because not every
+ * model server decodes WebP (shoehorn's llama.cpp decoder takes png, jpeg, bmp and gif only).
+ */
 function pipeline(attachment: StoredImageAttachment, target: ImageRequestTarget): Sharp {
   const byWidth = attachment.ref.width >= attachment.ref.height
   return sourcePipeline(attachment)
     .resize({ ...byWidth ? { width: target.width } : { height: target.height }, withoutEnlargement: true })
+    .flatten({ background: '#ffffff' })
 }
 
 function sourcePipeline(attachment: StoredImageAttachment): Sharp {
@@ -98,9 +100,10 @@ function sourcePipeline(attachment: StoredImageAttachment): Sharp {
 async function createRequestImage(
   attachment: StoredImageAttachment,
   target: ImageRequestTarget,
-  hasAlpha: boolean,
 ): Promise<EncodedRequestImage> {
-  if (target.width >= attachment.ref.width
+  // WebP never goes to a model as is (see pipeline); PNG, JPEG and GIF pass through when they fit.
+  if (attachment.ref.mediaType !== 'image/webp'
+    && target.width >= attachment.ref.width
     && target.height >= attachment.ref.height
     && attachment.data.byteLength <= target.maxBytes) {
     return {
@@ -111,7 +114,7 @@ async function createRequestImage(
     }
   }
   const encodedVersion = await encodeFirstWithinLimit(
-    encodingLadder(pipeline(attachment, target), hasAlpha),
+    encodingLadder(pipeline(attachment, target), false),
     target.maxBytes,
   )
   return isExhaustedEncoding(encodedVersion) ? encodedVersion.smallest : encodedVersion
@@ -188,11 +191,12 @@ export async function readRequestImageFile(
   const variantId = requestImageVariantId(attachment.ref, target)
   const hash = String(variantId).slice('sha256:'.length)
   const path = cachePath(root, hash)
-  const cached = await readCached(path, target, source.hasAlpha, signal)
-  const created = cached ?? await createRequestImage(attachment, target, source.hasAlpha)
+  // Cached versions are re-encoded ones, which are flattened JPEG: never alpha.
+  const cached = await readCached(path, target, false, signal)
+  const created = cached ?? await createRequestImage(attachment, target)
   const version = cached ?? (created.data === attachment.data
     ? { ...created, hasAlpha: source.hasAlpha }
-    : await verifyRequestImage(created, source.hasAlpha))
+    : await verifyRequestImage(created, false))
   signal?.throwIfAborted()
   if (cached === undefined && version.data !== attachment.data) await writeCached(path, version.data)
   return {
