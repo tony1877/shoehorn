@@ -1,0 +1,30 @@
+diff --git a/ggml/src/ggml-cuda/fattn.cu b/ggml/src/ggml-cuda/fattn.cu
+index bb34e01f3..225fad935 100644
+--- a/ggml/src/ggml-cuda/fattn.cu
++++ b/ggml/src/ggml-cuda/fattn.cu
+@@ -263,6 +263,25 @@ static void ggml_cuda_flash_attn_ext_mma_f16_switch_ncols2(ggml_backend_cuda_con
+         }
+     }
+ 
++    // shoehorn: E8_FA_NCOLS2=1|2|4|8 forces the GQA tile height (benchmarking; see src/bench/bench_attn.cpp)
++    static const int force_ncols2 = getenv("E8_FA_NCOLS2") ? atoi(getenv("E8_FA_NCOLS2")) : 0;
++    if (force_ncols2 > 0 && use_gqa_opt) {
++        if (force_ncols2 == 8) { ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<DKQ, DV, 8>(ctx, dst); return; }
++        if (force_ncols2 == 4) { ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<DKQ, DV, 4>(ctx, dst); return; }
++        if (force_ncols2 == 2) { ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<DKQ, DV, 2>(ctx, dst); return; }
++        if constexpr (DKQ <= 256) { ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<DKQ, DV, 1>(ctx, dst); return; }
++    }
++
++    // shoehorn: a GQA ratio that 4 does not divide (Qwen3.5/3.8: 6) pads every 8-high tile with idle heads, a
++    // quarter of the work at 6. For prompt batches (the tile is filled by queries anyway) take the largest exact
++    // power-of-two height instead: 2 for 6 is 78 vs 59 TFLOPS on an RTX PRO 5000 (head dim 256, 262K KV, 1024
++    // queries). Decode keeps 8 (few queries, heads fill the tile) and so does the sparse gather (8 only).
++    const bool sparse_set = ggml_get_op_params_i32(dst, 4) > 0;
++    if (use_gqa_opt && gqa_ratio % 4 != 0 && gqa_ratio % 2 == 0 && gqa_ratio > 4 && Q->ne[1] >= 32 && !sparse_set) {
++        ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<DKQ, DV, 2>(ctx, dst);
++        return;
++    }
++
+     if (use_gqa_opt && gqa_ratio > 4) {
+         ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<DKQ, DV, 8>(ctx, dst);
+         return;

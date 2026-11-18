@@ -165,6 +165,12 @@ int main(int argc, char ** argv) {
     if (args[1] == "selftest") {
         return e8::cli::selftest(args);
     }
+    if (args[1] == "bench-mm") {
+        return e8::cli::bench_mm(args);
+    }
+    if (args[1] == "bench-attn") {
+        return e8::cli::bench_attn(args);
+    }
     if (args[1] == "bench") {
         e8::bench::Options opt;
         if (!parse_bench(args, opt)) {

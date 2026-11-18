@@ -92,6 +92,7 @@ add_executable(shoehorn
     src/bench/bench.cpp
     src/bench/bench_mem.cpp
     src/bench/bench_gemv.cpp
+    src/bench/bench_attn.cpp
     src/bench/bench_pcie.cpp
     src/bench/bench_disk.cpp
     src/sys/sysinfo.cpp
