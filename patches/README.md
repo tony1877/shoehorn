@@ -9,16 +9,18 @@ these patches to it at build time (`scripts/build.sh`, step 3; applied once, ski
 | `ggml-weight-prefetch.patch` | `ggml/src/ggml-backend.cpp`, `ggml/src/ggml-cuda/ggml-cuda.cu` | Stages the next split's host-resident weights into two VRAM slots on a second stream while the current split computes (off with `E8_NO_PREFETCH`) |
 | `ggml-q8-1-quantized-sums.patch` | `ggml/src/ggml-cuda/quantize.cu` | The int8 activation blocks carry the sum of their quantized values, not the exact float sum, so K-quant minimums are applied to what the dot product saw (upstream fix; the exact sum biased every Q2_K..Q5_K GPU matmul by a constant offset) |
 | `ggml-fattn-gqa-tiles.patch` | `ggml/src/ggml-cuda/fattn.cu` | Prompt batches with a GQA ratio 4 does not divide (Qwen3.5/3.8: 6) use 2-high head tiles instead of padding to 8 (78 vs 59 TFLOPS on an RTX PRO 5000 at 262K KV); `E8_FA_NCOLS2` forces the height for `shoehorn bench-attn` |
+| `ggml-nvfp4-scale-search.patch` | `ggml/src/ggml-quants.c` | NVFP4 quantization searches six UE4M3 scale codes per 16 weights for the least squared error, weighted by the imatrix when one is given (upstream takes amax/6 and ignores the imatrix); `E8_NVFP4_REF=1` restores the reference |
 
 ## The submodule shows as modified — that is expected
 
 After any build, `git status` in the shoehorn repo reports `m third_party/llama.cpp` (`-dirty`), and inside the
-submodule these four files differ from upstream:
+submodule these five files differ from upstream:
 
 - `ggml/src/ggml-backend.cpp`
 - `ggml/src/ggml-cuda/ggml-cuda.cu`
 - `ggml/src/ggml-cuda/fattn.cu`
 - `ggml/src/ggml-cuda/quantize.cu`
+- `ggml/src/ggml-quants.c`
 
 Those edits are the patches above, not stray local changes. Don't commit them inside the submodule and don't
 discard them (a rebuild would just reapply them). The source of truth is this directory: to change a patch, edit the

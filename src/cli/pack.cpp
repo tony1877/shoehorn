@@ -173,6 +173,7 @@ struct Plan {
     int         n_dims = 1;
     ggml_type   base_type = GGML_TYPE_F32;
     bool        split = false;  // has a residual
+    float       fp4_scale = 1.0f;  // NVFP4 base: the tensor is divided by this before quantizing (stored per tensor)
     const ggml_tensor * tmpl = nullptr;
 };
 
@@ -341,6 +342,44 @@ int pack(const std::vector<std::string> & args) {
     printf("pack: %zu tensors, %.2f GB source, base %s, residual %s, %d threads%s\n", plans.size(), src_bytes / 1e9,
            ggml_type_name(base_t), has_res ? ggml_type_name(res_t) : "none", threads, check ? ", checking vs template" : "");
 
+    // NVFP4 keeps one UE4M3 (8-bit float) scale per 16 weights and no tensor scale. Raw weights put almost every
+    // group's scale (max/6, ~0.005-0.02) below UE4M3's normal range (2^-6), where it has 1-2 bits of precision.
+    // Dividing each tensor by max/(6*448) first moves the largest group scale to UE4M3's top (448) and the rest into
+    // its normal range; the factor is stored as shoehorn.fp4_scale.<name> and the engine multiplies the product by it.
+    // One extra read of each NVFP4 tensor for its max. E8_FP4_TENSOR_SCALE=0 skips it (the old packing).
+    const bool fp4_ts = !std::getenv("E8_FP4_TENSOR_SCALE") || std::atoi(std::getenv("E8_FP4_TENSOR_SCALE")) != 0;
+    for (Plan & p : plans) {
+        if (!fp4_ts || p.base_type != GGML_TYPE_NVFP4) continue;
+        const int64_t ncols = p.ne[0], nrows = ggml_nelements(p.tmpl) / ncols;
+        const int64_t rpb   = std::max<int64_t>(1, (1 << 20) / ncols);
+        std::atomic<int64_t> next{ 0 };
+        std::atomic<bool>    bad{ false };
+        std::mutex           mu;
+        float                amax = 0.0f;
+        auto scan = [&]() {
+            std::vector<float> w;
+            std::string        e;
+            float              m = 0.0f;
+            for (int64_t r0; (r0 = next.fetch_add(rpb)) < nrows && !bad;) {
+                const int64_t n = std::min(rpb, nrows - r0);
+                w.resize((size_t) (n * ncols));
+                // row order does not change the maximum; a permuted tensor reads its source rows in source order
+                if (!st.read_rows(*p.st, r0, n, w.data(), e)) { bad = true; return; }
+                for (float x : w) m = std::max(m, std::fabs(x));
+            }
+            std::lock_guard<std::mutex> lk(mu);
+            amax = std::max(amax, m);
+        };
+        std::vector<std::thread> pool;
+        for (int i = 0; i < std::max(1, threads); i++) pool.emplace_back(scan);
+        for (auto & th : pool) th.join();
+        if (bad) {
+            fprintf(stderr, "cannot read %s for its maximum\n", p.name.c_str());
+            return 1;
+        }
+        if (amax > 0.0f) p.fp4_scale = amax / (6.0f * 448.0f);
+    }
+
     // output GGUF headers (metadata copied from the template; tensor infos in template order)
     const bool       write = !out.empty();
     gguf_context *   gb = nullptr, * gr = nullptr;
@@ -376,6 +415,9 @@ int pack(const std::vector<std::string> & args) {
             gguf_set_val_str(gr, "shoehorn.pack.id", id);
             gguf_set_val_str(gr, "shoehorn.pack.base_type", ggml_type_name(base_t));
             gguf_set_val_str(gr, "shoehorn.pack.residual_type", ggml_type_name(res_t));
+        }
+        for (const Plan & p : plans) {
+            if (p.fp4_scale != 1.0f) gguf_set_val_f32(gb, ("shoehorn.fp4_scale." + p.name).c_str(), p.fp4_scale);
         }
         for (const Plan & p : plans) {
             ggml_tensor * t = ggml_new_tensor(meta, p.base_type, p.n_dims, p.ne);
@@ -509,10 +551,16 @@ int pack(const std::vector<std::string> & args) {
                     }
                     if (p.base_type == GGML_TYPE_F32) std::memcpy(bd, w.data(), ne * 4);
                     else if (p.base_type == GGML_TYPE_BF16) ggml_fp32_to_bf16_row_ref(w.data(), (ggml_bf16_t *) bd, (int64_t) ne);
-                    else ggml_quantize_chunk(p.base_type, w.data(), bd, 0, nr, ncols, imat);
+                    else if (p.fp4_scale != 1.0f) {
+                        tmp.resize(ne);
+                        const float inv = 1.0f / p.fp4_scale;
+                        for (size_t i = 0; i < ne; i++) tmp[i] = w[i] * inv;
+                        ggml_quantize_chunk(p.base_type, tmp.data(), bd, 0, nr, ncols, imat);
+                    } else ggml_quantize_chunk(p.base_type, w.data(), bd, 0, nr, ncols, imat);
                     if (p.split) {
                         tmp.resize(ne);
                         tt_b->to_float(bd, tmp.data(), (int64_t) ne);
+                        if (p.fp4_scale != 1.0f) for (size_t i = 0; i < ne; i++) tmp[i] *= p.fp4_scale;
                         res.resize(ne);
                         for (size_t i = 0; i < ne; i++) {
                             res[i] = w[i] - tmp[i];

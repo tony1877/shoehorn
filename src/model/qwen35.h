@@ -387,6 +387,8 @@ private:
                            ggml_tensor * beta, int n, int ns = 1, ggml_tensor * cs_in = nullptr, ggml_tensor * ss_in = nullptr);
     // x*W^T, plus x*R^T when the residual is active and W has one
     ggml_tensor * mm(ggml_context * ctx, ggml_tensor * w, ggml_tensor * x);
+    // ggml_mul_mat times the weight's per-tensor FP4 scale, when its pack stored one (shoehorn.fp4_scale.<name>)
+    ggml_tensor * mulw(ggml_context * ctx, ggml_tensor * w, ggml_tensor * x);
     bool load_residual(const std::string & path, std::string & err);
     bool compute(ggml_context * ctx, ggml_cgraph * gf, std::string & err);
     bool replay(int keep, std::string & err, int row0 = 0,   // the first keep recorded tokens through the DeltaNet recurrence

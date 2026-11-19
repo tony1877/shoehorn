@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <thread>
+#include <unordered_map>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -155,6 +156,22 @@ bool seek(FILE * f, uint64_t off) {
 #else
     return fseeko(f, (off_t) off, SEEK_SET) == 0;
 #endif
+}
+
+// Per-tensor scales of FP4 bases (NVFP4 stores only an 8-bit scale per 16 weights; a pack that divides each tensor by
+// one FP32 factor first keeps those scales in UE4M3's normal range). Keyed by weight tensor, shared by every model
+// object that shares the tensors (drafts, MTP). Filled at load, read while building graphs.
+static std::unordered_map<const ggml_tensor *, float> g_wscale;
+
+static void note_wscale(const GgufFile & f, const std::string & name, const ggml_tensor * t) {
+    const float s = f.f32("shoehorn.fp4_scale." + name, 0.0f);
+    if (s > 0.0f && s != 1.0f) g_wscale[t] = s;
+}
+
+static ggml_tensor * apply_wscale(ggml_context * ctx, const ggml_tensor * w, ggml_tensor * y) {
+    if (g_wscale.empty()) return y;
+    const auto it = g_wscale.find(w);
+    return it == g_wscale.end() ? y : ggml_scale(ctx, y, it->second);
 }
 
 // Reads each (dst, file meta) tensor's bytes from `path` into its backend buffer.
@@ -317,6 +334,7 @@ bool Qwen35::load(const std::string & path, const LoadOptions & opt, std::string
         }
         ggml_tensor * t = ggml_dup_tensor(wctx_[gpu ? 0 : 1], m);
         ggml_set_name(t, name.c_str());
+        note_wscale(file_, name, t);
         to_load.emplace_back(t, m);
         return t;
     };
@@ -507,6 +525,7 @@ bool Qwen35::load(const std::string & path, const LoadOptions & opt, std::string
             const ggml_tensor * m = file_.tensor(mtp_p + nm);
             ggml_tensor *       t = ggml_dup_tensor(mctx_, m);
             ggml_set_name(t, (mtp_p + nm).c_str());
+            note_wscale(file_, mtp_p + nm, t);
             ml.emplace_back(t, m);
             return t;
         };
@@ -1755,6 +1774,10 @@ bool Qwen35::load_residual(const std::string & path, std::string & err) {
     return true;
 }
 
+ggml_tensor * Qwen35::mulw(ggml_context * ctx, ggml_tensor * w, ggml_tensor * x) {
+    return apply_wscale(ctx, w, ggml_mul_mat(ctx, w, x));
+}
+
 ggml_tensor * Qwen35::mm(ggml_context * ctx, ggml_tensor * w, ggml_tensor * x) {
     ggml_tensor * y = ggml_mul_mat(ctx, w, x);
     if (w->type == GGML_TYPE_NVFP4 || w->type == GGML_TYPE_MXFP4) {
@@ -1766,6 +1789,7 @@ ggml_tensor * Qwen35::mm(ggml_context * ctx, ggml_tensor * w, ggml_tensor * x) {
         const bool       q4  = act == 4 || (act != 8 && !use_res_);
         ggml_prec_set_src(y, q4 ? GGML_PREC_Q4 : GGML_PREC_Q8, 1);
     }
+    y = apply_wscale(ctx, w, y);
     if (use_res_) {
         auto it = res_.find(w);
         if (it != res_.end()) {
@@ -2360,7 +2384,7 @@ ggml_tensor * Qwen35::mtp_input(ggml_context * ctx, ggml_tensor * emb, ggml_tens
     const float eps = hp_.rms_eps;
     ggml_tensor * e = ggml_mul(ctx, ggml_rms_norm(ctx, emb, eps), mtp_enorm_);
     ggml_tensor * x = ggml_mul(ctx, ggml_rms_norm(ctx, hid, eps), mtp_hnorm_);
-    return ggml_mul_mat(ctx, mtp_eh_, ggml_concat(ctx, e, x, 0));  // fc([embedding | hidden])
+    return mulw(ctx, mtp_eh_, ggml_concat(ctx, e, x, 0));  // fc([embedding | hidden])
 }
 
 ggml_tensor * Qwen35::mtp_layer(ggml_context * ctx, ggml_cgraph * gf, ggml_tensor * x, int n, ggml_tensor * pos,
@@ -2373,15 +2397,15 @@ ggml_tensor * Qwen35::mtp_layer(ggml_context * ctx, ggml_cgraph * gf, ggml_tenso
     int sections[4] = { h.rope_sections[0], h.rope_sections[1], h.rope_sections[2], h.rope_sections[3] };
     auto norm = [&](ggml_tensor * t, ggml_tensor * w) { return ggml_mul(ctx, ggml_rms_norm(ctx, t, eps), w); };
     ggml_tensor * cur = norm(x, L.attn_norm);
-    ggml_tensor * Kc  = norm(ggml_reshape_3d(ctx, ggml_mul_mat(ctx, L.wk, cur), hd, h.n_head_kv, n), L.k_norm);
-    ggml_tensor * Vc  = ggml_reshape_3d(ctx, ggml_mul_mat(ctx, L.wv, cur), hd, h.n_head_kv, n);
+    ggml_tensor * Kc  = norm(ggml_reshape_3d(ctx, mulw(ctx, L.wk, cur), hd, h.n_head_kv, n), L.k_norm);
+    ggml_tensor * Vc  = ggml_reshape_3d(ctx, mulw(ctx, L.wv, cur), hd, h.n_head_kv, n);
     Kc = ggml_rope_multi(ctx, Kc, pos, nullptr, (int) h.n_rot, sections, GGML_ROPE_TYPE_IMROPE, (int) h.n_ctx_orig,
                          h.rope_freq_base, h.rope_freq_scale, h.rope_ext_factor, 1.0f, 32.0f, 1.0f);
     const int64_t row = hd * h.n_head_kv;
     ggml_build_forward_expand(gf, ggml_set_rows(ctx, mtp_k_, ggml_reshape_2d(ctx, Kc, row, n), kvidx));
     ggml_build_forward_expand(gf, ggml_set_rows(ctx, mtp_v_, ggml_reshape_2d(ctx, Vc, row, n), kvidx));
     if (!mask) return nullptr;
-    ggml_tensor * qg   = ggml_reshape_3d(ctx, ggml_mul_mat(ctx, L.wq, cur), hd * 2, h.n_head, n);
+    ggml_tensor * qg   = ggml_reshape_3d(ctx, mulw(ctx, L.wq, cur), hd * 2, h.n_head, n);
     const size_t  es   = ggml_element_size(qg);
     ggml_tensor * Qc   = ggml_view_3d(ctx, qg, hd, h.n_head, n, es * hd * 2, es * hd * 2 * h.n_head, 0);
     ggml_tensor * gate = ggml_cont_2d(ctx, ggml_view_3d(ctx, qg, hd, h.n_head, n, es * hd * 2, es * hd * 2 * h.n_head, es * hd),
@@ -2394,10 +2418,10 @@ ggml_tensor * Qwen35::mtp_layer(ggml_context * ctx, ggml_cgraph * gf, ggml_tenso
                                           ggml_permute(ctx, V, 0, 2, 1, 3), mask, 1.0f / sqrtf((float) hd), 0.0f, 0.0f);
     ggml_prec_set_acc(a, GGML_PREC_F32);
     a = ggml_mul(ctx, ggml_reshape_2d(ctx, a, hd * h.n_head, n), ggml_sigmoid(ctx, gate));
-    x = ggml_add(ctx, x, ggml_mul_mat(ctx, L.wo, a));
+    x = ggml_add(ctx, x, mulw(ctx, L.wo, a));
     ggml_tensor * y  = norm(x, L.post_norm);
-    ggml_tensor * ff = ggml_swiglu_split(ctx, ggml_mul_mat(ctx, L.ffn_gate, y), ggml_mul_mat(ctx, L.ffn_up, y));
-    return ggml_add(ctx, x, ggml_mul_mat(ctx, L.ffn_down, ff));
+    ggml_tensor * ff = ggml_swiglu_split(ctx, mulw(ctx, L.ffn_gate, y), mulw(ctx, L.ffn_up, y));
+    return ggml_add(ctx, x, mulw(ctx, L.ffn_down, ff));
 }
 
 bool Qwen35::mtp_step(int32_t tok, int pos, int hid_row, float * logits, int32_t * id, std::string & err, int topk) {
@@ -2422,7 +2446,7 @@ bool Qwen35::mtp_step(int32_t tok, int pos, int hid_row, float * logits, int32_t
     ggml_tensor * y  = mtp_layer(ctx, gf, mtp_input(ctx, inp_e, hsrc), 1, inp_p, inp_kv, inp_m);
     ggml_tensor * hn = ggml_mul(ctx, ggml_rms_norm(ctx, y, h.rms_eps), mtp_norm_);
     ggml_build_forward_expand(gf, ggml_cpy(ctx, hn, mtp_chain_));
-    ggml_tensor * out  = ggml_mul_mat(ctx, output_, hn);
+    ggml_tensor * out  = mulw(ctx, output_, hn);
     ggml_tensor * oids = nullptr;
     if (!logits) {
         out = ggml_argmax(ctx, out);
@@ -3758,11 +3782,11 @@ bool Qwen35::draft_mtp_multi(const std::vector<MtpItem> & items, int topk, bool 
     auto norm = [&](ggml_tensor * t, ggml_tensor * w) { return ggml_mul(ctx, ggml_rms_norm(ctx, t, eps), w); };
     ggml_tensor * x   = mtp_input(ctx, inp_e, hid);
     ggml_tensor * cur = norm(x, L.attn_norm);
-    ggml_tensor * Kc  = norm(ggml_reshape_3d(ctx, ggml_mul_mat(ctx, L.wk, cur), hd, h.n_head_kv, M), L.k_norm);
-    ggml_tensor * Vc  = ggml_reshape_3d(ctx, ggml_mul_mat(ctx, L.wv, cur), hd, h.n_head_kv, M);
+    ggml_tensor * Kc  = norm(ggml_reshape_3d(ctx, mulw(ctx, L.wk, cur), hd, h.n_head_kv, M), L.k_norm);
+    ggml_tensor * Vc  = ggml_reshape_3d(ctx, mulw(ctx, L.wv, cur), hd, h.n_head_kv, M);
     Kc = ggml_cont(ctx, ggml_rope_multi(ctx, Kc, inp_p, nullptr, (int) h.n_rot, sections, GGML_ROPE_TYPE_IMROPE, (int) h.n_ctx_orig,
                                         h.rope_freq_base, h.rope_freq_scale, h.rope_ext_factor, 1.0f, 32.0f, 1.0f));
-    ggml_tensor * qg   = ggml_reshape_3d(ctx, ggml_mul_mat(ctx, L.wq, cur), hd * 2, h.n_head, M);
+    ggml_tensor * qg   = ggml_reshape_3d(ctx, mulw(ctx, L.wq, cur), hd * 2, h.n_head, M);
     const size_t  es   = ggml_element_size(qg);
     ggml_tensor * Qc   = ggml_view_3d(ctx, qg, hd, h.n_head, M, es * hd * 2, es * hd * 2 * h.n_head, 0);
     ggml_tensor * gate = ggml_cont_2d(ctx, ggml_view_3d(ctx, qg, hd, h.n_head, M, es * hd * 2, es * hd * 2 * h.n_head, es * hd),
@@ -3786,17 +3810,17 @@ bool Qwen35::draft_mtp_multi(const std::vector<MtpItem> & items, int topk, bool 
         a = a ? ggml_concat(ctx, a, ai, 2) : ai;  // [hd, heads, M]
     }
     a = ggml_mul(ctx, ggml_reshape_2d(ctx, a, hd * h.n_head, M), ggml_sigmoid(ctx, gate));
-    x = ggml_add(ctx, x, ggml_mul_mat(ctx, L.wo, a));
+    x = ggml_add(ctx, x, mulw(ctx, L.wo, a));
     ggml_tensor * y  = norm(x, L.post_norm);
-    ggml_tensor * ff = ggml_swiglu_split(ctx, ggml_mul_mat(ctx, L.ffn_gate, y), ggml_mul_mat(ctx, L.ffn_up, y));
-    y                = ggml_add(ctx, x, ggml_mul_mat(ctx, L.ffn_down, ff));
+    ggml_tensor * ff = ggml_swiglu_split(ctx, mulw(ctx, L.ffn_gate, y), mulw(ctx, L.ffn_up, y));
+    y                = ggml_add(ctx, x, mulw(ctx, L.ffn_down, ff));
     ggml_tensor * hn = norm(y, mtp_norm_);  // [n_embd, M]: each item's chain goes on from here
     for (int64_t i = 0; i < M; i++) {
         const int b = items[(size_t) i].member;
         ggml_build_forward_expand(gf, ggml_cpy(ctx, ggml_view_2d(ctx, hn, h.n_embd, 1, hn->nb[1], hn->nb[1] * (size_t) i),
                                                ggml_view_2d(ctx, mtp_chains_, h.n_embd, 1, mtp_chains_->nb[1], mtp_chains_->nb[1] * (size_t) b)));
     }
-    ggml_tensor * out  = ggml_mul_mat(ctx, output_, hn);
+    ggml_tensor * out  = mulw(ctx, output_, hn);
     ggml_tensor * oids = nullptr;
     if (argmax) {
         out = ggml_argmax(ctx, out);
