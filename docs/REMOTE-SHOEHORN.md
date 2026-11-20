@@ -12,8 +12,8 @@ the admin bridge, SearXNG, the Playwright browser) keeps running where dsh runs,
 - **Models**: the 27B (`~/models/orca27b.base.gguf` IQ4_XS + `orca27b.res.gguf`, residual all in VRAM via
   `--res-gpu-gb 15`) is the default; `--also` adds Flash-Next (`~/models/flash-next`), GLM-5.3-Flash (`~/models/glm`)
   and DeepSeek-V4.1-Flash (`/data/deepseek`), swapped in on request.
-- **27B serving**: `--ctx 262144 --dense-slots 2`: two VRAM slots, each with its own 256K KV (q8_0 K / q4_0 V, 7 GB
-  each), so two conversations keep their prompts and each runs at the one-sequence speed; two at once take turns a
+- **27B serving**: `--ctx 409600 --dense-slots 2 --slot-ctx 409600,116736`: two VRAM slots with KVs of their own
+  (q8_0 K / q4_0 V; 400K for the main agent, 10.9 GB, and 114K for subagents, 3.1 GB), so two conversations keep their prompts and each runs at the one-sequence speed; two at once take turns a
   decode cycle at a time, and a long prompt read yields to the other slot every 2048 tokens
   ([MULTISEQ.md](MULTISEQ.md), "VRAM slots"). The expert models use `--slots 2` (parked in RAM).
 - **This PC**: `C:\models\shoehorn-url.txt` holds `http://192.168.68.54:8090`, so `C:\models\start-detached.ps1`

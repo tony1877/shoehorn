@@ -108,3 +108,11 @@ drafter, no joint verify: decoding requests take turns a cycle at a time. Rig (R
 q8_0/q4_0, 6.98 GB each, MTP on), dsh: one request alone 42.7 tok/s at 13.7K (draft 179 / verify 46 ms per cycle);
 two at once 24.9 and 63.6 tok/s with the same per-cycle times (182 / 47, 166 / 52 ms). `E8_VRAM_SLOTS=0` keeps the
 KV in RAM.
+
+Slots of different sizes (2026-11-20): `--slot-ctx 409600,116736` (with `--ctx 409600`, the biggest) gives the main
+agent a 400K slot and subagents a 114K one in the same 14 GB. A request goes to the slot whose state its prompt
+extends; a new conversation takes the smallest free slot that fits (prompt + up to 4096 output tokens), so the big
+slot stays with the conversation that needs it. A conversation that outgrows its slot moves into a free one that fits
+(`Qwen35::move_active`: a VRAM copy of its KV rows, MTP ring and checkpoint, no prompt read again). dsh, one main
+session with a subagent: the title on slot 1, the main agent on slot 0, the subagent on slot 1 with its prompt reused.
+The move itself is not exercised yet (it needs a subagent past 114K).

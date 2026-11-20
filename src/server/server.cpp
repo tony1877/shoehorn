@@ -1,7 +1,7 @@
 // `shoehorn serve`: OpenAI-compatible HTTP server (DESIGN.md M6).
 //
 //   shoehorn serve <model.gguf> [--res r.gguf] [--host 127.0.0.1] [--port 8090] [--alias NAME]
-//                  [--api-key-file F] [--chat-template-file F] [--ctx N] [--kv f16|q8_0|q4_0] [--kv-v TYPE] [--kv-lock] [--slots N] [--dense-slots N] [--kv-pool-gb G] [--spec auto|K]
+//                  [--api-key-file F] [--chat-template-file F] [--ctx N] [--kv f16|q8_0|q4_0] [--kv-v TYPE] [--kv-lock] [--slots N] [--dense-slots N] [--slot-ctx A,B,..] [--kv-pool-gb G] [--spec auto|K]
 //                  [--gpu-layers N] [--expert-cache-gb G] [--threads N] [--mtp N] [--mmproj enc.gguf]
 //
 // Endpoints: GET /health, GET /v1/models, POST /v1/chat/completions and POST /v1/completions (stream or not),
@@ -1206,11 +1206,17 @@ loaded:
     }
 
     // ---- prompt, with prefix reuse
-    if (prompt.empty() || (int) prompt.size() >= m.n_ctx() - 1) {
-        err = "prompt of " + std::to_string(prompt.size()) + " tokens does not fit the context (" + std::to_string(m.n_ctx()) + ")";
+    const int ctx_max = S.q35 ? S.q35->max_ctx() : m.n_ctx();  // (VRAM slots may differ in size: the biggest)
+    if (prompt.empty() || (int) prompt.size() >= ctx_max - 1) {
+        err = "prompt of " + std::to_string(prompt.size()) + " tokens does not fit the context (" + std::to_string(ctx_max) + ")";
         return false;
     }
-    if (max_tokens < 0 || max_tokens > m.n_ctx() - (int) prompt.size() - 16) max_tokens = m.n_ctx() - (int) prompt.size() - 16;
+    if (max_tokens < 0 || max_tokens > ctx_max - (int) prompt.size() - 16) max_tokens = ctx_max - (int) prompt.size() - 16;
+    // a slot fits this request when the prompt and a little output fit its context
+    const bool sized = S.q35 && S.q35->vram_slots();
+    auto fits = [&](int s) {
+        return !sized || S.q35->slot_ctx(s) >= (int) prompt.size() + std::min(std::max(max_tokens, 0), 4096) + 16;
+    };
     auto extends = [&](const std::vector<int32_t> & base) {
         return !base.empty() && base.size() < prompt.size() && std::equal(base.begin(), base.end(), prompt.begin());
     };
@@ -1252,7 +1258,10 @@ loaded:
     auto any_free = [&] {
         if (S.model.get() != &m) return true;
         if (parking) return std::none_of(S.slots.begin(), S.slots.end(), [](const Server::Slot & x) { return x.busy; });
-        return std::any_of(S.slots.begin(), S.slots.end(), [](const Server::Slot & x) { return !x.busy; });
+        for (int s = 0; s < (int) S.slots.size(); s++) {
+            if (!S.slots[(size_t) s].busy && fits(s)) return true;
+        }
+        return false;
     };
     if (!any_free()) turn.wait_for(any_free);
     if (S.model.get() != &m || (int) S.slots.size() != n_slots) {
@@ -1283,16 +1292,37 @@ loaded:
             slot = s;
         }
     }
+    // VRAM slots of different sizes: a conversation that outgrew its slot moves to a free one that fits (a VRAM copy
+    // of its state, no prompt read again); new conversations take the smallest free slot that fits, so the big one
+    // stays for the conversation that needs it
+    int move_from = -1;
+    if (slot >= 0 && !fits(slot)) {
+        int to = -1;
+        for (int s = 0; s < n_slots; s++) {
+            if (s == slot || S.slots[(size_t) s].busy || !fits(s)) continue;
+            if (to < 0 || S.slots[(size_t) s].used < S.slots[(size_t) to].used) to = s;
+        }
+        if (to >= 0 && !S.slots[(size_t) slot].state_tokens.empty() &&
+            (int) S.slots[(size_t) slot].state_tokens.size() == S.q35->slot_n_past(slot)) {
+            move_from = slot;
+        }
+        slot = to;
+    }
+    auto smaller = [&](int a, int b) { return sized && S.q35->slot_ctx(a) < S.q35->slot_ctx(b); };
     if (slot < 0) {
-        for (int s = 0; s < n_slots && slot < 0; s++) {
+        for (int s = 0; s < n_slots; s++) {
             const auto & x = S.slots[(size_t) s];
-            if (!x.busy && x.state_tokens.empty() && x.ck_tokens.empty()) slot = s;
+            if (!x.busy && fits(s) && x.state_tokens.empty() && x.ck_tokens.empty() && (slot < 0 || smaller(s, slot))) slot = s;
         }
     }
     if (slot < 0) {
         for (int s = 0; s < n_slots; s++) {
-            if (!S.slots[(size_t) s].busy && (slot < 0 || S.slots[(size_t) s].used < S.slots[(size_t) slot].used)) slot = s;
+            if (!S.slots[(size_t) s].busy && fits(s) && (slot < 0 || S.slots[(size_t) s].used < S.slots[(size_t) slot].used)) slot = s;
         }
+    }
+    if (slot < 0) {
+        err = "no free slot fits this prompt";
+        return false;
     }
     if (parking && slot != S.active_slot) {  // park the active conversation, bring this one's state back
         const auto t0 = std::chrono::steady_clock::now();
@@ -1327,8 +1357,25 @@ loaded:
     }
     std::optional<DraftLane> dlane;
     if (S.drafter) dlane.emplace(S);
+    if (move_from >= 0) {  // the conversation's state from its old slot into this one
+        const auto t0 = std::chrono::steady_clock::now();
+        if (!S.q35->select_slot(move_from, err) || !S.q35->move_active(slot, err)) return false;
+        auto & a = S.slots[(size_t) move_from];
+        auto & b = S.slots[(size_t) slot];
+        b.state_tokens = std::move(a.state_tokens);
+        b.ck_tokens    = std::move(a.ck_tokens);
+        b.cks          = std::move(a.cks);
+        a.state_tokens.clear();
+        a.ck_tokens.clear();
+        a.cks.clear();
+        a.epoch = S.q35->slot_epoch(move_from);
+        b.epoch = S.q35->slot_epoch(slot);
+        fprintf(stderr, "slot %d -> slot %d: conversation moved (%d tokens) in %.0f ms\n", move_from, slot, S.q35->slot_n_past(slot),
+                1e3 * std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    }
     if (S.q35 && !S.q35->select_slot(slot, err)) return false;
     sync_slot(slot);
+    if (sized && max_tokens > S.q35->slot_ctx(slot) - (int) prompt.size() - 16) max_tokens = S.q35->slot_ctx(slot) - (int) prompt.size() - 16;
     // hold the slot (and keep the model loaded) until this request ends
     struct Hold {
         Server & S;
@@ -1351,6 +1398,9 @@ loaded:
     } slot_hold(S, slot);
     auto & SL = S.slots[(size_t) slot];
     SL.used   = ++S.slot_clock;
+    // this request's position and context (another request's slot may be the active one between cycles)
+    auto my_past = [&] { return S.q35 ? S.q35->slot_n_past(slot) : m.n_past(); };
+    auto my_ctx  = [&] { return S.q35 ? S.q35->slot_ctx(slot) : m.n_ctx(); };
     R.slot    = slot;
     // between decode cycles: let the other requests run a cycle, then continue on this slot
     auto yield = [&]() {
@@ -1967,7 +2017,7 @@ loaded:
             dlane.reset();
             turn.release();
         }
-        while (!done && S.q35->slot_n_past(slot) + S.spec_k + 2 < m.n_ctx()) {
+        while (!done && S.q35->slot_n_past(slot) + S.spec_k + 2 < S.q35->slot_ctx(slot)) {
             if (think_open && text.find("</think>") != std::string::npos) think_open = false;
             bool cut = false;
             const int budget = req_think_budget > 0 ? req_think_budget : S.think_budget;
@@ -2206,7 +2256,7 @@ loaded:
                 const int h = (int) (prompt.size() + out.size());
                 for (; seen_upto < h; seen_upto++) seen[key_at(seen_upto - echo_n)] = seen_upto;
             };
-            while (!done && m.n_past() + echo_k + 2 < m.n_ctx()) {
+            while (!done && my_past() + echo_k + 2 < my_ctx()) {
                 if (!yield()) return false;
                 const auto a = sclk::now();
                 // echo (prompt lookup): when the last echo_n tokens occurred earlier in the prompt or the output, propose
@@ -2255,7 +2305,7 @@ loaded:
                     e_accepted += keep - 1;
                 }
             }
-            while (!done && m.n_past() + 2 < m.n_ctx()) {  // the last few positions of the context
+            while (!done && my_past() + 2 < my_ctx()) {  // the last few positions of the context
                 if (!yield() || !m.eval_last(&out.back(), 1, last.data(), err)) return false;
                 next();
                 consume();
@@ -2267,7 +2317,7 @@ loaded:
                      cycles ? 1e3 * t_draft / cycles : 0.0, cycles ? 1e3 * t_verify / cycles : 0.0);
             R.spec = b;
         } else {
-            while (!done && m.n_past() + 2 < m.n_ctx()) {
+            while (!done && my_past() + 2 < my_ctx()) {
                 if (!yield() || !m.eval_last(&out.back(), 1, last.data(), err)) return false;
                 next();
                 consume();
@@ -2488,6 +2538,7 @@ int serve(const std::vector<std::string> & args_in) {
     int  ubatch = 0;  // prompt batch size (0 = the model's default)
     int  fast_prefill = 0;  // > 0: read all but the last N prompt tokens without the residual
     int n_slots = 1, dense_slots = 1, draft_batch = 0;
+    std::vector<int> slot_ctx;
     double kv_pool_gb = 0, res_gpu_gb = 0;
     bool   res_gpu_given = false;  // without --res-gpu-gb the GPU fit profile decides
     std::string router_url;
@@ -2543,6 +2594,15 @@ int serve(const std::vector<std::string> & args_in) {
         // the dense model's own slots: each extra slot moves its KV to RAM and gathers it every verify (27B: 18-27
         // vs 47-53 tok/s at 15K context), so --slots applies to the expert models (parked states) and this stays 1
         else if (a == "--dense-slots") dense_slots = std::max(1, std::atoi(val().c_str()));
+        else if (a == "--slot-ctx") {  // VRAM slots' contexts, e.g. 409600,116736 (--ctx should be the biggest)
+            slot_ctx.clear();
+            const std::string v = val();
+            for (size_t i = 0; i < v.size();) {
+                const size_t j = v.find(',', i);
+                slot_ctx.push_back(std::atoi(v.substr(i, j == std::string::npos ? std::string::npos : j - i).c_str()));
+                i = j == std::string::npos ? v.size() : j + 1;
+            }
+        }
         else if (a == "--kv-pool-gb") kv_pool_gb = std::atof(val().c_str());
         else if (a == "--res-gpu-gb") {  // G, or "auto" (all free VRAM but 3 GB)
             const std::string v = val();
@@ -2748,6 +2808,7 @@ int serve(const std::vector<std::string> & args_in) {
     if (ubatch > 0) o.n_ubatch = ubatch;
     o.side_seq        = side && dense_slots == 1;
     o.n_slots         = dense_slots;
+    o.slot_ctx        = slot_ctx;
     S->generic_slots  = n_slots;
     o.kv_pool_gb      = kv_pool_gb;
     o.draft_batch     = dense_slots > 1 ? (draft_batch > 0 ? std::min(draft_batch, dense_slots) : std::min(dense_slots, 2)) : 1;

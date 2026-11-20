@@ -458,8 +458,17 @@ bool Qwen35::load(const std::string & path, const LoadOptions & opt, std::string
             if (opt.n_slots > 1 && !(std::getenv("E8_VRAM_SLOTS") && std::atoi(std::getenv("E8_VRAM_SLOTS")) == 0)) {
                 const int    ns    = opt.n_slots;
                 const double big1  = 0.15e9 * std::max(0, opt_.n_ubatch - 512) / 512.0;
+                // each slot's context: LoadOptions::slot_ctx (rounded to kKvPad, at most n_ctx_) or n_ctx_
+                vs_ctx_.assign((size_t) ns, n_ctx_);
+                if ((int) opt.slot_ctx.size() == ns) {
+                    for (int s = 0; s < ns; s++) {
+                        vs_ctx_[(size_t) s] = std::min(n_ctx_, std::max(kKvPad, (opt.slot_ctx[(size_t) s] + kKvPad - 1) / kKvPad * kKvPad));
+                    }
+                }
+                vs_rows_ = 0;
+                for (int c : vs_ctx_) vs_rows_ += c;
                 const double mring = (double) opt.mtp_window * (double) (ggml_row_size(kt, h.head_dim * h.n_head_kv) + ggml_row_size(vt, h.head_dim * h.n_head_kv));
-                const double need  = tok * (double) n_ctx_ * ns + state / 2.0 * ns + 0.05e9 * ns;
+                const double need  = tok * (double) vs_rows_ + state / 2.0 * ns + 0.05e9 * ns;
                 if (want_mtp && (double) fr - reserve - big1 - mtp_cost - mring * (ns - 1) >= need) {
                     nvs_    = ns;
                     mtp_on_ = true;
@@ -618,8 +627,9 @@ bool Qwen35::load(const std::string & path, const LoadOptions & opt, std::string
             rec_beta_[(size_t) il]   = ggml_new_tensor_2d(c, GGML_TYPE_F32, h.ssm_n_v, n_rec);
         } else {
             // (VRAM slots: one allocation for all slots' KV, each slot a view of n_ctx_ rows; see setup_vslots)
-            k_cache_[(size_t) il] = ggml_new_tensor_2d(c, kt, h.head_dim * h.n_head_kv, (int64_t) (Kd_ + W_) * nvs_);
-            v_cache_[(size_t) il] = ggml_new_tensor_2d(c, vt, h.head_dim * h.n_head_kv, (int64_t) (Kd_ + W_) * nvs_);
+            const int64_t rows = nvs_ > 1 ? vs_rows_ : (int64_t) (Kd_ + W_);
+            k_cache_[(size_t) il] = ggml_new_tensor_2d(c, kt, h.head_dim * h.n_head_kv, rows);
+            v_cache_[(size_t) il] = ggml_new_tensor_2d(c, vt, h.head_dim * h.n_head_kv, rows);
         }
     }
     if (mtp_on_) {
@@ -1129,13 +1139,15 @@ bool Qwen35::setup_vslots(std::string & err) {
     vsctx_[0]           = ggml_init(vp);
     vsctx_[1]           = ggml_init(vp);
     vs_.assign((size_t) ns, VSlot{});
-    auto view = [&](ggml_tensor * src, int64_t rows, int s) {
+    auto view = [&](ggml_tensor * src, int64_t rows, int64_t first) {
         ggml_tensor * t = ggml_new_tensor_2d(vsctx_[0], src->type, src->ne[0], rows);
-        ggml_backend_tensor_alloc(src->buffer, t, (uint8_t *) src->data + src->nb[1] * (size_t) rows * (size_t) s);
+        ggml_backend_tensor_alloc(src->buffer, t, (uint8_t *) src->data + src->nb[1] * (size_t) first);
         return t;
     };
+    int64_t first = 0;
     for (int s = 0; s < ns; s++) {
         VSlot & v = vs_[(size_t) s];
+        v.ctx     = vs_ctx_[(size_t) s];
         v.kr.assign((size_t) h.n_layer, nullptr);
         v.vr.assign((size_t) h.n_layer, nullptr);
         v.conv.assign((size_t) h.n_layer, nullptr);
@@ -1144,8 +1156,8 @@ bool Qwen35::setup_vslots(std::string & err) {
         v.ssm_ck  = s == 0 ? ssm_ck_ : std::vector<ggml_tensor *>((size_t) h.n_layer, nullptr);
         for (size_t il = 0; il < (size_t) h.n_layer; il++) {
             if (k_cache_[il]) {
-                v.kr[il] = view(k_cache_[il], Kd_ + W_, s);
-                v.vr[il] = view(v_cache_[il], Kd_ + W_, s);
+                v.kr[il] = view(k_cache_[il], v.ctx, first);
+                v.vr[il] = view(v_cache_[il], v.ctx, first);
             }
             if (conv_state_[il]) {
                 v.conv[il] = ggml_dup_tensor(vsctx_[1], conv_state_[il]);  // (allocated in VRAM below)
@@ -1153,9 +1165,10 @@ bool Qwen35::setup_vslots(std::string & err) {
             }
         }
         if (mtp_on_) {
-            v.mk = view(mtp_k_, Wm_, s);
-            v.mv = view(mtp_v_, Wm_, s);
+            v.mk = view(mtp_k_, Wm_, (int64_t) Wm_ * s);
+            v.mv = view(mtp_v_, Wm_, (int64_t) Wm_ * s);
         }
+        first += v.ctx;
     }
     vsbuf_[0] = ggml_backend_alloc_ctx_tensors_from_buft(vsctx_[1], ggml_backend_get_default_buffer_type(gpu_));
     if (!vsbuf_[0]) {
@@ -1187,11 +1200,18 @@ bool Qwen35::setup_vslots(std::string & err) {
         mtp_v_ = vs_[0].mv;
     }
     cur_slot_ = 0;
-    double gb = 0;
-    for (size_t il = 0; il < vs_[0].kr.size(); il++) {
-        if (vs_[0].kr[il]) gb += ((double) ggml_nbytes(vs_[0].kr[il]) + (double) ggml_nbytes(vs_[0].vr[il])) / 1e9;
+    n_ctx_ = W_ = vs_[0].ctx;
+    std::string desc;
+    for (const VSlot & v : vs_) {
+        double gb = 0;
+        for (size_t il = 0; il < v.kr.size(); il++) {
+            if (v.kr[il]) gb += ((double) ggml_nbytes(v.kr[il]) + (double) ggml_nbytes(v.vr[il])) / 1e9;
+        }
+        char b[64];
+        snprintf(b, sizeof b, "%s%d tokens (%.2f GB)", desc.empty() ? "" : ", ", v.ctx, gb);
+        desc += b;
     }
-    fprintf(stderr, "KV: %d slots in VRAM, %d tokens each (%.2f GB each)%s\n", ns, n_ctx_, gb, mtp_on_ ? ", MTP ring each" : "");
+    fprintf(stderr, "KV: %d slots in VRAM: %s%s\n", ns, desc.c_str(), mtp_on_ ? "; an MTP ring each" : "");
     return true;
 }
 
@@ -1226,6 +1246,7 @@ bool Qwen35::select_vslot(int s, std::string & err) {
     VSlot & t = vs_[(size_t) s];
     cur_slot_ = s;
     t.used    = ++use_clock_;
+    n_ctx_ = W_ = t.ctx;  // (slots may differ in size)
     k_cache_  = t.kr;
     v_cache_  = t.vr;
     conv_ck_  = t.conv_ck;
@@ -1260,6 +1281,60 @@ bool Qwen35::select_vslot(int s, std::string & err) {
     recorded_n_ = recorded_full_ = 0;
     host_valid_ = exact_upto_ = n_past_;
     far_rows_ = far_ws_ = 0;
+    return true;
+}
+
+bool Qwen35::move_active(int s, std::string & err) {
+    // VRAM slots: the active sequence into slot s (one big enough), a device-to-device copy of its KV rows, MTP ring and
+    // checkpoint; slot s becomes the active one and the old slot is emptied (its epoch moves on)
+    if (vs_.empty() || cur_slot_ < 0 || s < 0 || s >= (int) vs_.size() || s == cur_slot_ || dry_pending_ ||
+        vs_[(size_t) s].ctx < n_past_) {
+        err = "move_active: no such slot, or it is too small";
+        return false;
+    }
+    VSlot & o = vs_[(size_t) cur_slot_];
+    VSlot & t = vs_[(size_t) s];
+    ggml_init_params ip = { ggml_tensor_overhead() * (size_t) (t.kr.size() * 4 + 8), nullptr, true };
+    ggml_context *   c  = ggml_init(ip);
+    auto rows = [&](ggml_tensor * v, int n) {
+        ggml_tensor * x = ggml_new_tensor_2d(c, v->type, v->ne[0], n);
+        ggml_backend_tensor_alloc(v->buffer, x, v->data);
+        return x;
+    };
+    if (n_past_ > 0) {
+        for (size_t il = 0; il < o.kr.size(); il++) {
+            if (!o.kr[il]) continue;
+            ggml_backend_tensor_copy(rows(o.kr[il], n_past_), rows(t.kr[il], n_past_));
+            ggml_backend_tensor_copy(rows(o.vr[il], n_past_), rows(t.vr[il], n_past_));
+        }
+    }
+    ggml_free(c);
+    if (mtp_on_) {
+        ggml_backend_tensor_copy(o.mk, t.mk);
+        ggml_backend_tensor_copy(o.mv, t.mv);
+    }
+    for (size_t il = 0; il < conv_ck_.size(); il++) {
+        if (!conv_ck_[il]) continue;
+        ggml_backend_tensor_copy(conv_ck_[il], t.conv_ck[il]);
+        ggml_backend_tensor_copy(ssm_ck_[il], t.ssm_ck[il]);
+    }
+    o.n_past = o.rope_shift = o.ck_n_past = 0;
+    o.slot_pos.clear();
+    o.mtp_slot_pos.clear();
+    o.hid.clear();
+    o.epoch++;
+    cur_slot_ = s;
+    t.used    = ++use_clock_;
+    n_ctx_ = W_ = t.ctx;
+    k_cache_  = t.kr;
+    v_cache_  = t.vr;
+    conv_ck_  = t.conv_ck;
+    ssm_ck_   = t.ssm_ck;
+    if (mtp_on_) {
+        mtp_k_ = t.mk;
+        mtp_v_ = t.mv;
+    }
+    slot_pos_.resize((size_t) W_, -1);  // (positions below both sizes keep their rows: p % W_ == p)
     return true;
 }
 

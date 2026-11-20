@@ -125,6 +125,7 @@ struct LoadOptions {
     ggml_type kv_type      = GGML_TYPE_F16;
     ggml_type kv_type_v    = GGML_TYPE_COUNT;  // V cache type; GGML_TYPE_COUNT = kv_type
     bool      kv_lock      = false; // lock the RAM KV's pages in physical memory as they are taken (never paged out)
+    std::vector<int> slot_ctx;      // VRAM slots: each slot's context (empty = n_ctx each; n_ctx = the biggest)
     int       n_slots      = 1;     // sequence slots (see Qwen35::select_slot); in VRAM when all fit (vram_slots), else the KV in RAM
     bool      side_seq     = false; // one slot, KV in RAM: a second, parked sequence (see Qwen35::swap_side)
     double    kv_pool_gb   = 0;     // most RAM KV memory taken by all slots together; 0 = n_ctx tokens' worth
@@ -217,6 +218,15 @@ public:
     // VRAM slots (n_slots > 1 and every slot's whole KV fits in VRAM): each slot has a KV of its own in VRAM and runs
     // the one-sequence path; a switch copies only the recurrent state (VRAM to VRAM) and the MTP hidden row
     bool     vram_slots() const { return !vs_.empty(); }
+    // a slot's context (VRAM slots may differ: LoadOptions::slot_ctx), and the biggest
+    int      slot_ctx(int s) const { return !vs_.empty() ? vs_[(size_t) s].ctx : n_ctx_; }
+    int      max_ctx() const {
+        int m = n_ctx_;
+        for (const VSlot & v : vs_) m = std::max(m, v.ctx);
+        return m;
+    }
+    // VRAM slots: move the active sequence into slot s (at least as big; a VRAM copy of its rows), which becomes active
+    bool     move_active(int s, std::string & err);
     int      active_slot() const { return cur_slot_; }
     bool     select_slot(int s, std::string & err);
     int      slot_n_past(int s) const { return s == cur_slot_ ? n_past_ : !vs_.empty() ? vs_[(size_t) s].n_past : slots_[(size_t) s].n_past; }
@@ -530,10 +540,13 @@ private:
         std::vector<ggml_tensor *> conv, ssm;        // parked recurrent state (VRAM)
         std::vector<ggml_tensor *> conv_ck, ssm_ck;  // prompt-reuse checkpoint (RAM; slot 0's is the model's own)
         int                        n_past = 0, rope_shift = 0, ck_n_past = 0;
+        int                        ctx = 0;          // its context (rows of its KV)
         uint64_t                   epoch = 0, used = 0;
         std::vector<int>           slot_pos, mtp_slot_pos;
         std::vector<float>         hid;              // MTP: hidden state at n_past - 1 (empty = none)
     };
+    std::vector<int>           vs_ctx_;   // each VRAM slot's context, decided at load
+    int64_t                    vs_rows_ = 0;
     std::vector<VSlot>         vs_;
     int                        nvs_ = 1;  // KV allocations (VRAM slots), decided at load
     ggml_context *             vsctx_[2] = { nullptr, nullptr }, * vsctx_ck_ = nullptr;
