@@ -18,7 +18,10 @@
 // decode concurrently, a cycle each in turn. Model swaps and unloads wait until no request is decoding. A request
 // whose client disconnects stops at the next decode cycle.
 //
-// Sequence slots (--dense-slots N, 27B with the KV in RAM; --slots N is for the expert models, parked in RAM): the model keeps N sequences, each with its own prompt-reuse state,
+// Sequence slots (--dense-slots N for the 27B; --slots N is for the expert models, parked in RAM): when every slot's whole
+// KV fits in VRAM (--ctx is per slot: 2 x 262144 on 48 GB) each slot has a KV of its own and runs the one-sequence path at
+// the one-sequence speed, the slots decoding a cycle each in turn (Qwen35::vram_slots); else the KV is in RAM and the
+// lanes below apply. The model keeps N sequences, each with its own prompt-reuse state,
 // so N conversations (an agent and its subagents) run side by side without evicting each other's prompts. A slot
 // serves one request at a time; with more requests than slots the others wait for one. Decoding requests go through
 // two lanes that run at the same time: the draft lane (a slot drafter, Qwen35::make_slot_drafter, on its own CUDA
@@ -2801,7 +2804,8 @@ int serve(const std::vector<std::string> & args_in) {
         if (sp->q35 && sp->q35->has_residual()) sp->q35->set_fast_prefill(sp->fast_prefill);
         sp->slots.clear();
         sp->drafter.reset();
-        if (sp->q35 && sp->q35->n_slots() > 1 && sp->q35->has_residual()) {
+        // (VRAM slots run the one-sequence path, a cycle each in turn: no slot drafter)
+        if (sp->q35 && sp->q35->n_slots() > 1 && !sp->q35->vram_slots() && sp->q35->has_residual()) {
             auto d = std::make_unique<model::Qwen35>();
             if (!sp->q35->make_slot_drafter(*d, std::max(1, o.draft_batch), e)) {
                 e = "slot drafter: " + e;

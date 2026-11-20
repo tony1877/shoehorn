@@ -274,6 +274,11 @@ Qwen35::~Qwen35() {
     if (hbuf_) ggml_backend_buffer_free(hbuf_);
     if (hmem_) os_free(hmem_, hmem_bytes_);
     if (slbuf_) ggml_backend_buffer_free(slbuf_);
+    for (int i = 0; i < 2; i++) {
+        if (vsbuf_[i]) ggml_backend_buffer_free(vsbuf_[i]);
+        if (vsctx_[i]) ggml_free(vsctx_[i]);
+    }
+    if (vsctx_ck_) ggml_free(vsctx_ck_);
     if (slmem_) os_free(slmem_, slmem_bytes_);
     if (slctx_) ggml_free(slctx_);
     if (slbuf2_) ggml_backend_buffer_free(slbuf2_);
@@ -448,7 +453,27 @@ bool Qwen35::load(const std::string & path, const LoadOptions & opt, std::string
             const double mtp_cost = mtp_w + (double) opt.mtp_window * (double) (ggml_row_size(kt, h.head_dim * h.n_head_kv) + ggml_row_size(vt, h.head_dim * h.n_head_kv)) +
                                     4.0 * (double) h.n_embd * (double) (opt_.n_ubatch + 1);
             double       reserve = (std::getenv("E8_VRAM_RESERVE_GB") ? std::atof(std::getenv("E8_VRAM_RESERVE_GB")) * 1e9 : 0.15e9) + state;  // measured: 256K ctx, 7.9K window peaked at 15.5 of 16.3 GB
-            if (opt.n_slots > 1) {
+            // VRAM slots: every slot's whole KV fits in VRAM, so each runs the one-sequence path on a KV of its own
+            // (plus a parked recurrent state and MTP ring each); only the recurrent state is copied on a switch
+            if (opt.n_slots > 1 && !(std::getenv("E8_VRAM_SLOTS") && std::atoi(std::getenv("E8_VRAM_SLOTS")) == 0)) {
+                const int    ns    = opt.n_slots;
+                const double big1  = 0.15e9 * std::max(0, opt_.n_ubatch - 512) / 512.0;
+                const double mring = (double) opt.mtp_window * (double) (ggml_row_size(kt, h.head_dim * h.n_head_kv) + ggml_row_size(vt, h.head_dim * h.n_head_kv));
+                const double need  = tok * (double) n_ctx_ * ns + state / 2.0 * ns + 0.05e9 * ns;
+                if (want_mtp && (double) fr - reserve - big1 - mtp_cost - mring * (ns - 1) >= need) {
+                    nvs_    = ns;
+                    mtp_on_ = true;
+                } else if ((double) fr - reserve - big1 >= need) {
+                    nvs_ = ns;
+                }
+                if (std::getenv("E8_VRAM_DEBUG")) {
+                    fprintf(stderr, "vram slots: free %.2f GB, reserve %.2f, need %.2f for %d slots -> %s\n", fr / 1e9,
+                            (reserve + big1) / 1e9, need / 1e9, ns, nvs_ > 1 ? "yes" : "no (KV in RAM)");
+                }
+            }
+            if (nvs_ > 1) {
+                want = n_ctx_;
+            } else if (opt.n_slots > 1) {
                 // slots: no state snapshot; records past 64 rows; the slot drafter: 32-row records, its graphs and
                 // buffers (0.3 GB: 262K context, 4 slots peaked at 15.74 of 16.3 GB with 0.2; VRAM over-committed spills to
                 // system memory, 10x slower) and
@@ -473,7 +498,9 @@ bool Qwen35::load(const std::string & path, const LoadOptions & opt, std::string
             } else if ((double) fr - reserve - big >= kv) {
                 reserve += big;
             }
-            if (want_mtp && (double) fr - reserve - mtp_cost >= tok * (double) n_ctx_) {
+            if (nvs_ > 1) {
+                want = n_ctx_;  // (decided above)
+            } else if (want_mtp && (double) fr - reserve - mtp_cost >= tok * (double) n_ctx_) {
                 want    = n_ctx_;
                 mtp_on_ = true;
             } else if ((double) fr - reserve >= tok * (double) n_ctx_) {
@@ -500,7 +527,7 @@ bool Qwen35::load(const std::string & path, const LoadOptions & opt, std::string
             }
         }
         want = std::min<int64_t>(n_ctx_, want / kKvPad * kKvPad);
-        if (opt.n_slots > 1 && want >= n_ctx_) want = n_ctx_ - kKvPad;  // slots keep their sequences in the RAM KV
+        if (opt.n_slots > 1 && nvs_ == 1 && want >= n_ctx_) want = n_ctx_ - kKvPad;  // slots keep their sequences in the RAM KV
         if (opt.gpu_kv >= 0 && want >= n_ctx_) mtp_on_ = want_mtp;
         if (want_mtp && !mtp_on_) {
             fprintf(stderr, "MTP drafting off: its %.2f GB of VRAM would come out of the KV window\n",
@@ -578,7 +605,7 @@ bool Qwen35::load(const std::string & path, const LoadOptions & opt, std::string
         if (h.is_recurrent(il)) {
             conv_state_[(size_t) il] = ggml_new_tensor_1d(c, GGML_TYPE_F32, (h.ssm_d_conv - 1) * h.conv_channels());
             ssm_state_[(size_t) il]  = ggml_new_tensor_1d(c, GGML_TYPE_F32, h.ssm_d_state * h.ssm_d_state * h.ssm_n_v);
-            if (opt.n_slots <= 1) {  // (slots never snapshot: verifies are dry, drafting has working states)
+            if (opt.n_slots <= 1 || nvs_ > 1) {  // (RAM slots never snapshot: verifies are dry, drafting has working states)
                 conv_bak_[(size_t) il] = ggml_dup_tensor(c, conv_state_[(size_t) il]);
                 ssm_bak_[(size_t) il]  = ggml_dup_tensor(c, ssm_state_[(size_t) il]);
             }
@@ -590,14 +617,15 @@ bool Qwen35::load(const std::string & path, const LoadOptions & opt, std::string
             rec_g_[(size_t) il]      = ggml_new_tensor_2d(c, GGML_TYPE_F32, h.ssm_n_v, n_rec);
             rec_beta_[(size_t) il]   = ggml_new_tensor_2d(c, GGML_TYPE_F32, h.ssm_n_v, n_rec);
         } else {
-            k_cache_[(size_t) il] = ggml_new_tensor_2d(c, kt, h.head_dim * h.n_head_kv, Kd_ + W_);
-            v_cache_[(size_t) il] = ggml_new_tensor_2d(c, vt, h.head_dim * h.n_head_kv, Kd_ + W_);
+            // (VRAM slots: one allocation for all slots' KV, each slot a view of n_ctx_ rows; see setup_vslots)
+            k_cache_[(size_t) il] = ggml_new_tensor_2d(c, kt, h.head_dim * h.n_head_kv, (int64_t) (Kd_ + W_) * nvs_);
+            v_cache_[(size_t) il] = ggml_new_tensor_2d(c, vt, h.head_dim * h.n_head_kv, (int64_t) (Kd_ + W_) * nvs_);
         }
     }
     if (mtp_on_) {
         Wm_       = std::max(kKvPad, std::min(n_ctx_, opt.mtp_window / kKvPad * kKvPad));
-        mtp_k_    = ggml_new_tensor_2d(sctx_[0], kt, h.head_dim * h.n_head_kv, Wm_);
-        mtp_v_    = ggml_new_tensor_2d(sctx_[0], vt, h.head_dim * h.n_head_kv, Wm_);
+        mtp_k_    = ggml_new_tensor_2d(sctx_[0], kt, h.head_dim * h.n_head_kv, (int64_t) Wm_ * nvs_);
+        mtp_v_    = ggml_new_tensor_2d(sctx_[0], vt, h.head_dim * h.n_head_kv, (int64_t) Wm_ * nvs_);
         mtp_hid_  = ggml_new_tensor_2d(sctx_[0], GGML_TYPE_F32, h.n_embd, opt_.n_ubatch);
         mtp_chain_ = ggml_new_tensor_2d(sctx_[0], GGML_TYPE_F32, h.n_embd, 1);
         for (int il : opt.feature_layers) {
@@ -815,6 +843,8 @@ bool Qwen35::load(const std::string & path, const LoadOptions & opt, std::string
                 !hmem_ ? "pinned" : opt.kv_lock ? "locked as used" : "taken as used", W_);
         if (ns > 1) fprintf(stderr, " (+ %d draft far rows) per slot; %d slots, pool %.2f GB", Kd_, ns, (double) pool_bytes_ / 1e9);
         fprintf(stderr, "\n");
+    } else if (nvs_ > 1) {
+        if (!setup_vslots(err)) return false;
     } else if (opt.n_slots > 1) {
         err = "sequence slots need the KV in RAM (a GPU with all layers on it)";
         return false;
@@ -951,8 +981,9 @@ void Qwen35::sync_from(const Qwen35 & src) {
 }
 
 void Qwen35::reset() {
-    if (slots_.size() > 1) {
-        // the state buffers also hold the other slots' ring parts and slot 0's checkpoint: clear only this slot's
+    if (slots_.size() > 1 || nvs_ > 1) {
+        // the state buffers also hold the other slots' ring parts (VRAM slots: their KV) and slot 0's checkpoint:
+        // clear only this slot's
         for (size_t il = 0; il < conv_state_.size(); il++) {
             for (ggml_tensor * t : { conv_state_[il], ssm_state_[il], k_cache_[il], v_cache_[il] }) {
                 if (t) ggml_backend_tensor_memset(t, 0, 0, ggml_nbytes(t));
@@ -1086,7 +1117,160 @@ void Qwen35::park_active() {
     }
 }
 
+bool Qwen35::setup_vslots(std::string & err) {
+    // VRAM slots: k_cache_ / v_cache_ / mtp_k_ / mtp_v_ hold nvs_ slots' rows; each slot gets views of its own part,
+    // a parked recurrent state in VRAM and (slots 1..) a prompt-reuse checkpoint in RAM
+    const auto & h  = hp_;
+    const int    ns = nvs_;
+    for (int i = 0; i < 2; i++) {
+        if (sbuf_[i]) ggml_backend_buffer_clear(sbuf_[i], 0);  // (masked rows must be finite: every slot's, once)
+    }
+    ggml_init_params vp = { ggml_tensor_overhead() * (size_t) ((h.n_layer * 6 + 4) * ns + 8), nullptr, true };
+    vsctx_[0]           = ggml_init(vp);
+    vsctx_[1]           = ggml_init(vp);
+    vs_.assign((size_t) ns, VSlot{});
+    auto view = [&](ggml_tensor * src, int64_t rows, int s) {
+        ggml_tensor * t = ggml_new_tensor_2d(vsctx_[0], src->type, src->ne[0], rows);
+        ggml_backend_tensor_alloc(src->buffer, t, (uint8_t *) src->data + src->nb[1] * (size_t) rows * (size_t) s);
+        return t;
+    };
+    for (int s = 0; s < ns; s++) {
+        VSlot & v = vs_[(size_t) s];
+        v.kr.assign((size_t) h.n_layer, nullptr);
+        v.vr.assign((size_t) h.n_layer, nullptr);
+        v.conv.assign((size_t) h.n_layer, nullptr);
+        v.ssm.assign((size_t) h.n_layer, nullptr);
+        v.conv_ck = s == 0 ? conv_ck_ : std::vector<ggml_tensor *>((size_t) h.n_layer, nullptr);
+        v.ssm_ck  = s == 0 ? ssm_ck_ : std::vector<ggml_tensor *>((size_t) h.n_layer, nullptr);
+        for (size_t il = 0; il < (size_t) h.n_layer; il++) {
+            if (k_cache_[il]) {
+                v.kr[il] = view(k_cache_[il], Kd_ + W_, s);
+                v.vr[il] = view(v_cache_[il], Kd_ + W_, s);
+            }
+            if (conv_state_[il]) {
+                v.conv[il] = ggml_dup_tensor(vsctx_[1], conv_state_[il]);  // (allocated in VRAM below)
+                v.ssm[il]  = ggml_dup_tensor(vsctx_[1], ssm_state_[il]);
+            }
+        }
+        if (mtp_on_) {
+            v.mk = view(mtp_k_, Wm_, s);
+            v.mv = view(mtp_v_, Wm_, s);
+        }
+    }
+    vsbuf_[0] = ggml_backend_alloc_ctx_tensors_from_buft(vsctx_[1], ggml_backend_get_default_buffer_type(gpu_));
+    if (!vsbuf_[0]) {
+        err = "not enough VRAM for the slots' recurrent states";
+        return false;
+    }
+    // checkpoints of slots 1.. in RAM
+    ggml_init_params cp = { ggml_tensor_overhead() * (size_t) (h.n_layer * 2 * ns + 8), nullptr, true };
+    vsctx_ck_           = ggml_init(cp);
+    for (int s = 1; s < ns; s++) {
+        VSlot & v = vs_[(size_t) s];
+        for (size_t il = 0; il < (size_t) h.n_layer; il++) {
+            if (!conv_state_[il]) continue;
+            v.conv_ck[il] = ggml_dup_tensor(vsctx_ck_, conv_state_[il]);
+            v.ssm_ck[il]  = ggml_dup_tensor(vsctx_ck_, ssm_state_[il]);
+        }
+    }
+    if (ns > 1 && ggml_get_first_tensor(vsctx_ck_)) {
+        vsbuf_[1] = ggml_backend_alloc_ctx_tensors_from_buft(vsctx_ck_, ggml_backend_get_default_buffer_type(cpu_));
+        if (!vsbuf_[1]) {
+            err = "not enough RAM for the slots' prompt-reuse checkpoints";
+            return false;
+        }
+    }
+    k_cache_  = vs_[0].kr;
+    v_cache_  = vs_[0].vr;
+    if (mtp_on_) {
+        mtp_k_ = vs_[0].mk;
+        mtp_v_ = vs_[0].mv;
+    }
+    cur_slot_ = 0;
+    double gb = 0;
+    for (size_t il = 0; il < vs_[0].kr.size(); il++) {
+        if (vs_[0].kr[il]) gb += ((double) ggml_nbytes(vs_[0].kr[il]) + (double) ggml_nbytes(vs_[0].vr[il])) / 1e9;
+    }
+    fprintf(stderr, "KV: %d slots in VRAM, %d tokens each (%.2f GB each)%s\n", ns, n_ctx_, gb, mtp_on_ ? ", MTP ring each" : "");
+    return true;
+}
+
+bool Qwen35::select_vslot(int s, std::string & err) {
+    if (s == cur_slot_) {
+        vs_[(size_t) s].used = ++use_clock_;
+        return true;
+    }
+    if (dry_pending_) {
+        err = "select_slot: a dry eval is not committed";
+        return false;
+    }
+    const auto & h = hp_;
+    if (cur_slot_ >= 0) {  // park: the recurrent state (VRAM to VRAM), bookkeeping, the MTP hidden row
+        VSlot & o = vs_[(size_t) cur_slot_];
+        for (size_t il = 0; il < conv_state_.size(); il++) {
+            if (!conv_state_[il]) continue;
+            ggml_backend_tensor_copy(conv_state_[il], o.conv[il]);
+            ggml_backend_tensor_copy(ssm_state_[il], o.ssm[il]);
+        }
+        o.n_past       = n_past_;
+        o.rope_shift   = rope_shift_;
+        o.ck_n_past    = ck_n_past_;
+        o.slot_pos     = std::move(slot_pos_);
+        o.mtp_slot_pos = std::move(mtp_slot_pos_);
+        o.hid.clear();
+        if (mtp_on_ && hid_row_ >= 0) {
+            o.hid.resize((size_t) h.n_embd);
+            ggml_backend_tensor_get(mtp_hid_, o.hid.data(), mtp_hid_->nb[1] * (size_t) hid_row_, o.hid.size() * sizeof(float));
+        }
+    }
+    VSlot & t = vs_[(size_t) s];
+    cur_slot_ = s;
+    t.used    = ++use_clock_;
+    k_cache_  = t.kr;
+    v_cache_  = t.vr;
+    conv_ck_  = t.conv_ck;
+    ssm_ck_   = t.ssm_ck;
+    if (mtp_on_) {
+        mtp_k_ = t.mk;
+        mtp_v_ = t.mv;
+    }
+    for (size_t il = 0; il < conv_state_.size(); il++) {
+        if (!conv_state_[il]) continue;
+        if (t.n_past > 0) {
+            ggml_backend_tensor_copy(t.conv[il], conv_state_[il]);
+            ggml_backend_tensor_copy(t.ssm[il], ssm_state_[il]);
+        } else {
+            ggml_backend_tensor_memset(conv_state_[il], 0, 0, ggml_nbytes(conv_state_[il]));
+            ggml_backend_tensor_memset(ssm_state_[il], 0, 0, ggml_nbytes(ssm_state_[il]));
+        }
+    }
+    n_past_       = t.n_past;
+    rope_shift_   = t.rope_shift;
+    ck_n_past_    = t.ck_n_past;
+    slot_pos_     = std::move(t.slot_pos);
+    mtp_slot_pos_ = std::move(t.mtp_slot_pos);
+    if ((int) slot_pos_.size() != W_) slot_pos_.assign((size_t) W_, -1);
+    if ((int) mtp_slot_pos_.size() != Wm_) mtp_slot_pos_.assign((size_t) Wm_, -1);
+    hid_row_ = -1;
+    if (mtp_on_ && !t.hid.empty()) {
+        hid_row_ = opt_.n_ubatch - 1;
+        ggml_backend_tensor_set(mtp_hid_, t.hid.data(), mtp_hid_->nb[1] * (size_t) hid_row_, t.hid.size() * sizeof(float));
+    }
+    saved_n_past_ = saved_n_past1_ = 0;
+    recorded_n_ = recorded_full_ = 0;
+    host_valid_ = exact_upto_ = n_past_;
+    far_rows_ = far_ws_ = 0;
+    return true;
+}
+
 bool Qwen35::select_slot(int s, std::string & err) {
+    if (!vs_.empty()) {
+        if (s < 0 || s >= (int) vs_.size()) {
+            err = "no sequence slot " + std::to_string(s);
+            return false;
+        }
+        return select_vslot(s, err);
+    }
     if (slots_.empty() && s == 0) return true;
     if (s < 0 || s >= (int) slots_.size()) {
         err = "no sequence slot " + std::to_string(s);

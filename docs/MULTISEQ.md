@@ -98,3 +98,13 @@ at the least confident drafts, recursive rejection sampling. 6 seeds, temp 1.0, 
 - but branches are drafted one after another: draft time 396 -> 671 ms, so tok/s fell (26.5 -> 20.1, 33.5 -> 27.2).
 - only ~18% of tree cycles hit a rejection at a branch point: branch-point choice by base confidence is weak.
 Next: draft all branches in the same base passes (multi-sequence drafting), and branch where rejections happen.
+
+## VRAM slots (2026-11-20)
+
+When every slot's whole KV fits in VRAM (`--dense-slots N`, `--ctx` per slot), each slot gets a KV of its own (views
+into one allocation), a parked recurrent state in VRAM, an MTP ring and a prompt-reuse checkpoint in RAM, and runs
+the one-sequence path; a switch copies only the recurrent state (VRAM to VRAM) and the MTP hidden row. No slot
+drafter, no joint verify: decoding requests take turns a cycle at a time. Rig (RTX PRO 5000 48 GB, 2 x 262144 at
+q8_0/q4_0, 6.98 GB each, MTP on), dsh: one request alone 42.7 tok/s at 13.7K (draft 179 / verify 46 ms per cycle);
+two at once 24.9 and 63.6 tok/s with the same per-cycle times (182 / 47, 166 / 52 ms). `E8_VRAM_SLOTS=0` keeps the
+KV in RAM.

@@ -125,7 +125,7 @@ struct LoadOptions {
     ggml_type kv_type      = GGML_TYPE_F16;
     ggml_type kv_type_v    = GGML_TYPE_COUNT;  // V cache type; GGML_TYPE_COUNT = kv_type
     bool      kv_lock      = false; // lock the RAM KV's pages in physical memory as they are taken (never paged out)
-    int       n_slots      = 1;     // sequence slots (see Qwen35::select_slot); > 1 needs the KV in RAM
+    int       n_slots      = 1;     // sequence slots (see Qwen35::select_slot); in VRAM when all fit (vram_slots), else the KV in RAM
     bool      side_seq     = false; // one slot, KV in RAM: a second, parked sequence (see Qwen35::swap_side)
     double    kv_pool_gb   = 0;     // most RAM KV memory taken by all slots together; 0 = n_ctx tokens' worth
     int       draft_batch  = 1;     // slots: requests drafted at once (VRAM for draft_batch - 1 more recurrent states)
@@ -213,11 +213,14 @@ public:
     // hidden row copied to RAM; its ring parts stay in VRAM) and resumes slot s, cheap enough to switch every decode
     // cycle. A slot's RAM KV takes memory only as positions are written; when all slots together would pass the pool
     // budget, the least recently used idle slots are emptied first (slot_epoch() changes when that happens).
-    int      n_slots() const { return std::max(1, (int) slots_.size()); }
+    int      n_slots() const { return std::max(1, (int) std::max(slots_.size(), vs_.size())); }
+    // VRAM slots (n_slots > 1 and every slot's whole KV fits in VRAM): each slot has a KV of its own in VRAM and runs
+    // the one-sequence path; a switch copies only the recurrent state (VRAM to VRAM) and the MTP hidden row
+    bool     vram_slots() const { return !vs_.empty(); }
     int      active_slot() const { return cur_slot_; }
     bool     select_slot(int s, std::string & err);
-    int      slot_n_past(int s) const { return s == cur_slot_ ? n_past_ : slots_[(size_t) s].n_past; }
-    uint64_t slot_epoch(int s) const { return slots_.empty() ? 0 : slots_[(size_t) s].epoch; }
+    int      slot_n_past(int s) const { return s == cur_slot_ ? n_past_ : !vs_.empty() ? vs_[(size_t) s].n_past : slots_[(size_t) s].n_past; }
+    uint64_t slot_epoch(int s) const { return !vs_.empty() ? vs_[(size_t) s].epoch : slots_.empty() ? 0 : slots_[(size_t) s].epoch; }
     uint64_t kv_committed_bytes() const { return committed_bytes_; }
     // a pinned slot (a conversation in progress) is never emptied to make room in the KV pool
     void     pin_slot(int s, bool on) { if (!slots_.empty()) slots_[(size_t) s].pinned = on; }
@@ -521,6 +524,22 @@ private:
                   const std::vector<ggml_tensor *> & hk, const std::vector<ggml_tensor *> & hv,
                   const std::vector<ggml_tensor *> & sel, int kp);
     std::vector<KvSlot>        slots_;
+    struct VSlot {  // a VRAM slot (see vram_slots)
+        std::vector<ggml_tensor *> kr, vr;           // its KV: views of n_ctx_ rows into k_cache_ / v_cache_
+        ggml_tensor *              mk = nullptr, * mv = nullptr;  // its MTP ring
+        std::vector<ggml_tensor *> conv, ssm;        // parked recurrent state (VRAM)
+        std::vector<ggml_tensor *> conv_ck, ssm_ck;  // prompt-reuse checkpoint (RAM; slot 0's is the model's own)
+        int                        n_past = 0, rope_shift = 0, ck_n_past = 0;
+        uint64_t                   epoch = 0, used = 0;
+        std::vector<int>           slot_pos, mtp_slot_pos;
+        std::vector<float>         hid;              // MTP: hidden state at n_past - 1 (empty = none)
+    };
+    std::vector<VSlot>         vs_;
+    int                        nvs_ = 1;  // KV allocations (VRAM slots), decided at load
+    ggml_context *             vsctx_[2] = { nullptr, nullptr }, * vsctx_ck_ = nullptr;
+    ggml_backend_buffer_t      vsbuf_[2] = { nullptr, nullptr };
+    bool setup_vslots(std::string & err);
+    bool select_vslot(int s, std::string & err);
     struct SideSeq {  // the parked side sequence (swap_side)
         KvSlot               kv;  // its RAM KV region and bookkeeping
         int                  n_past = 0, host_valid = 0, exact_upto = 0, ck_n_past = 0, far_rows = 0, far_ws = 0, sum_upto = 0;
