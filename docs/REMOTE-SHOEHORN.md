@@ -1,41 +1,43 @@
 # shoehorn on a dedicated machine, dsh on this PC
 
 dsh only talks to shoehorn over HTTP (the OpenAI-compatible API on port 8090, plus `/stats` and the dashboard for the
-shoehorn panel), so the engine can run on another machine on the LAN. Everything the agent *does* (shell, files, REA,
+shoehorn panel), so the engine runs on another machine on the LAN. Everything the agent *does* (shell, files, REA,
 the admin bridge, SearXNG, the Playwright browser) keeps running where dsh runs, on this PC.
 
-## What is ready (2026-10-23)
+## Current setup (2026-11-20)
 
-- **shoehorn panel address** (`agent/packages/client/ui-shoehorn`): the status chip, dashboard and sensors read
-  shoehorn from the `url` setting of the `ui-shoehorn` row (empty = port 8090 on the PC that served the dsh page, as
-  before). The host writes it into the page as `__DSH_SHOEHORN_CONFIG__`.
-- **Start script remote mode** (`C:\models\start-detached.ps1`, outside this repo; backup
-  `start-detached.ps1.bak-20261023-remote`): while `C:\models\shoehorn-url.txt` holds a URL, it starts no local
-  shoehorn and warms up / checks that URL instead.
-- **Switch script** `scripts/use-remote-shoehorn.ps1`: flips this PC between local and remote shoehorn in one step
-  (dry run by default, `-Apply` to write, `-Local` to go back). It changes the four dsh model routes (`baseURL`), the
-  panel `url`, the start-script URL file, the watchdog's ports (3080 only when remote: it must not restart a local
-  shoehorn that is gone), and the "services on this machine" text in both agent presets.
-- **Sensors** need nothing: shoehorn serves them itself (Linux: the hwmon drivers; Windows: `shoehorn-hwmon` on the
-  same machine), so they move with shoehorn.
+- **The rig** (`aless@192.168.68.54`): Ubuntu 26.10, RTX PRO 5000 Blackwell 48 GB (capped at 300 W by
+  `/etc/systemd/system/gpu-powercap.service`), 30 GB RAM. shoehorn runs as the user unit
+  `~/.config/systemd/user/shoehorn.service` from `~/shoehorn/build/bin` on `0.0.0.0:8090`.
+- **Models**: the 27B (`~/models/orca27b.base.gguf` IQ4_XS + `orca27b.res.gguf`, residual all in VRAM via
+  `--res-gpu-gb 15`) is the default; `--also` adds Flash-Next (`~/models/flash-next`), GLM-5.3-Flash (`~/models/glm`)
+  and DeepSeek-V4.1-Flash (`/data/deepseek`), swapped in on request.
+- **27B serving**: `--ctx 262144 --dense-slots 2`: two VRAM slots, each with its own 256K KV (q8_0 K / q4_0 V, 7 GB
+  each), so two conversations keep their prompts and each runs at the one-sequence speed; two at once take turns a
+  decode cycle at a time, and a long prompt read yields to the other slot every 2048 tokens
+  ([MULTISEQ.md](MULTISEQ.md), "VRAM slots"). The expert models use `--slots 2` (parked in RAM).
+- **This PC**: `C:\models\shoehorn-url.txt` holds `http://192.168.68.54:8090`, so `C:\models\start-detached.ps1`
+  starts no local shoehorn; dsh's model routes and the shoehorn panel point at the rig
+  (`scripts/use-remote-shoehorn.ps1 -Local -Apply` goes back).
+- **Images**: encoded on the rig itself (no `--encoder-url`); the laptop's encoder on the direct cable link is not
+  reachable from the rig and is no longer used for this.
 
-## Moving day
+## Updating the rig
 
-1. **Server**: install shoehorn and the models (the 27B pair, ~30 GB; Flash-Next optional, ~80 GB). Start it with the
-   same flags as `C:\models\start-detached.ps1` uses today, adjusted to the new paths, and `--host 0.0.0.0 --port 8090`.
-   On a 48 GB GPU the whole residual fits in VRAM: `--res-gpu-gb auto`.
-2. **API key**: copy `DEEPSEEK_API_KEY` from this PC's `~\.dsh\.env` into the server's `--api-key-file`. Both sides must
-   use the same key; dsh sends it on every request.
-3. **Firewall**: allow TCP 8090 inbound on the server, from this PC only if possible. The API is plain HTTP with a key.
-4. **This PC**: `.\scripts\use-remote-shoehorn.ps1 -Url http://<server>:8090` (check the dry run), then add `-Apply`,
-   stop dsh and run `C:\models\start-detached.ps1`. Confirm: the shoehorn chip shows the model, and a chat answers.
-5. **Free the GPU here**: nothing else to do; shoehorn is no longer started on this PC.
+Engine changes are edited on this PC, pushed, then built and tested on the rig:
+
+```
+ssh aless@192.168.68.54
+cd ~/shoehorn && git pull --ff-only && cmake --build build -j 12
+systemctl --user restart shoehorn
+```
+
+`build-dev` is a second build tree for experiments (run it by hand on port 8090 after `systemctl --user stop
+shoehorn`, then start the service again). The service's request timings (numbers only) go to
+`~/models/bench/shoehorn-timing.jsonl`.
 
 ## Known gaps
 
-- **Image encoder**: shoehorn sends images to the laptop's encoder at `http://10.77.0.2:8091`, over the direct cable
-  link between this PC and the laptop. A server on the normal LAN cannot reach that address: give the laptop's
-  encode-server a LAN address the server can reach (and change `--encoder-url`), or let images encode on the
-  server's CPU/GPU (with 48 GB the vision encoder can run on the server's own GPU).
-- **The watchdog task's new ports** apply at its next start (logon), as the running loop keeps its arguments.
+- **The watchdog task's ports** apply at its next start (logon), as the running loop keeps its arguments.
 - **Speed**: streaming over a LAN adds ~1 ms per chunk; nothing to tune.
+- **Firewall**: the API is plain HTTP with a key; keep TCP 8090 reachable from this PC only.

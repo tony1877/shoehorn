@@ -1,4 +1,4 @@
-# Status: what is done and what is left (2026-10-15)
+# Status: what is done and what is left (2026-11-20)
 
 One page across the project; details live in the linked documents.
 
@@ -13,6 +13,12 @@ One page across the project; details live in the linked documents.
 | Speed research | Measured and dropped: zero-copy GEMM, CPU residual slice, draft alternatives, coupled sampling, prose imatrix, small drafters, EAGLE-3 inputs, tree drafting, verify-level leaves. Kept: Q3_K residual (+7.5%) | [SPEEDUP-PLAN.md](SPEEDUP-PLAN.md), [DECODE-LIMITS.md](DECODE-LIMITS.md) |
 | Vision | Images in chat requests (base64 or http(s) URLs), encoder on the GPU on 24 GB+ cards (0.03 s per image) else the CPU (2 s), prompt reuse image-aware, Models page encoder setting and mmproj download, dsh `read_image` and dropped or pasted images working (no attach button: drop or paste), Linux build checked | [VISION.md](VISION.md) |
 | Server review fixes | Answer-cap check every 256 bytes; `tool_recovery` test runs in Release (`ctest -R tool_recovery`) | `tests/tool_recovery.cpp` |
+| Dedicated server | shoehorn runs on the rig (Ubuntu, RTX PRO 5000 48 GB) since 2026-10-23; dsh on this PC reaches it over the LAN | [REMOTE-SHOEHORN.md](REMOTE-SHOEHORN.md) |
+| More models | Flash-Next (MTP + echo drafting, experts read once per prompt with parallel prefetch), GLM-5.3-Flash (`glm5-next`: mHC, KDA, sparse MLA, GPU expert cache, MTP drafting), DeepSeek-V4.1-Flash (`deepseek41`, vocab sidecar); served beside the 27B with `--also`, `--slots N` parked in RAM | commits of 2026-11-07/08 |
+| Sequence slots on the 27B | `--dense-slots 2 --ctx 262144`: each slot has its own KV in VRAM and runs at the one-sequence speed (42.7 tok/s alone at 13.7K); two at once take turns per decode cycle (same per-cycle times), and prompt reads yield every 2048 tokens. The dashboard's live rate counts all requests together | [MULTISEQ.md](MULTISEQ.md) |
+| dsh upgrades | dsh 0.2.1-rc.2 (2026-10-18) and 0.2.2-rc.1 (2026-11-07) merged with our patches; dark theme in Claude's palette; request images always JPEG | [DSH-UPGRADE.md](DSH-UPGRADE.md) |
+| Prefill speed | Sparse prefill with the KV in VRAM; 2-high GQA tiles for prompt batches (+25% attention); a stopped request stops within one 2048-token piece, keeping what was read | commits of 2026-11-18 |
+| NVFP4 base (tested, not live) | Per-tensor FP32 scale + imatrix-weighted scale search (24% lower weighted error than ggml's NVFP4). Packed 27B: prefill 1.29x faster than IQ4_XS (110K: 42.2 vs 54.5 s), decode 11% slower (72.8 vs 81.8 tok/s), KLD 0.0018 with the residual. IQ4_XS stays live | `src/cli/pack.cpp`, `patches/ggml-nvfp4-scale-search.patch` |
 | Agent integrations | dsh Settings → Integrations, checked live 2026-10-18. **MCP:** servers from presets or custom (local, HTTP, SSE), live status, server output, call stats, tool allowlists, look-up-on-demand tools (`mcp_search` / `mcp_call`), approval modes, OAuth. **Telegram bot:** pairing codes; chat with text and photos; answers as formatted messages; approvals and questions with buttons; resumed after restarts. **Webhooks:** signed or token-auth, new chat or same chat, presets (GitHub issues and CI, Home Assistant / Zapier), persistent delivery log. **Notifications:** Discord, Slack, ntfy, signed JSON, or Telegram, with a minimum turn length and links that open the chat. The Telegram path was run end to end against a fake Bot API: answer relayed, approval button, photo read by the model, chat resumed after a restart. A real bot token needs your @BotFather account | `agent/packages/integrations/integrations/README.md` |
 
 ## Left
@@ -42,6 +48,7 @@ One page across the project; details live in the linked documents.
 - Full-layer KV staging at 200K: dropped, the engine uses sparse attention, not the streamed design it was modelled on; long context costs 73 ms per verify at 200K, mostly the selected pages ([SPEEDUP-PLAN.md](SPEEDUP-PLAN.md) section 10).
 - Self-distilled MTP head: exported and A/B tested, dropped. MTP kept rises by 0.02 but tok/s stays within noise, and
   the Q8_0 head shrinks the KV window to 6.9K tokens ([SPEEDUP-PLAN.md](SPEEDUP-PLAN.md) section 2).
+- NVFP4 base: faster prefill, slower decode on this card; not switched on (table above).
 - No speed item is left open.
 
 ### Review items left open (decisions for the owner)
@@ -88,14 +95,14 @@ One page across the project; details live in the linked documents.
 - Live checks (agent_consistency.py F-J), all passing: output-limit note; a client abort mid-answer, then the
   conversation goes on (answered, prompt reused); an exact signature recalled ~50K tokens back; a four-step tool
   loop with reasoning reuses every earlier step (587/659, 654/726, 721/793 tokens); two sessions at once both
-  answered (the second waits its turn: no slots, the full context window stays).
+  answered (then the second waited its turn; since 2026-11-20 each gets a VRAM slot of its own).
 - Checked, no change: dsh compaction keeps exact paths and file state and dsh refuses edits to unread or changed
   files; shell output is capped at 64 KB and `read` at 2000 lines; a session with images switched to Flash-Next (text
   only) goes on, the images sent as text placeholders.
 
 ### Small
 
-- The Models page shows the RTX 5080 as "17 GB" (VRAM rounding).
+- The Models page showed the RTX 5080 as "17 GB" (VRAM rounding); the rig's card not checked.
 - AUR files already point at 0.2.0 (push them when AUR registration reopens).
 - **Idle unload switch** (2026-10-17): the dashboard header has a "model" selector: stay loaded (warm), or unload after 5 min / 15 min / 1 h idle. `POST /idle-unload {"seconds": N}` applies it without a restart (the unloader waits for its turn, so a running answer is never cut), saves `--idle-unload` in the settings file, and "stay loaded" reloads a freed model at once. `/stats` reports `idle_unload`. Checked live: freed 36 s after a 30 s setting, reloaded 14 s after "stay loaded".
 
