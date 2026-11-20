@@ -1614,7 +1614,9 @@ loaded:
                 }
                 // read in pieces so a stopped request ends within one piece (a 400K-token prompt reads for ~15
                 // minutes); set_prompt_end keeps --fast-prefill's split where it would be in one call
-                const size_t piece = cancelled ? kCancelPiece : to - p;
+                // (VRAM slots: also so the other slots' requests decode a cycle between pieces)
+                const bool   share = S.q35 && S.q35->vram_slots();
+                const size_t piece = cancelled || share ? kCancelPiece : to - p;
                 const size_t end   = std::min(to, p + piece);
                 // prefill() counts from 0 on every call: move the base along, or progress restarts at each checkpoint
                 S.live_read_base = (int) p;
@@ -1622,6 +1624,10 @@ loaded:
                 ok = m.prefill(prompt.data() + p, (int) (end - p), last.data(), err);
                 p  = end;
                 if (ok && p == to && to < next) save_ck(to);
+                if (ok && share && p < b) {  // (another request may have changed the prompt end meanwhile)
+                    ok = yield();
+                    S.q35->set_prompt_end((int) prompt.size());
+                }
                 if (ok && p < b && cancelled && cancelled()) {
                     // keep what was read: the state holds exactly prompt[0, p), so a resend continues from p
                     SL.state_tokens.assign(prompt.begin(), prompt.begin() + (long long) p);
