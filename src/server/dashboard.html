@@ -549,16 +549,19 @@ async function poll() {
   else readHist = [];
   const writing = live.busy && live.gen > 0;
   if (writing) {
-    if (prevGen != null && live.gen < prevGen) genHist = [];  // a new answer started
+    // all requests' tokens together (slots decode side by side; one request's count jumps between them)
+    const G = live.gen_total ?? live.gen;
+    if (prevGen != null && G < prevGen) genHist = [];  // a new answer started (or the server restarted)
     // the answer's first tokens arrived during the last poll interval: anchor 0 tokens just before them
     if (!genHist.length) genHist.push({ t: nowS - .25, g: 0 });
-    prevGen = live.gen; prevT = nowP;
+    prevGen = G; prevT = nowP;
     // tokens over the last 2 seconds, never over less than 1 s: checks land in bursts ~270 ms apart, so a short
     // window holding two bursts would read double
-    genHist.push({ t: nowS, g: live.gen });
+    if (genHist.length === 1 && live.gen_total != null) genHist[0].g = G - live.gen;  // (anchor: before this answer)
+    genHist.push({ t: nowS, g: G });
     while (genHist.length > 2 && nowS - genHist[1].t >= 2) genHist.shift();
     const o = genHist[0];
-    rate = (live.gen - o.g) / Math.max(1, nowS - o.t);
+    rate = (G - o.g) / Math.max(1, nowS - o.t);
   } else { prevGen = null; rate = null; genHist = []; }
   // between turns of a session (tool calls, prompt reading) the line drops to 0 instead of breaking
   const inSession = live.busy || (live.last_end_s != null && live.last_end_s < 60);

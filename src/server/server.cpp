@@ -256,6 +256,10 @@ struct Server {
     std::deque<json>                 recent;
     std::atomic<bool>                live_busy{ false };
     std::atomic<int>                 live_gen{ 0 }, live_prompt{ 0 };
+    // slots decode side by side: tokens written by every request together (never reset, so the dashboard's rate
+    // does not jump between requests) and the requests in progress
+    std::atomic<long long>           live_gen_total{ 0 };
+    std::atomic<int>                 live_active{ 0 };
     std::atomic<int64_t>             live_start_ms{ 0 };
     std::atomic<bool>                live_reading{ false };  // reading the prompt (prefill), not writing yet
     std::atomic<int>                 live_read_base{ 0 };   // prompt tokens before the current prefill call
@@ -1489,9 +1493,15 @@ loaded:
     S.live_reading   = true;
     S.live_busy      = true;
     S.live_start_ms  = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-    struct LiveEnd {  // a request that fails or stops early leaves the live state idle
+    S.live_active++;
+    struct LiveEnd {  // a request that fails or stops early leaves the live state idle (when it was the only one)
         Server & S;
-        ~LiveEnd() { S.live_busy = false; S.live_reading = false; }
+        ~LiveEnd() {
+            if (--S.live_active == 0) {
+                S.live_busy    = false;
+                S.live_reading = false;
+            }
+        }
     } live_end{ S };
     // text runs through prefill(); an image run is encoded (GPU or CPU) and read as embeddings at its M-RoPE positions
     auto eval_image = [&](const ImgSpan & sp) {
@@ -1782,6 +1792,7 @@ loaded:
             text += common_token_to_piece(S.vocab, t, true);
             R.n_gen++;
             S.live_gen = R.n_gen;
+            S.live_gen_total++;
             for (const std::string & s : stops) {
                 const size_t pos = s.empty() ? std::string::npos : text.find(s);
                 if (pos != std::string::npos) {
@@ -2314,7 +2325,7 @@ loaded:
     }
 
     S.last_used = std::chrono::steady_clock::now();
-    S.live_busy = false;
+    if (S.live_active <= 1) S.live_busy = false;
     {  // numbers only: never prompt or output text
         const auto now_sys = std::chrono::system_clock::now();
         const auto t0_sys  = now_sys - std::chrono::duration_cast<std::chrono::system_clock::duration>(
@@ -3007,7 +3018,8 @@ int serve(const std::vector<std::string> & args_in) {
             out["recent"] = json::array();
             for (auto & r : S->recent)
                 if (r.value("t", 0.0) > since) out["recent"].push_back(r);
-            out["live"] = { { "busy", S->live_busy.load() }, { "model", S->live_model }, { "gen", S->live_gen.load() },
+            out["live"] = { { "busy", S->live_busy.load() || S->live_active.load() > 0 }, { "model", S->live_model }, { "gen", S->live_gen.load() },
+                            { "gen_total", S->live_gen_total.load() }, { "active", S->live_active.load() },
                             { "prompt", S->live_prompt.load() }, { "elapsed_s", (now_ms - S->live_start_ms.load()) / 1e3 } };
             if (S->live_busy && S->live_reading) {  // prompt tokens read so far (cached ones count as read)
                 out["live"]["reading"] = true;
